@@ -184,21 +184,32 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          # Find signtool (multiple possible locations on Windows runner)
-          $signtoolCandidates = @(
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe",
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
-          )
-          $signtool = $signtoolCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $signtool) {
-            Write-Error "signtool.exe not found in known locations"
+          # Dynamic signtool discovery via glob (Windows SDK version varies
+          # across runner images; hardcoded paths brittle)
+          $sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          if (-not (Test-Path $sdkRoot)) {
+            Write-Error "Windows SDK root not found: $sdkRoot"
             exit 1
           }
-          Write-Host "Using signtool: $signtool"
+
+          # Glob: find latest x64 signtool.exe (newest SDK version preferred)
+          $signtool = Get-ChildItem -Path $sdkRoot -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue `
+            | Where-Object { $_.FullName -match '\\x64\\' -and $_.FullName -notmatch 'arm' } `
+            | Sort-Object FullName -Descending `
+            | Select-Object -First 1
+
+          if (-not $signtool) {
+            Write-Host "Available SDK contents:"
+            Get-ChildItem -Path $sdkRoot -Directory | ForEach-Object { Write-Host "  $($_.Name)" }
+            Write-Error "signtool.exe not found via glob in $sdkRoot"
+            exit 1
+          }
+
+          Write-Host "Using signtool: $($signtool.FullName)"
+          $signtoolPath = $signtool.FullName
 
           # Sign with ephemeral PFX + RFC 3161 timestamp
-          & $signtool sign `
+          & $signtoolPath sign `
             /f "${{ steps.cert.outputs.pfx_path }}" `
             /p "${{ steps.cert.outputs.pfx_pass }}" `
             /tr "http://timestamp.digicert.com" `
@@ -218,17 +229,22 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $signtoolCandidates = @(
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe",
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
-          )
-          $signtool = $signtoolCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          # Reuse signtool discovery (DRY)
+          $sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $signtool = Get-ChildItem -Path $sdkRoot -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue `
+            | Where-Object { $_.FullName -match '\\x64\\' -and $_.FullName -notmatch 'arm' } `
+            | Sort-Object FullName -Descending `
+            | Select-Object -First 1
+          if (-not $signtool) {
+            Write-Error "signtool.exe not found"
+            exit 1
+          }
+          $signtoolPath = $signtool.FullName
 
           # Verify with /pa (default policy auth) + /v (verbose)
           # NOT: /pa CA chain valid expect ETMEZ self-signed için, ama signature
           # itself + timestamp doğrulanır
-          $verifyOutput = & $signtool verify /pa /v "dist/endpoint-agent.exe" 2>&1
+          $verifyOutput = & $signtoolPath verify /pa /v "dist/endpoint-agent.exe" 2>&1
           $verifyExit = $LASTEXITCODE
 
           # Save verify log
