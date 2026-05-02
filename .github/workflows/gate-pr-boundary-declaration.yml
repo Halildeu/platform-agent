@@ -31,7 +31,7 @@ jobs:
 
       - name: Validate PR body has boundary declaration block
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
@@ -39,18 +39,19 @@ jobs:
           # Required heading (ADR-0011 §2.3 analog)
           HEADING="## Boundary declaration (ADR-0011 §2.3)"
 
-          if [ -z "${PR_BODY:-}" ]; then
+          # Fetch PR body via gh CLI (env transfer drops newlines; gh API preserves)
+          PR_BODY_FILE=$(mktemp)
+          gh pr view "${PR_NUMBER}" --json body --jq .body > "${PR_BODY_FILE}"
+
+          if [ ! -s "${PR_BODY_FILE}" ]; then
             echo "::error::PR body is empty — boundary declaration block missing"
             echo "Required: '${HEADING}' block with 6 checkboxes"
             echo "Reference: ADR-0012-EA BG-EA-1 governance guard"
             exit 1
           fi
 
-          # Multi-line check: write PR body to temp file (echo collapses newlines
-          # in some shells; printf preserves but tempfile is most reliable for grep)
-          PR_BODY_FILE=$(mktemp)
-          # shellcheck disable=SC2059
-          printf '%s' "${PR_BODY}" > "${PR_BODY_FILE}"
+          echo "DEBUG: PR body size = $(wc -c < "${PR_BODY_FILE}") bytes"
+          echo "DEBUG: PR body lines = $(wc -l < "${PR_BODY_FILE}")"
 
           if ! grep -qF "${HEADING}" "${PR_BODY_FILE}"; then
             echo "::error::PR body missing '${HEADING}' block"
