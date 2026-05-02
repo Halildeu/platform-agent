@@ -1,0 +1,19 @@
+# Build outputs
+bin/
+dist/
+coverage.out
+
+# Local runtime state
+.env
+.env.local
+*.log
+*.pid
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Temporary files
+tmp/
+.cache/
