@@ -2,17 +2,33 @@
 
 `platform-agent`, endpoint yonetim urununun Windows/macOS agent reposudur.
 
-Ana platform yerlesimi:
+> **Visibility**: PRIVATE (pre-prod). Faz 22.3 stable + Authenticode signing + audit hash-chain + IT pilot live olduktan sonra public visibility kullanici karariyla yeniden degerlendirilir.
+> **License**: Apache License 2.0 (bkz `LICENSE`).
+> **Status**: Faz 22.1 Lab tier hazirligi. Detaylar `docs/TRACKING-ROADMAP.md`.
+
+Ana platform yerlesimi (4-component, 4 repo — `Halildeu/platform-k8s-gitops` `docs/adr/0012-EA-endpoint-admin-governance-charter.md`):
+
+```text
+Halildeu/platform-backend         endpoint-admin-service/    (REST API, Go)
+Halildeu/platform-web              apps/mfe-endpoint-admin/   (admin portal MFE)
+Halildeu/platform-agent            (BU REPO — Windows/macOS agent, Go)
+Halildeu/platform-k8s-gitops       kustomize/base/apps/endpoint-admin-service/  (manifest)
+```
+
+Lokal yerlesim:
 
 ```text
 /Users/halilkocoglu/Documents/platform-backend
-  endpoint-admin-service burada yer alacak.
+  endpoint-admin-service burada.
 
 /Users/halilkocoglu/Documents/platform-web
-  mfe-endpoint-admin burada yer alacak.
+  mfe-endpoint-admin burada.
 
 /Users/halilkocoglu/Documents/platform-agent
-  Go tabanli endpoint agent burada yer alacak.
+  Go tabanli endpoint agent burada.
+
+/Users/halilkocoglu/Documents/platform-k8s-gitops
+  Runtime manifest + GitOps governance.
 ```
 
 Ilk hedef Windows endpoint'lerdir. Tasarim macOS agent eklenebilecek sekilde
@@ -93,3 +109,31 @@ Windows local user read-only diagnostik:
 ```powershell
 .\endpoint-agent.exe diagnose local-users
 ```
+
+## License
+
+Bu proje Apache License 2.0 ile lisanslanmistir. Detaylar `LICENSE` dosyasinda.
+
+## Bagli ADR / charter
+
+- ADR-0012-EA Endpoint Admin Governance Charter:
+  `Halildeu/platform-k8s-gitops` `docs/adr/0012-EA-endpoint-admin-governance-charter.md`
+- 4-component, 4-repo yapi
+- Faz 22.x sub-faz (22.1 Lab → 22.2 IT-owned acik.local → 22.3 Restricted)
+- Code signing supply-chain RoT (build-time pipeline; runtime secret degil)
+- Initial domain scope: acik.local only (BOREAS / CESS Faz 22 disi)
+
+## Sorumluluklar (4-repo dagilimi)
+
+| Component | Repo | Path |
+|---|---|---|
+| Backend REST | `Halildeu/platform-backend` | `endpoint-admin-service/` |
+| Agent (BU) | `Halildeu/platform-agent` | repo root |
+| Admin portal MFE | `Halildeu/platform-web` | `apps/mfe-endpoint-admin/` |
+| GitOps manifest | `Halildeu/platform-k8s-gitops` | `kustomize/base/apps/endpoint-admin-service/` |
+
+## Naming convention
+
+- **Repo**: `platform-agent` (genis; ileride macOS/Linux genisleme icin)
+- **Binary**: `endpoint-agent.exe` (Windows), `endpoint-agent` (macOS)
+- **Windows service**: `EndpointAgent` veya `PlatformEndpointAgent`
