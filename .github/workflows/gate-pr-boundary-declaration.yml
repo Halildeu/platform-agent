@@ -46,9 +46,17 @@ jobs:
             exit 1
           fi
 
-          if ! echo "${PR_BODY}" | grep -qF "${HEADING}"; then
+          # Multi-line check: write PR body to temp file (echo collapses newlines
+          # in some shells; printf preserves but tempfile is most reliable for grep)
+          PR_BODY_FILE=$(mktemp)
+          # shellcheck disable=SC2059
+          printf '%s' "${PR_BODY}" > "${PR_BODY_FILE}"
+
+          if ! grep -qF "${HEADING}" "${PR_BODY_FILE}"; then
             echo "::error::PR body missing '${HEADING}' block"
             echo "Reference: ADR-0012-EA BG-EA-1 (Halildeu/platform-k8s-gitops docs/adr/0012-EA-endpoint-admin-governance-charter.md)"
+            echo "--- PR body (first 500 chars) ---"
+            head -c 500 "${PR_BODY_FILE}"
             exit 1
           fi
 
@@ -65,7 +73,8 @@ jobs:
           MISSING=0
           for cls in "${EXPECTED_CLASSES[@]}"; do
             # Match: `- [ ] credential-read` or `- [x] credential-read` (case insensitive on x/X)
-            if ! echo "${PR_BODY}" | grep -qE "^- \[(\s|x|X)\] ${cls}(\$|[^a-zA-Z])"; then
+            # End: end of line OR non-alphabetic (avoid 'credential-read-only' false positive)
+            if ! grep -qE "^- \[(\s|x|X)\] ${cls}(\$|[^a-zA-Z])" "${PR_BODY_FILE}"; then
               echo "::error::Boundary block missing class: '${cls}'"
               MISSING=$((MISSING + 1))
             fi
@@ -77,7 +86,7 @@ jobs:
           fi
 
           # At least one class marked
-          MARKED=$(echo "${PR_BODY}" | grep -cE "^- \[(x|X)\] " || true)
+          MARKED=$(grep -cE "^- \[(x|X)\] " "${PR_BODY_FILE}" || true)
           if [ "${MARKED}" -eq 0 ]; then
             echo "::error::No boundary class marked [x] — at least one required"
             echo "If your PR has no state mutation / no credential / no boundary cross, mark 'none of the above'"
@@ -85,6 +94,9 @@ jobs:
           fi
 
           echo "✓ Boundary declaration block valid (${MARKED} class(es) marked)"
+
+          # Cleanup
+          rm -f "${PR_BODY_FILE}"
 
           # Note: 'none of the above' exclusivity check, user-approval-required label
           # check (for credential-write / state-mutation production / boundary-cross)
