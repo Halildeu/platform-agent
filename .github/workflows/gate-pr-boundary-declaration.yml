@@ -70,11 +70,13 @@ jobs:
             "none of the above"
           )
 
+          # Fixed-string match (regex parens '(test cluster)' meta-char issue)
+          # Class can be unchecked '- [ ]', checked '- [x]' or '- [X]'
           MISSING=0
           for cls in "${EXPECTED_CLASSES[@]}"; do
-            # Match: `- [ ] credential-read` or `- [x] credential-read` (case insensitive on x/X)
-            # End: end of line OR non-alphabetic (avoid 'credential-read-only' false positive)
-            if ! grep -qE "^- \[(\s|x|X)\] ${cls}(\$|[^a-zA-Z])" "${PR_BODY_FILE}"; then
+            if ! grep -qF "- [ ] ${cls}" "${PR_BODY_FILE}" && \
+               ! grep -qF "- [x] ${cls}" "${PR_BODY_FILE}" && \
+               ! grep -qF "- [X] ${cls}" "${PR_BODY_FILE}"; then
               echo "::error::Boundary block missing class: '${cls}'"
               MISSING=$((MISSING + 1))
             fi
@@ -85,7 +87,7 @@ jobs:
             exit 1
           fi
 
-          # At least one class marked
+          # At least one class marked (- [x] or - [X])
           MARKED=$(grep -cE "^- \[(x|X)\] " "${PR_BODY_FILE}" || true)
           if [ "${MARKED}" -eq 0 ]; then
             echo "::error::No boundary class marked [x] — at least one required"
