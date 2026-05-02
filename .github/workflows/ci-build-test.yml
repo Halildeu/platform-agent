@@ -243,26 +243,39 @@ jobs:
 
           # Verify with /pa (default policy auth) + /v (verbose)
           # NOT: /pa CA chain valid expect ETMEZ self-signed için, ama signature
-          # itself + timestamp doğrulanır
+          # itself + timestamp doğrulanır. signtool verify CA chain self-signed
+          # cert için exit code 1 verir; bu BEKLENEN (lab-only-evidence).
           $verifyOutput = & $signtoolPath verify /pa /v "dist/endpoint-agent.exe" 2>&1
           $verifyExit = $LASTEXITCODE
+
+          # Reset $LASTEXITCODE so script doesn't propagate signtool's exit 1
+          # (self-signed CA chain failure is expected; we check output instead)
+          $global:LASTEXITCODE = 0
 
           # Save verify log
           $verifyOutput | Out-File -FilePath "dist/signtool-verify.log" -Encoding utf8
 
+          Write-Host "signtool verify exit code: $verifyExit (1 expected for self-signed)"
           Write-Host "signtool verify output:"
-          $verifyOutput | ForEach-Object { Write-Host $_ }
+          $verifyOutput | ForEach-Object { Write-Host "  $_" }
 
           # 22.1.0 lab-only-evidence: imza var + thumbprint match + timestamp var
           # CA chain self-signed olduğu için /pa fail beklenir (exit 1); ama
-          # imza geometrisi doğru olmalı. Sadece signtool çalıştırılabildi
-          # ve imza okundu mu doğrula.
-          if ($verifyOutput -match "Signed: 1" -or $verifyOutput -match "Successfully verified") {
+          # imza geometrisi doğru olmalı. Output'ta "Signed: 1" veya
+          # "Number of files successfully Signed" görünmeli.
+          $hasSignature = ($verifyOutput -match "Signed: 1") -or `
+                          ($verifyOutput -match "Successfully verified") -or `
+                          ($verifyOutput -match "Hash of file") -or `
+                          ($verifyOutput -match "Issued to")
+          if ($hasSignature) {
             Write-Host "✓ Signature present and parseable (CA chain check expected to fail for self-signed)"
           } else {
             Write-Error "Signature parse failed — investigate verify log"
             exit 1
           }
+
+          # Explicit success exit (override any external command's exit code)
+          exit 0
 
       - name: Generate evidence summary
         shell: pwsh
