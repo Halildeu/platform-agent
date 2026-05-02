@@ -1,0 +1,90 @@
+name: Gate - SBOM (Syft)
+
+# Faz 22.1.0 — Agent SBOM (Software Bill of Materials) generation.
+# Codex 019de00f strongly recommended: 22.2 trusted signing geçişinde
+# artifact metadata zinciri sarsılmasın diye SBOM 22.1'de eklenir.
+#
+# SPDX format. Release artifact'a paralel upload.
+#
+# Reference:
+# - ADR-0012-EA: Halildeu/platform-k8s-gitops
+#   docs/adr/0012-EA-endpoint-admin-governance-charter.md (DD-EA-4 supply chain)
+# - Syft: https://github.com/anchore/syft
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: Generate SBOM (Syft, SPDX format)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Read Go version from go.mod
+        id: go-version
+        run: |
+          VERSION=$(grep '^go ' go.mod | awk '{print $2}')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ steps.go-version.outputs.version }}
+          cache: true
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          syft version
+
+      - name: Generate Go module SBOM (source-level, SPDX JSON)
+        run: |
+          syft scan dir:. -o spdx-json=sbom-source.spdx.json
+          syft scan dir:. -o cyclonedx-json=sbom-source.cyclonedx.json
+          ls -la sbom-source.*
+
+      - name: Cross-compile windows binary for SBOM
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o dist/endpoint-agent.exe ./cmd/endpoint-agent
+
+      - name: Generate binary SBOM (compiled artifact, SPDX JSON)
+        run: |
+          syft scan dist/endpoint-agent.exe -o spdx-json=sbom-binary.spdx.json
+          syft scan dist/endpoint-agent.exe -o cyclonedx-json=sbom-binary.cyclonedx.json
+          ls -la sbom-binary.*
+
+      - name: SBOM summary
+        run: |
+          echo "## SBOM artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Source-level (Go modules):" >> $GITHUB_STEP_SUMMARY
+          jq -r '.packages | length' sbom-source.spdx.json | xargs -I{} echo "- SPDX: {} packages" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Binary-level (endpoint-agent.exe):" >> $GITHUB_STEP_SUMMARY
+          jq -r '.packages | length' sbom-binary.spdx.json | xargs -I{} echo "- SPDX: {} packages" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-${{ github.sha }}
+          path: |
+            sbom-source.spdx.json
+            sbom-source.cyclonedx.json
+            sbom-binary.spdx.json
+            sbom-binary.cyclonedx.json
+          retention-days: 30

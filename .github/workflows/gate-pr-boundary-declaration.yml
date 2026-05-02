@@ -1,0 +1,109 @@
+name: BG-EA-1 - PR boundary declaration validate
+
+# Faz 22.1.0 — Agent BG-EA-1 boundary declaration guard.
+# ADR-0011 BG-1 governance pattern (gitops repo) analog.
+# Codex 019de00f revize: BG-EA-1 platform-agent + platform-backend repolarında
+# paralel implement (sadece gitops yetersiz; agent release/installer/destructive
+# capability GitOps PR'larından yönetilmiyor).
+#
+# Reference:
+# - ADR-0012-EA: Halildeu/platform-k8s-gitops
+#   docs/adr/0012-EA-endpoint-admin-governance-charter.md (BG-EA-1)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    name: BG-EA-1 boundary declaration validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate PR body has boundary declaration block
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Required heading (ADR-0011 §2.3 analog)
+          HEADING="## Boundary declaration (ADR-0011 §2.3)"
+
+          # Fetch PR body via gh CLI (env transfer drops newlines; gh API preserves)
+          PR_BODY_FILE=$(mktemp)
+          gh pr view "${PR_NUMBER}" --json body --jq .body > "${PR_BODY_FILE}"
+
+          if [ ! -s "${PR_BODY_FILE}" ]; then
+            echo "::error::PR body is empty — boundary declaration block missing"
+            echo "Required: '${HEADING}' block with 6 checkboxes"
+            echo "Reference: ADR-0012-EA BG-EA-1 governance guard"
+            exit 1
+          fi
+
+          echo "DEBUG: PR body size = $(wc -c < "${PR_BODY_FILE}") bytes"
+          echo "DEBUG: PR body lines = $(wc -l < "${PR_BODY_FILE}")"
+
+          if ! grep -qF "${HEADING}" "${PR_BODY_FILE}"; then
+            echo "::error::PR body missing '${HEADING}' block"
+            echo "Reference: ADR-0012-EA BG-EA-1 (Halildeu/platform-k8s-gitops docs/adr/0012-EA-endpoint-admin-governance-charter.md)"
+            echo "--- PR body (first 500 chars) ---"
+            head -c 500 "${PR_BODY_FILE}"
+            exit 1
+          fi
+
+          # 6 expected classes (ADR-0011 BG-1 analog)
+          EXPECTED_CLASSES=(
+            "credential-read"
+            "credential-write"
+            "state-mutation (test cluster)"
+            "state-mutation (production)"
+            "boundary-cross"
+            "none of the above"
+          )
+
+          # Fixed-string match (regex parens '(test cluster)' meta-char issue)
+          # Class can be unchecked '- [ ]', checked '- [x]' or '- [X]'
+          # CRITICAL: '--' separator before pattern; '-' as first char in
+          # pattern is interpreted as flag by GNU grep otherwise.
+          MISSING=0
+          for cls in "${EXPECTED_CLASSES[@]}"; do
+            if ! grep -qF -- "- [ ] ${cls}" "${PR_BODY_FILE}" && \
+               ! grep -qF -- "- [x] ${cls}" "${PR_BODY_FILE}" && \
+               ! grep -qF -- "- [X] ${cls}" "${PR_BODY_FILE}"; then
+              echo "::error::Boundary block missing class: '${cls}'"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+
+          if [ ${MISSING} -gt 0 ]; then
+            echo "::error::${MISSING} class(es) missing from boundary declaration block"
+            exit 1
+          fi
+
+          # At least one class marked (- [x] or - [X])
+          MARKED=$(grep -cE "^- \[(x|X)\] " "${PR_BODY_FILE}" || true)
+          if [ "${MARKED}" -eq 0 ]; then
+            echo "::error::No boundary class marked [x] — at least one required"
+            echo "If your PR has no state mutation / no credential / no boundary cross, mark 'none of the above'"
+            exit 1
+          fi
+
+          echo "✓ Boundary declaration block valid (${MARKED} class(es) marked)"
+
+          # Cleanup
+          rm -f "${PR_BODY_FILE}"
+
+          # Note: 'none of the above' exclusivity check, user-approval-required label
+          # check (for credential-write / state-mutation production / boundary-cross)
+          # NOT enforced here — Faz 22.1.0 first iteration. Will add post-merge
+          # if needed (BG-EA-1 hardening sub-PR).
