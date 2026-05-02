@@ -73,11 +73,13 @@ jobs:
 
           # Fixed-string match (regex parens '(test cluster)' meta-char issue)
           # Class can be unchecked '- [ ]', checked '- [x]' or '- [X]'
+          # CRITICAL: '--' separator before pattern; '-' as first char in
+          # pattern is interpreted as flag by GNU grep otherwise.
           MISSING=0
           for cls in "${EXPECTED_CLASSES[@]}"; do
-            if ! grep -qF "- [ ] ${cls}" "${PR_BODY_FILE}" && \
-               ! grep -qF "- [x] ${cls}" "${PR_BODY_FILE}" && \
-               ! grep -qF "- [X] ${cls}" "${PR_BODY_FILE}"; then
+            if ! grep -qF -- "- [ ] ${cls}" "${PR_BODY_FILE}" && \
+               ! grep -qF -- "- [x] ${cls}" "${PR_BODY_FILE}" && \
+               ! grep -qF -- "- [X] ${cls}" "${PR_BODY_FILE}"; then
               echo "::error::Boundary block missing class: '${cls}'"
               MISSING=$((MISSING + 1))
             fi
