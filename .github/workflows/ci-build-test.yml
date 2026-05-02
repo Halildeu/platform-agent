@@ -1,0 +1,326 @@
+name: CI - Build, Test, Lab Signing
+
+# Faz 22.1.0 — Agent CI/release foundation (mandatory ilk milestone).
+# Codex 019de00f revize: ephemeral lab signing pattern, GitHub Secret'a
+# PFX SAKLAMA YOK. Her CI run'da self-signed cert üretilir, exe imzalanır,
+# thumbprint + verify log artifact'e yüklenir.
+#
+# 22.1 invariantları (yapılMAYACAK):
+# - Trusted signing (Authenticode CA-issued cert) — 22.2'ye
+# - Production release — 22.2'ye
+# - macOS build (artifact compatibility check) — strongly recommended,
+#   bu workflow'da Linux runner'dan opsiyonel cross-build
+#
+# Reference: ADR-0012-EA, Halildeu/platform-k8s-gitops
+#   docs/adr/0012-EA-endpoint-admin-governance-charter.md
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================
+  # Job 1: Go test + lint + cross-build (Linux, fast)
+  # ============================================================
+  test-and-build:
+    name: Test, lint, cross-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    outputs:
+      go-version: ${{ steps.go-version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Read Go version from go.mod
+        id: go-version
+        run: |
+          VERSION=$(grep '^go ' go.mod | awk '{print $2}')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Go version: ${VERSION}"
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ steps.go-version.outputs.version }}
+          cache: true
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test
+        run: go test ./... -v -race -cover -coverprofile=coverage.out
+
+      - name: golangci-lint (advisory in 22.1.0; will be enforced post-iter)
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v1.62
+        continue-on-error: true
+
+      - name: Cross-compile Windows amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.Version=${GITHUB_SHA::7} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o dist/endpoint-agent.exe \
+            ./cmd/endpoint-agent
+          ls -la dist/
+
+      - name: Package (zip + SHA256SUMS)
+        run: |
+          set -euo pipefail
+          mkdir -p dist/package
+          cp dist/endpoint-agent.exe dist/package/
+          cp installers/windows/install.ps1 dist/package/
+          cp installers/windows/uninstall.ps1 dist/package/
+          cp installers/windows/README.md dist/package/INSTALLER-README.md
+          cp README.md dist/package/README.md
+          cp LICENSE dist/package/LICENSE
+
+          cd dist/package
+          ZIPNAME="endpoint-agent-windows-amd64-${GITHUB_SHA::7}.zip"
+          zip -r "../${ZIPNAME}" .
+          cd ..
+          sha256sum endpoint-agent.exe > SHA256SUMS
+          sha256sum "${ZIPNAME}" >> SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload unsigned artifact (input to signing job)
+        uses: actions/upload-artifact@v7
+        with:
+          name: endpoint-agent-unsigned-${{ github.sha }}
+          path: |
+            dist/endpoint-agent.exe
+            dist/endpoint-agent-windows-amd64-*.zip
+            dist/SHA256SUMS
+          retention-days: 14
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage.out
+          retention-days: 7
+
+  # ============================================================
+  # Job 2: Lab-only-evidence signing (Windows runner — signtool)
+  # ============================================================
+  lab-signing:
+    name: Lab-only-evidence signing (ephemeral cert)
+    needs: test-and-build
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    # 22.1.0 mandatory: imza pipeline mechanics + signtool verify çalışıyor
+    # 22.2'de Azure Trusted Signing'e geçilir (CA-issued cert + GitHub OIDC)
+    steps:
+      - name: Checkout (for context)
+        uses: actions/checkout@v6
+
+      - name: Download unsigned artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: endpoint-agent-unsigned-${{ github.sha }}
+          path: dist
+
+      - name: List artifact contents
+        shell: pwsh
+        run: Get-ChildItem -Path dist -Recurse | Format-List
+
+      - name: Generate ephemeral self-signed cert (22.1.0 lab-only-evidence)
+        id: cert
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Ephemeral cert subject includes run_id for traceability
+          $subject = "CN=platform-agent-lab-evidence-${{ github.run_id }}"
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigning `
+            -Subject $subject `
+            -KeyExportPolicy Exportable `
+            -KeySpec Signature `
+            -KeyLength 2048 `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -NotAfter (Get-Date).AddDays(1)
+
+          $thumbprint = $cert.Thumbprint
+          $expiry = $cert.NotAfter.ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+          Write-Host "Ephemeral cert generated:"
+          Write-Host "  Subject:    $subject"
+          Write-Host "  Thumbprint: $thumbprint"
+          Write-Host "  Expires:    $expiry"
+
+          # Export PFX (ephemeral password, not stored)
+          $pfxPath = "lab-cert.pfx"
+          $pfxPass = "ephemeral-${{ github.run_id }}"
+          Export-PfxCertificate `
+            -Cert "Cert:\CurrentUser\My\$thumbprint" `
+            -FilePath $pfxPath `
+            -Password (ConvertTo-SecureString -String $pfxPass -Force -AsPlainText) | Out-Null
+
+          # Outputs for next step
+          "thumbprint=$thumbprint" >> $env:GITHUB_OUTPUT
+          "subject=$subject" >> $env:GITHUB_OUTPUT
+          "expiry=$expiry" >> $env:GITHUB_OUTPUT
+          "pfx_path=$pfxPath" >> $env:GITHUB_OUTPUT
+          "pfx_pass=$pfxPass" >> $env:GITHUB_OUTPUT
+
+      - name: Sign endpoint-agent.exe (lab-only-evidence)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Find signtool (multiple possible locations on Windows runner)
+          $signtoolCandidates = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe",
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
+          )
+          $signtool = $signtoolCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $signtool) {
+            Write-Error "signtool.exe not found in known locations"
+            exit 1
+          }
+          Write-Host "Using signtool: $signtool"
+
+          # Sign with ephemeral PFX + RFC 3161 timestamp
+          & $signtool sign `
+            /f "${{ steps.cert.outputs.pfx_path }}" `
+            /p "${{ steps.cert.outputs.pfx_pass }}" `
+            /tr "http://timestamp.digicert.com" `
+            /td sha256 `
+            /fd sha256 `
+            "dist/endpoint-agent.exe"
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "signtool sign failed (exit $LASTEXITCODE)"
+            exit $LASTEXITCODE
+          }
+          Write-Host "Signing completed successfully"
+
+      - name: Verify signature (signtool verify /pa /v)
+        id: verify
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $signtoolCandidates = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe",
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
+          )
+          $signtool = $signtoolCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          # Verify with /pa (default policy auth) + /v (verbose)
+          # NOT: /pa CA chain valid expect ETMEZ self-signed için, ama signature
+          # itself + timestamp doğrulanır
+          $verifyOutput = & $signtool verify /pa /v "dist/endpoint-agent.exe" 2>&1
+          $verifyExit = $LASTEXITCODE
+
+          # Save verify log
+          $verifyOutput | Out-File -FilePath "dist/signtool-verify.log" -Encoding utf8
+
+          Write-Host "signtool verify output:"
+          $verifyOutput | ForEach-Object { Write-Host $_ }
+
+          # 22.1.0 lab-only-evidence: imza var + thumbprint match + timestamp var
+          # CA chain self-signed olduğu için /pa fail beklenir (exit 1); ama
+          # imza geometrisi doğru olmalı. Sadece signtool çalıştırılabildi
+          # ve imza okundu mu doğrula.
+          if ($verifyOutput -match "Signed: 1" -or $verifyOutput -match "Successfully verified") {
+            Write-Host "✓ Signature present and parseable (CA chain check expected to fail for self-signed)"
+          } else {
+            Write-Error "Signature parse failed — investigate verify log"
+            exit 1
+          }
+
+      - name: Generate evidence summary
+        shell: pwsh
+        env:
+          RUN_ID: ${{ github.run_id }}
+          WORKFLOW: ${{ github.workflow }}
+          SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          CERT_SUBJECT: ${{ steps.cert.outputs.subject }}
+          CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+          CERT_EXPIRY: ${{ steps.cert.outputs.expiry }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Build summary line by line (avoid YAML/PS heredoc indent issues)
+          $lines = @()
+          $lines += "# Lab-only-evidence Signing Summary"
+          $lines += ""
+          $lines += "Run: $env:RUN_ID"
+          $lines += "Workflow: $env:WORKFLOW"
+          $lines += "SHA: $env:SHA"
+          $lines += "Triggered by: $env:ACTOR"
+          $lines += ""
+          $lines += "## Ephemeral certificate"
+          $lines += ""
+          $lines += "- Subject: $env:CERT_SUBJECT"
+          $lines += "- Thumbprint: $env:CERT_THUMBPRINT"
+          $lines += "- Expiry: $env:CERT_EXPIRY (1 day, this run only)"
+          $lines += "- Type: Self-signed (CA chain NOT VALID — this is lab-only-evidence)"
+          $lines += ""
+          $lines += "## Signed artifact"
+          $lines += ""
+          $lines += "    dist/endpoint-agent.exe"
+          $lines += ""
+          $lines += "## Verification"
+          $lines += ""
+          $lines += "signtool verify /pa /v dist/endpoint-agent.exe output is in dist/signtool-verify.log"
+          $lines += ""
+          $lines += "## Lab-only-evidence invariant"
+          $lines += ""
+          $lines += "WARNING: This signature is lab-only-evidence."
+          $lines += "Faz 22.2 IT-owned pilot requires Authenticode trusted signing (Azure Trusted Signing)."
+          $lines += ""
+          $lines += "Reference: ADR-0012-EA platform-k8s-gitops docs/adr/0012-EA-endpoint-admin-governance-charter.md 22.1 invariantları"
+
+          $summary = $lines -join "`n"
+          $summary | Out-File -FilePath "dist/SIGNING-EVIDENCE.md" -Encoding utf8
+          Write-Host $summary
+
+          # Append to GITHUB_STEP_SUMMARY for run UI
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Upload signed artifact + evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: endpoint-agent-lab-evidence-${{ github.run_id }}
+          path: |
+            dist/endpoint-agent.exe
+            dist/SHA256SUMS
+            dist/signtool-verify.log
+            dist/SIGNING-EVIDENCE.md
+          retention-days: 14
+
+      - name: Cleanup ephemeral cert
+        if: always()
+        shell: pwsh
+        run: |
+          # Remove ephemeral cert from store + delete PFX
+          $thumbprint = "${{ steps.cert.outputs.thumbprint }}"
+          if ($thumbprint) {
+            Get-ChildItem "Cert:\CurrentUser\My\$thumbprint" -ErrorAction SilentlyContinue | Remove-Item -Force
+            Write-Host "Ephemeral cert removed from store"
+          }
+          if (Test-Path "lab-cert.pfx") {
+            Remove-Item "lab-cert.pfx" -Force
+            Write-Host "PFX file deleted"
+          }
