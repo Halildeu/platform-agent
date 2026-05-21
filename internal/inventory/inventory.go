@@ -47,10 +47,10 @@ func RuntimeCapabilities() []protocol.CommandType {
 		protocol.CommandGetUserHomePaths,
 	}
 	if runtime.GOOS == "windows" {
+		// DisableLocalUser/EnableLocalUser intentionally omitted: adapter not implemented in executor.
+		// Re-add when internal/users gains a Windows local-user disable/enable adapter.
 		capabilities = append(capabilities,
 			protocol.CommandListLocalUsers,
-			protocol.CommandDisableLocalUser,
-			protocol.CommandEnableLocalUser,
 		)
 	}
 	return capabilities
