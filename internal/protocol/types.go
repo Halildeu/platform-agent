@@ -46,38 +46,56 @@ type CapabilityReport struct {
 	Capabilities []CommandType `json:"capabilities"`
 }
 
+// EnrollRequest is the agent→backend enrollment-consume body. BE-011: matches
+// com.example.endpointadmin.dto.v1.agent.ConsumeEnrollmentRequest — osType is
+// an OsType enum name (WINDOWS/MACOS/LINUX/UNKNOWN) and machineFingerprint is
+// required.
 type EnrollRequest struct {
-	EnrollmentToken string   `json:"enrollmentToken"`
-	InstallID       string   `json:"installId"`
-	Hostname        string   `json:"hostname"`
-	OSFamily        OSFamily `json:"osFamily"`
-	Architecture    string   `json:"architecture"`
-	AgentVersion    string   `json:"agentVersion"`
+	EnrollmentToken    string `json:"enrollmentToken"`
+	Hostname           string `json:"hostname"`
+	OsType             string `json:"osType"`
+	OsVersion          string `json:"osVersion,omitempty"`
+	AgentVersion       string `json:"agentVersion"`
+	MachineFingerprint string `json:"machineFingerprint"`
+	DomainName         string `json:"domainName,omitempty"`
 }
 
+// EnrollResponse is the backend ConsumeEnrollmentResponse. The device
+// credential the agent signs subsequent requests with is
+// CredentialKeyID (the X-Device-Credential-Id header) + Secret (the HMAC key).
 type EnrollResponse struct {
-	AgentID     string `json:"agentId"`
-	AgentSecret string `json:"agentSecret"`
-	InstallID   string `json:"installId"`
+	DeviceID        string    `json:"deviceId"`
+	CredentialKeyID string    `json:"credentialKeyId"`
+	Secret          string    `json:"secret"`
+	HmacAlgorithm   string    `json:"hmacAlgorithm"`
+	ServerTime      time.Time `json:"serverTime"`
 }
 
+// HeartbeatRequest matches the backend AgentHeartbeatRequest. The signing
+// device is resolved from the X-Device-Credential-Id header, so no agent id is
+// carried in the body.
 type HeartbeatRequest struct {
-	AgentID      string        `json:"agentId"`
-	InstallID    string        `json:"installId"`
+	InstallID    string        `json:"installId,omitempty"`
 	Hostname     string        `json:"hostname"`
-	OSFamily     OSFamily      `json:"osFamily"`
+	OsType       string        `json:"osType"`
 	Architecture string        `json:"architecture"`
 	AgentVersion string        `json:"agentVersion"`
+	OsVersion    string        `json:"osVersion,omitempty"`
 	State        string        `json:"state"`
 	Capabilities []CommandType `json:"capabilities"`
 	Timestamp    time.Time     `json:"timestamp"`
 }
 
+// HeartbeatResponse matches the backend AgentHeartbeatResponse.
 type HeartbeatResponse struct {
 	Accepted   bool      `json:"accepted"`
+	DeviceID   string    `json:"deviceId"`
+	Status     string    `json:"status"`
 	ServerTime time.Time `json:"serverTime"`
 }
 
+// AgentCommand matches the backend AgentCommandResponse (the GET
+// /commands/next body). ClaimID must be echoed back in the result.
 type AgentCommand struct {
 	CommandID      string                 `json:"commandId"`
 	ClaimID        string                 `json:"claimId"`
@@ -89,6 +107,8 @@ type AgentCommand struct {
 	ClaimExpiresAt time.Time              `json:"claimExpiresAt"`
 }
 
+// CommandResult is the executor's internal result type. It is mapped onto the
+// backend wire contract by ToWire before submission.
 type CommandResult struct {
 	CommandID     string                 `json:"commandId"`
 	ClaimID       string                 `json:"claimId"`
@@ -98,6 +118,50 @@ type CommandResult struct {
 	Details       map[string]interface{} `json:"details,omitempty"`
 	StartedAt     time.Time              `json:"startedAt"`
 	FinishedAt    time.Time              `json:"finishedAt"`
+}
+
+// CommandResultWire is the agent→backend command-result body, matching the
+// backend AgentCommandResultRequest. commandId is NOT a body field — it is the
+// {commandId} path segment of POST /api/v1/agent/commands/{commandId}/result.
+type CommandResultWire struct {
+	ClaimID       string                 `json:"claimId"`
+	AttemptNumber int                    `json:"attemptNumber"`
+	Status        string                 `json:"status"`
+	Summary       string                 `json:"summary,omitempty"`
+	Details       map[string]interface{} `json:"details,omitempty"`
+	ErrorCode     string                 `json:"errorCode,omitempty"`
+	ErrorMessage  string                 `json:"errorMessage,omitempty"`
+	StartedAt     time.Time              `json:"startedAt"`
+	FinishedAt    time.Time              `json:"finishedAt"`
+}
+
+// ToWire maps an executor CommandResult onto the backend wire contract. The
+// backend CommandResultStatus enum is {SUCCEEDED, FAILED, PARTIAL,
+// UNSUPPORTED} — it has no EXPIRED — so an expired result is reported as
+// FAILED with an errorCode (Codex 019e5000 Q4). Any non-terminal status is
+// defensively reported as FAILED.
+func (r CommandResult) ToWire() CommandResultWire {
+	wire := CommandResultWire{
+		ClaimID:       r.ClaimID,
+		AttemptNumber: r.AttemptNumber,
+		Summary:       r.Summary,
+		Details:       r.Details,
+		StartedAt:     r.StartedAt,
+		FinishedAt:    r.FinishedAt,
+	}
+	switch r.Status {
+	case CommandStatusSucceeded:
+		wire.Status = "SUCCEEDED"
+	case CommandStatusUnsupported:
+		wire.Status = "UNSUPPORTED"
+	case CommandStatusExpired:
+		wire.Status = "FAILED"
+		wire.ErrorCode = "COMMAND_EXPIRED"
+		wire.ErrorMessage = "command claim expired before the result was reported"
+	default: // FAILED, plus any non-terminal status, defensively
+		wire.Status = "FAILED"
+	}
+	return wire
 }
 
 func (t CommandType) RequiresReason() bool {
