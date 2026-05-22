@@ -14,8 +14,10 @@ func TestDeriveSigningPathPrefix(t *testing.T) {
 	}{
 		{"gateway external path", "/api/v1/endpoint-agent", "/api/v1/agent"},
 		{"gateway external path trailing slash", "/api/v1/endpoint-agent/", "/api/v1/agent"},
+		{"gateway external path with sub-path", "/api/v1/endpoint-agent/x", "/api/v1/agent/x"},
 		{"direct backend path passthrough", "/api/v1/agent", "/api/v1/agent"},
 		{"unrelated path passthrough", "/custom/base", "/custom/base"},
+		{"non-segment match left alone", "/foo/endpoint-agent-extra", "/foo/endpoint-agent-extra"},
 		{"empty", "", ""},
 	}
 	for _, tc := range cases {

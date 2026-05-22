@@ -22,13 +22,20 @@ import (
 
 // DeriveSigningPathPrefix derives the backend-visible (canonical) path prefix
 // from the external API base path the agent dials. When the path contains the
-// gateway "/endpoint-agent" segment it is rewritten to "/agent"; a base path
-// that already targets the backend directly (already "/agent") is returned
-// unchanged. Trailing slashes are trimmed.
+// gateway "/endpoint-agent" path SEGMENT it is rewritten to "/agent"; a base
+// path that already targets the backend directly (already "/agent") is
+// returned unchanged. Trailing slashes are trimmed. The match is
+// segment-boundary aware — "/endpoint-agent" is only rewritten when followed
+// by "/" or the end of the path, so e.g. "/foo/endpoint-agent-extra" is left
+// alone (Codex 019e5000 hardening).
 func DeriveSigningPathPrefix(externalBasePath string) string {
 	trimmed := strings.TrimRight(externalBasePath, "/")
-	if strings.Contains(trimmed, "/endpoint-agent") {
-		return strings.Replace(trimmed, "/endpoint-agent", "/agent", 1)
+	const segment = "/endpoint-agent"
+	if idx := strings.Index(trimmed, segment); idx >= 0 {
+		rest := trimmed[idx+len(segment):]
+		if rest == "" || strings.HasPrefix(rest, "/") {
+			return trimmed[:idx] + "/agent" + rest
+		}
 	}
 	return trimmed
 }

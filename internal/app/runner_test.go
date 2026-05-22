@@ -59,13 +59,13 @@ func TestRunnerRunOnceFullLifecycle(t *testing.T) {
 			requireValidSignature(t, r, deviceSecret)
 			pollSeen = true
 			writeJSON(t, w, protocol.AgentCommand{
-				CommandID:      "command-1",
+				CommandID:      "11111111-1111-1111-1111-111111111111",
 				ClaimID:        "claim-1",
 				AttemptNumber:  1,
 				Type:           protocol.CommandCollectInventory,
 				ClaimExpiresAt: time.Now().Add(time.Minute),
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/endpoint-agent/commands/command-1/result":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/endpoint-agent/commands/11111111-1111-1111-1111-111111111111/result":
 			requireValidSignature(t, r, deviceSecret)
 			var wire protocol.CommandResultWire
 			if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
