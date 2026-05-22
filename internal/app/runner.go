@@ -44,7 +44,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		r.StateTracker = state.NewTracker(state.StateStarting)
 	}
 
-	if r.Client.AgentID() == "" {
+	if !r.Client.IsEnrolled() {
 		if err := r.enroll(ctx); err != nil {
 			r.StateTracker.RecordFailure(time.Now())
 			return err
@@ -102,20 +102,19 @@ func (r *Runner) enroll(ctx context.Context) error {
 	}
 	snapshot := inventory.Collect(r.Config.AgentVersion, time.Now())
 	response, err := r.Client.Enroll(ctx, protocol.EnrollRequest{
-		EnrollmentToken: r.Config.EnrollmentToken,
-		InstallID:       r.Config.InstallID,
-		Hostname:        snapshot.Hostname,
-		OSFamily:        snapshot.OSFamily,
-		Architecture:    snapshot.Architecture,
-		AgentVersion:    r.Config.AgentVersion,
+		EnrollmentToken:    r.Config.EnrollmentToken,
+		Hostname:           snapshot.Hostname,
+		OsType:             string(snapshot.OSFamily),
+		AgentVersion:       r.Config.AgentVersion,
+		MachineFingerprint: inventory.MachineFingerprint(),
 	})
 	if err != nil {
 		return err
 	}
-	r.Config.AgentID = response.AgentID
-	r.Config.AgentSecret = response.AgentSecret
-	r.Config.InstallID = response.InstallID
-	r.logf("agent enrolled: %s", response.AgentID)
+	r.Config.CredentialID = response.CredentialKeyID
+	r.Config.Secret = response.Secret
+	r.Config.DeviceID = response.DeviceID
+	r.logf("agent enrolled: device=%s credential=%s", response.DeviceID, response.CredentialKeyID)
 	return nil
 }
 
@@ -123,10 +122,9 @@ func (r *Runner) heartbeat(ctx context.Context) error {
 	snapshot := inventory.Collect(r.Config.AgentVersion, time.Now())
 	currentState := r.StateTracker.RecordSuccess()
 	_, err := r.Client.Heartbeat(ctx, protocol.HeartbeatRequest{
-		AgentID:      r.Client.AgentID(),
-		InstallID:    r.Client.InstallID(),
+		InstallID:    r.Config.InstallID,
 		Hostname:     snapshot.Hostname,
-		OSFamily:     snapshot.OSFamily,
+		OsType:       string(snapshot.OSFamily),
 		Architecture: snapshot.Architecture,
 		AgentVersion: snapshot.AgentVersion,
 		State:        string(currentState),

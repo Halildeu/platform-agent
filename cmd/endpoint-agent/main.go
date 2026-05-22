@@ -87,11 +87,11 @@ func main() {
 }
 
 func newRunner(cfg config.Config, logger *log.Logger) (*app.Runner, error) {
-	client, err := protocol.NewClient(cfg.APIURL, &http.Client{Timeout: cfg.CommandTimeout})
+	client, err := protocol.NewClient(cfg.APIURL, cfg.SigningPathPrefix, &http.Client{Timeout: cfg.CommandTimeout})
 	if err != nil {
 		return nil, fmt.Errorf("client init failed: %w", err)
 	}
-	client.SetIdentity(cfg.AgentID, cfg.AgentSecret, cfg.InstallID)
+	client.SetIdentity(cfg.CredentialID, cfg.Secret, cfg.DeviceID)
 	return app.NewRunner(cfg, client, logger), nil
 }
 

@@ -1,8 +1,11 @@
 package inventory
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"platform-agent/internal/protocol"
@@ -65,4 +68,22 @@ func RuntimeOSFamily() protocol.OSFamily {
 	default:
 		return protocol.OSFamilyLinux
 	}
+}
+
+// MachineFingerprint returns a stable, non-empty identifier for this machine.
+// BE-011: the backend enrollment contract (ConsumeEnrollmentRequest
+// .machineFingerprint, @NotBlank, max 512) requires it. The value is derived
+// deterministically from the hostname and the OS/architecture so it is stable
+// across agent restarts and distinct across machines with different hostnames.
+// A hardware-bound fingerprint (machine-id / SMBIOS UUID) is a future
+// enhancement; this derivation is sufficient to identify the device across the
+// enroll → heartbeat → command lifecycle.
+func MachineFingerprint() string {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "unknown-host"
+	}
+	seed := strings.ToLower(strings.TrimSpace(hostname)) + "|" + runtime.GOOS + "|" + runtime.GOARCH
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])
 }

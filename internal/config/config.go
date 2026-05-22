@@ -8,10 +8,16 @@ import (
 )
 
 type Config struct {
-	AgentName              string
-	APIURL                 string
-	AgentID                string
-	AgentSecret            string
+	AgentName string
+	APIURL    string
+	// SigningPathPrefix is the backend-visible path prefix used for HMAC
+	// signing. Empty means derive it from APIURL (endpoint-agent -> agent).
+	SigningPathPrefix string
+	// CredentialID + Secret are the device credential (X-Device-Credential-Id
+	// and the HMAC key) issued by enrollment. DeviceID is the enrolled device.
+	CredentialID           string
+	Secret                 string
+	DeviceID               string
 	InstallID              string
 	EnrollmentToken        string
 	AgentVersion           string
@@ -44,8 +50,10 @@ func LoadFromEnv() Config {
 	cfg := Default()
 	cfg.AgentName = envString("ENDPOINT_AGENT_NAME", cfg.AgentName)
 	cfg.APIURL = strings.TrimRight(envString("ENDPOINT_AGENT_API_URL", cfg.APIURL), "/")
-	cfg.AgentID = envString("ENDPOINT_AGENT_ID", cfg.AgentID)
-	cfg.AgentSecret = envString("ENDPOINT_AGENT_SECRET", cfg.AgentSecret)
+	cfg.SigningPathPrefix = envString("ENDPOINT_AGENT_SIGNING_PATH_PREFIX", cfg.SigningPathPrefix)
+	cfg.CredentialID = envString("ENDPOINT_AGENT_CREDENTIAL_ID", cfg.CredentialID)
+	cfg.Secret = envString("ENDPOINT_AGENT_SECRET", cfg.Secret)
+	cfg.DeviceID = envString("ENDPOINT_AGENT_DEVICE_ID", cfg.DeviceID)
 	cfg.InstallID = envString("ENDPOINT_AGENT_INSTALL_ID", cfg.InstallID)
 	cfg.EnrollmentToken = envString("ENDPOINT_AGENT_ENROLLMENT_TOKEN", cfg.EnrollmentToken)
 	cfg.AgentVersion = envString("ENDPOINT_AGENT_VERSION", cfg.AgentVersion)
