@@ -1,0 +1,144 @@
+# Parallels Windows 11 CI pilot rehearsal workflow
+#
+# ==============================================================================
+# Manual lab gate only.
+#
+# Requires a self-hosted Mac runner with labels:
+#   [self-hosted, macOS, parallels, windows11]
+#
+# GitHub-hosted windows-latest runners CANNOT access the local Parallels VM.
+# This workflow runs prlctl on a macOS host with Parallels Desktop and a
+# pre-configured Windows 11 VM (default name "Windows 11"). Self-hosted runner
+# provisioning is operator-bound (separate work — not covered by this workflow).
+#
+# Boundary note — Parallels W11 CI pilot rehearsal:
+#   Repeatable lab rehearsal only. NOT acik.local IT-owned pilot acceptance.
+#   NOT prod-ready, NOT password-reset-ready, NOT domain-wide rollout-ready.
+#   First backend command non-destructive COLLECT_INVENTORY / inventory_refresh
+#   only. No password reset, user disable/enable, file access, raw agent shell,
+#   production cluster mutation, token logging, password logging, or domain
+#   admin credential capture allowed. Real acik.local acceptance remains blocked
+#   on domain join, EndpointPilot OU placement, IT-owned devices, and EDR/
+#   allowlist provisioning.
+#
+# Tracked by: platform-agent #12, gitops #1015 IT pilot umbrella,
+#   gitops PR #1021 (BE-011 lifecycle predecessor manual smoke),
+#   platform-agent PR #10 (AG-013 Verified 2026-05-24),
+#   Codex strategic thread 019e5a95.
+# ==============================================================================
+
+name: Parallels Windows 11 CI pilot rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_name:
+        description: 'Parallels VM name (default: Windows 11)'
+        required: false
+        default: 'Windows 11'
+      vm_user:
+        description: 'Parallels guest username (local, NOT domain admin)'
+        required: false
+        default: 'halilkocoglu'
+
+# One run at a time per VM — avoid concurrent prlctl exec collisions
+concurrency:
+  group: parallels-windows11-${{ inputs.vm_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  rehearsal:
+    name: Parallels W11 smoke (self-hosted Mac + prlctl)
+    runs-on: [self-hosted, macOS, parallels, windows11]
+    timeout-minutes: 30
+
+    env:
+      PARALLELS_VM_NAME: ${{ inputs.vm_name }}
+      PARALLELS_VM_USER: ${{ inputs.vm_user }}
+      EVIDENCE_DIR: ${{ github.workspace }}/tmp/parallels-w11-ci-${{ github.run_id }}
+
+    steps:
+      - name: Checkout platform-agent
+        uses: actions/checkout@v4
+
+      - name: Runner self-check (preflight)
+        run: |
+          set -euo pipefail
+          echo "Runner OS: $(uname -s) $(uname -r)"
+          echo "Expected runner labels: self-hosted, macOS, parallels, windows11"
+          command -v prlctl >/dev/null || { echo "prlctl missing — runner not configured"; exit 1; }
+          echo "prlctl version: $(prlctl --version 2>&1 | head -1)"
+          echo "VM list:"
+          prlctl list --all --output name | head -10
+          if ! prlctl list --all --output name | grep -Fxq "${{ inputs.vm_name }}"; then
+            echo "ERROR: VM '${{ inputs.vm_name }}' not found"
+            exit 1
+          fi
+          mkdir -p "${{ env.EVIDENCE_DIR }}"
+
+      - name: Run Parallels W11 CI rehearsal script
+        id: rehearsal
+        run: |
+          set -euo pipefail
+          # IMPORTANT: do NOT enable `set -x` — token/credential exposure risk.
+          bash scripts/test/parallels-windows11-ci.sh
+
+      - name: Verify no residual secrets in evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -d "${{ env.EVIDENCE_DIR }}" ]; then
+            echo "evidence dir not created — skipping scan"
+            exit 0
+          fi
+          # Fail-closed post-write scan (also performed by script; this is belt-and-suspenders)
+          residual=$(grep -rEi 'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|Bearer [A-Za-z0-9._-]{20,}|"password"[[:space:]]*:[[:space:]]*"[^"]+"|"token"[[:space:]]*:[[:space:]]*"[^"]+"' "${{ env.EVIDENCE_DIR }}" 2>/dev/null | grep -v "<REDACTED>" || true)
+          if [ -n "$residual" ]; then
+            echo "FAIL: residual secrets detected in evidence — artifact NOT uploaded"
+            echo "$residual" | head -5
+            exit 1
+          fi
+          echo "post-write secret scan: clean"
+
+      - name: Upload evidence artifact
+        if: always() && success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parallels-w11-ci-evidence-${{ github.run_id }}
+          path: ${{ env.EVIDENCE_DIR }}
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Summary boundary reminder
+        if: always()
+        run: |
+          cat <<'EOF'
+          ==============================================================================
+          Parallels W11 CI pilot rehearsal complete.
+
+          Boundary: This is a repeatable lab rehearsal ONLY.
+            - NOT acik.local IT-owned pilot acceptance
+            - NOT prod-ready
+            - NOT password-reset-ready
+            - NOT domain-wide rollout-ready
+
+          Real acik.local IT pilot acceptance requires:
+            - Domain join (acik.local + EndpointPilot OU placement)
+            - IT-owned devices (not local Parallels)
+            - Trusted signing (Windows Authenticode + timestamp)
+            - EDR allowlist provisioning
+
+          First backend command must be non-destructive COLLECT_INVENTORY /
+          inventory_refresh only.
+
+          Evidence doc PR opens AFTER this run completes successfully, citing
+          actual VM hostname, domain/workgroup, PartOfDomain, agent SHA256,
+          service status, command/result/audit row IDs, and cleanup summary.
+
+          Tracked by: platform-agent #12, gitops #1015 umbrella, Codex 019e5a95.
+          ==============================================================================
+          EOF
