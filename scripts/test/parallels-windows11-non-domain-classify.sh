@@ -102,10 +102,22 @@ fail() {
 
 # Whitespace-safe extractor for "  FieldName : Value" lines from dsregcmd /status output
 # (Codex 019e5b4e BLOCKER 1 fix: previous `^FieldName` regex missed leading-whitespace lines).
+# (Codex 019e5b4e iter-2 BLOCKER fix: grep no-match must not crash `set -euo pipefail`;
+#  A1/workgroup VM normally lacks TenantId/DeviceId/TenantName/DeviceName fields, so
+#  empty-return + exit 0 is the safe default. Caller checks for empty string.)
 extract_dsreg_field() {
   local field="$1"
   local source="$2"
-  printf '%s' "$source" | grep -iE "^[[:space:]]*${field}[[:space:]]*:" | head -1 | awk -F: '{print $2}' | tr -d ' \r\n'
+  local line
+
+  # grep no-match → || true rescues pipeline; head -1 collapses multi-match
+  line=$(printf '%s\n' "$source" | grep -iE "^[[:space:]]*${field}[[:space:]]*:" | head -1 || true)
+
+  # Early return on empty (no field found)
+  [ -n "$line" ] || { printf ''; return 0; }
+
+  # Extract value after ':' separator
+  printf '%s' "$line" | awk -F: '{print $2}' | tr -d ' \r\n'
 }
 
 post_write_secret_scan() {
