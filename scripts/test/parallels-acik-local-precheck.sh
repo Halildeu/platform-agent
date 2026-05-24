@@ -160,20 +160,45 @@ foreach (\$name in @('$DOMAIN', '_ldap._tcp.dc._msdcs.$DOMAIN', '_kerberos._tcp.
 " 2>&1 | redact | tee -a "$PRECHECK" || true
 
 # === Step 4: nltest /dsgetdc (DC locator) ===
-log "Step 4: nltest /dsgetdc:$DOMAIN"
+# IMPORTANT: nltest fail is the EXPECTED outcome in Gate 0 blocker scenario
+# (DC unreachable). Use fail-soft pattern so set -e doesn't kill the script
+# before Step 8 secret scan + Step 9 summary run. (Codex 019e5aca iter-2 BLOCKER 1 absorb.)
+log "Step 4: nltest /dsgetdc:$DOMAIN (fail-soft — expected fail in Gate 0 blocker)"
+set +e
 dc_locate_output=$(prlctl exec "$VM_NAME" cmd /c nltest "/dsgetdc:$DOMAIN" 2>&1 | redact)
+nltest_rc=$?
+set -e
 echo "$dc_locate_output" | tee -a "$PRECHECK"
+log "  nltest exit code: $nltest_rc"
 
-# Extract DC FQDN (if any)
-dc_fqdn=$(echo "$dc_locate_output" | grep -iE 'DC:.*\\' | sed -E 's/.*DC:[[:space:]]*\\\\([^[:space:]]+).*/\1/' | head -1 || true)
-if [ -z "$dc_fqdn" ]; then
-  dc_fqdn=$(echo "$dc_locate_output" | grep -iE 'DC Site Name' -B1 | head -1 | awk -F'\\\\\\\\' '{print $2}' | awk '{print $1}' || true)
+# DC FQDN extraction — prefer SRV record (canonical FQDN). Codex 019e5aca iter-2
+# MEDIUM 4 absorb: nltest gives shortname (e.g. DC01), not FQDN; SRV NameTarget
+# returns canonical FQDN (e.g. dc01.acik.local).
+dc_fqdn=""
+dc_shortname=""
+
+# (a) Try SRV record (preferred — canonical FQDN)
+set +e
+srv_output=$(prlctl exec "$VM_NAME" powershell -NoProfile -Command "
+try { Resolve-DnsName -Name '_ldap._tcp.dc._msdcs.$DOMAIN' -Type SRV -ErrorAction Stop -DnsOnly | Select-Object -First 1 -ExpandProperty NameTarget } catch { Write-Host '(srv-fail)' }
+" 2>&1 | redact | head -1 | tr -d '\r\n[:space:]')
+set -e
+if [ -n "$srv_output" ] && [ "$srv_output" != "(srv-fail)" ]; then
+  dc_fqdn="$srv_output"
+  log "  DC FQDN (from SRV NameTarget): $dc_fqdn"
 fi
 
-if [ -n "$dc_fqdn" ]; then
-  log "  DC FQDN discovered: $dc_fqdn"
-else
-  log "  DC FQDN NOT discovered (domain unreachable or DNS fail)"
+# (b) Fallback: nltest shortname + DOMAIN suffix concat
+if [ -z "$dc_fqdn" ] && [ "$nltest_rc" = "0" ]; then
+  dc_shortname=$(echo "$dc_locate_output" | grep -iE 'DC:.*\\' | sed -E 's/.*DC:[[:space:]]*\\\\([^[:space:]]+).*/\1/' | head -1 || true)
+  if [ -n "$dc_shortname" ]; then
+    dc_fqdn="${dc_shortname}.${DOMAIN}"
+    log "  DC FQDN (concatenated from nltest shortname + domain): $dc_fqdn (shortname=$dc_shortname)"
+  fi
+fi
+
+if [ -z "$dc_fqdn" ]; then
+  log "  DC FQDN NOT discovered (SRV fail + nltest fail — domain unreachable; falling back to \$DOMAIN literal for port probe)"
 fi
 
 # === Step 5: TCP port reachability (against DC if discovered, else $DOMAIN as fallback) ===
@@ -215,15 +240,40 @@ log "  evidence: $PRECHECK"
 log "  run log: $LOG"
 
 # === Pass/fail decision ===
-# Pass if:
-# - DNS resolve $DOMAIN returns OK (Step 3 [OK] line for $DOMAIN)
-# - DC FQDN discovered (Step 4 nltest success)
-# - At least port 88 (Kerberos) PASS (Step 5)
+# Strict pass gate (Codex 019e5aca iter-2 BLOCKER 2 absorb — runbook §7 alignment):
+# All required signals must PASS for exit 0:
+# - DNS resolve $DOMAIN returns A records
+# - SRV record _ldap._tcp.dc._msdcs.$DOMAIN OK
+# - nltest /dsgetdc:$DOMAIN exit 0 (DC locator)
+# - Test-NetConnection DC ports: 53 (DNS), 88 (Kerberos), 389 (LDAP), 445 (SMB) all PASS
+# - testai.acik.com:443 PASS (baseline)
+# - Time sync (w32tm) "collected" amber gate — operator must verify <5 min clock skew
+#   (script does not parse exact offset; treat as advisory, not blocker)
 dns_ok=$(grep -E "^\[OK\] $DOMAIN" "$PRECHECK" | head -1 || true)
+srv_ok=$(grep -E "^\[OK\] _ldap\._tcp\.dc\._msdcs\.$DOMAIN" "$PRECHECK" | head -1 || true)
+port_53_ok=$(grep -E "port 53 : PASS" "$PRECHECK" | head -1 || true)
 port_88_ok=$(grep -E "port 88 : PASS" "$PRECHECK" | head -1 || true)
+port_389_ok=$(grep -E "port 389 : PASS" "$PRECHECK" | head -1 || true)
+port_445_ok=$(grep -E "port 445 : PASS" "$PRECHECK" | head -1 || true)
+testai_ok=$(grep -E "$TEST_CLUSTER_HOST:443 : PASS" "$PRECHECK" | head -1 || true)
 
-if [ -n "$dns_ok" ] && [ -n "$dc_fqdn" ] && [ -n "$port_88_ok" ]; then
+missing=()
+[ -z "$dns_ok" ] && missing+=("DNS resolve $DOMAIN")
+[ -z "$srv_ok" ] && missing+=("DNS SRV _ldap._tcp.dc._msdcs.$DOMAIN")
+[ "$nltest_rc" != "0" ] && missing+=("nltest /dsgetdc (rc=$nltest_rc)")
+[ -z "$dc_fqdn" ] && missing+=("DC FQDN extraction (SRV + nltest fail)")
+[ -z "$port_53_ok" ] && missing+=("DC port 53 DNS")
+[ -z "$port_88_ok" ] && missing+=("DC port 88 Kerberos")
+[ -z "$port_389_ok" ] && missing+=("DC port 389 LDAP")
+[ -z "$port_445_ok" ] && missing+=("DC port 445 SMB")
+[ -z "$testai_ok" ] && missing+=("$TEST_CLUSTER_HOST:443 baseline")
+
+if [ ${#missing[@]} -eq 0 ]; then
   log "GATE 0 RESULT: PASS — pilot smoke phase can proceed (operator action)"
+  log ""
+  log "Time sync advisory: w32tm /query /status output captured Step 7. Operator"
+  log "MUST verify clock skew < 5 minutes (Kerberos requirement). Script does"
+  log "not parse exact offset; manual check or w32tm /stripchart recommended."
   log ""
   log "Boundary reminder: Gate 0 pass means DC reachability OK. Domain join,"
   log "agent install, and pilot smoke are SEPARATE operator-gated steps with"
@@ -233,18 +283,19 @@ if [ -n "$dns_ok" ] && [ -n "$dc_fqdn" ] && [ -n "$port_88_ok" ]; then
 else
   log "GATE 0 RESULT: FAIL — operator action required before pilot smoke"
   log ""
-  log "Likely causes (see RB-faz22-acik-local-vpn-routing-setup.md §6):"
-  if [ -z "$dns_ok" ]; then
-    log "  - DNS resolve fail for $DOMAIN (VM DNS not corp DNS; or VPN not connected)"
-  fi
-  if [ -z "$dc_fqdn" ]; then
-    log "  - DC locator fail (nltest ERROR_NO_SUCH_DOMAIN; domain unreachable)"
-  fi
-  if [ -z "$port_88_ok" ]; then
-    log "  - Kerberos port 88 not reachable (firewall block or DC down)"
-  fi
+  log "Missing signals (${#missing[@]}):"
+  for sig in "${missing[@]}"; do
+    log "  - $sig"
+  done
   log ""
-  log "Reproducer: connect Mac VPN, set VM Parallels Bridged mode, configure"
-  log "VM DNS to corp DNS IP, rerun this script."
+  log "Reference: docs/runbooks/RB-faz22-acik-local-vpn-routing-setup.md §6"
+  log "  - DNS fail → VM DNS not corp DNS / VPN not connected / corp DNS forward gap"
+  log "  - SRV fail → DC SRV records not in DNS / VPN DNS path broken"
+  log "  - nltest fail → domain unreachable (ERROR_NO_SUCH_DOMAIN 1355 0x54b)"
+  log "  - port 53/88/389/445 fail → firewall block or DC down"
+  log "  - testai.acik.com:443 fail → public path broken (unusual; check Mac internet)"
+  log ""
+  log "Reproducer: complete operator playbook (Mac VPN + Parallels routing"
+  log "decision tree + VM corp DNS config) then rerun this script."
   exit 1
 fi
