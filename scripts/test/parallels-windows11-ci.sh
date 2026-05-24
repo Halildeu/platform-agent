@@ -160,20 +160,33 @@ fi
 
 # === Step 4: windows-live.ps1 smoke ===
 log "Step 4: windows-live.ps1 smoke (admin PowerShell required)"
-# Transfer package to VM shared folder access (\\Mac\Home pattern) — assumes Parallels
-# 'Share Home folder' enabled. Path translation: macOS $HOME → \\Mac\Home or
-# Z:\ depending on guest mount. Operator is expected to have configured this.
-log "  invoking windows-live.ps1 via prlctl exec (admin)"
+# Guest path resolution: operator must configure Parallels Shared Folders so the
+# checked-out repo root is reachable from the VM. Default assumes the macOS Home
+# folder is shared and the repo lives at ~/Documents/platform-agent. Override via
+# PARALLELS_GUEST_REPO_PATH env (e.g. "\\\\psf\\platform-agent" or "\\\\Mac\\Home\\path").
+# This is OPERATOR-BOUND config — the script does NOT auto-create shared folder mounts
+# (would require host-side credentials / sudo). NEVER pass --password.
+readonly GUEST_REPO_PATH="${PARALLELS_GUEST_REPO_PATH:-\\\\Mac\\Home\\Documents\\platform-agent}"
+readonly GUEST_LIVE_PS1="${GUEST_REPO_PATH}\\scripts\\test\\windows-live.ps1"
+log "  guest repo path: $GUEST_REPO_PATH"
+log "  guest windows-live.ps1: $GUEST_LIVE_PS1"
+log "  invoking windows-live.ps1 via prlctl exec (admin via Start-Process -Verb RunAs)"
 
 # windows-live.ps1 requires Administrator; rely on Parallels guest tools auto-elevate or
-# pre-configured local admin session. NEVER pass --password.
-prlctl exec "$VM_NAME" --without-shell \
-  "powershell -NoProfile -ExecutionPolicy Bypass -Command Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\\\\Mac\\Home\\Documents\\platform-agent\\scripts\\test\\windows-live.ps1' -Verb RunAs -Wait" 2>&1 | redact >"$SMOKE_OUT" || {
-    log "WARN: windows-live.ps1 exit code non-zero (see $SMOKE_OUT)"
-}
+# pre-configured local admin session. Use -PassThru + explicit exit propagation so a
+# child PowerShell failure causes this step to fail (no false-green CI).
+PS_CMD="\$ErrorActionPreference='Stop'; \$proc = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${GUEST_LIVE_PS1}' -Verb RunAs -Wait -PassThru; if (-not \$proc) { exit 1 }; exit \$proc.ExitCode"
 
-log "  smoke output: $SMOKE_OUT ($(wc -l <"$SMOKE_OUT") lines)"
-tail -40 "$SMOKE_OUT" | tee -a "$LOG"
+if prlctl exec "$VM_NAME" --without-shell "powershell -NoProfile -ExecutionPolicy Bypass -Command \"${PS_CMD}\"" 2>&1 | redact >"$SMOKE_OUT"; then
+  log "  smoke output: $SMOKE_OUT ($(wc -l <"$SMOKE_OUT") lines)"
+  tail -40 "$SMOKE_OUT" | tee -a "$LOG"
+  log "  windows-live.ps1: PASS"
+else
+  rc=$?
+  log "  smoke output: $SMOKE_OUT ($(wc -l <"$SMOKE_OUT") lines)"
+  tail -40 "$SMOKE_OUT" | tee -a "$LOG"
+  fail "windows-live.ps1 exit code non-zero (rc=$rc; see $SMOKE_OUT) — CI FAIL"
+fi
 
 # === Step 5: BE-011 lifecycle smoke (optional hook) ===
 log "Step 5: BE-011 lifecycle smoke (optional helper)"

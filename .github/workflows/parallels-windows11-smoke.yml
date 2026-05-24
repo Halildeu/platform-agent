@@ -69,7 +69,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "Runner OS: $(uname -s) $(uname -r)"
-          echo "Runner labels: ${{ join(matrix.*, ',') || 'self-hosted,macOS,parallels,windows11' }}"
+          echo "Expected runner labels: self-hosted, macOS, parallels, windows11"
           command -v prlctl >/dev/null || { echo "prlctl missing — runner not configured"; exit 1; }
           echo "prlctl version: $(prlctl --version 2>&1 | head -1)"
           echo "VM list:"
