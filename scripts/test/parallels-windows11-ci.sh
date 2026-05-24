@@ -145,6 +145,30 @@ else
   log "  classification: WORKGROUP (PartOfDomain=$domain_class) — Parallels W11 CI pilot rehearsal scope"
 fi
 
+# === Step 2.5: Non-domain A1-A4 tier classification (optional helper integration) ===
+# Codex 019e5b38 Q2 absorb (b): yeni helper script ile A1-A4 detection (RB §4 + §8 decision tree).
+# Output: sanitized classification JSON + tier; pilot acceptance gates per RB §13.2.
+classify_helper="$(dirname "$0")/parallels-windows11-non-domain-classify.sh"
+if [ -x "$classify_helper" ]; then
+  log "Step 2.5: non-domain A1-A4 tier classification (helper: $classify_helper)"
+  classify_evidence_dir="${EVIDENCE_DIR}/classify"
+  mkdir -p "$classify_evidence_dir"
+  set +e
+  EVIDENCE_DIR="$classify_evidence_dir" \
+  RUN_ID="$RUN_ID" \
+  PARALLELS_VM_NAME="$VM_NAME" \
+  PARALLELS_OWNERSHIP="${PARALLELS_OWNERSHIP:-corporate}" \
+    bash "$classify_helper" >>"$LOG" 2>&1
+  classify_rc=$?
+  set -e
+  log "  classification helper exit: $classify_rc (0=PASS, 1=fail, 2=scope_redirect to 22.2.B)"
+  if [ -f "$classify_evidence_dir/classification.json" ]; then
+    log "  classification evidence: $classify_evidence_dir/classification.json"
+  fi
+else
+  log "Step 2.5: classification helper not found (executable expected at $classify_helper); skipping — re-run after platform-agent PR merge"
+fi
+
 # === Step 3: agent build/package ===
 log "Step 3: agent build/package — ./scripts/build/windows-package.sh"
 ( cd "$(dirname "$0")/../.." && ./scripts/build/windows-package.sh ) 2>&1 | redact >"$BUILD_OUT"

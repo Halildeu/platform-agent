@@ -213,6 +213,30 @@ Password reset ve file access su anda oncelik degil. Bu iki islem identity
 discovery, RBAC, audit integrity, destructive saga ve pilot gate kanitlari
 gelmeden acilmaz.
 
+### 9.1 Priority Bump — 2026-05-24 Non-domain Windows Pilot
+
+Faz 22.2.A non-domain Windows primary scope (workgroup/standalone/BYOD/
+Entra-joined/Workplace-registered) acceptance gate matrix per ADR-0012-EA
+"22.2 scope amendment" + RB-faz22-non-domain-windows-pilot.md §13.1
+asagidaki backlog items'i P1 oncelige tasidi (Codex strategic
+`019e5b38-cce8-71b3-ad84-07de7e99ab7a` Q4 absorb).
+
+| ID | Priority | Reason | Source Reference |
+|---|---|---|---|
+| AG-021 | P1 | A1-A4 identity classification gate (`dsregcmd /status` + Win32_ComputerSystem detection capability) | RB-faz22-non-domain-windows-pilot.md §4 + §8 |
+| AG-022 | P1 | Logged-in identity classification (LOCAL/DOMAIN/ENTRA) without credential touch | RB-faz22-non-domain-windows-pilot.md §4 + §5 |
+| AG-024 | P1 | Signed update manifest verification — A2 BYOD + A3 Entra + A4 Workplace tier acceptance prerequisite | RB-faz22-non-domain-windows-pilot.md §7 + gitops 22-2-trusted-signing-onboarding.md |
+| BE-015 | P1 | Endpoint identity compliance API — admin-visible classification (tier/PartOfDomain/AzureAdJoined/WorkplaceJoined) | RB-faz22-non-domain-windows-pilot.md §8.3 placeholder |
+| BE-019 | P1 | KVKK data retention enforcement — A2 BYOD acceptance prerequisite (currently policy documented only; backend enforcement gap) | RB-faz22-non-domain-windows-pilot.md §12.2 + gitops 22-2-kvkk-data-inventory.md §4.2 |
+
+**Bagimlilik**:
+- A1 multi-VM repeatability board issue (gitops #1044) prerequisite degil; mevcut altyapi yeterli.
+- A2 BYOD pilot acceptance: AG-024 + BE-019 MERGED + 22-2-byod-consent-template.md DPO sign-off sart.
+- A3 Entra-joined acceptance: AG-021 + AG-022 + BE-015 + AG-024 MERGED sart.
+- A4 Workplace-registered acceptance: AG-021 + AG-024 MERGED sart (read-only inventory scope).
+
+**Tracked by**: ADR-0012-EA "22.2 scope amendment" section, RB-faz22-non-domain-windows-pilot.md §13.1 acceptance gates matrix, gitops PR #1043 RB MERGED, gitops PR (3 doc bundle: BYOD consent + KVKK + signed onboarding) — paralel platform-agent PR (classification helper + tracking bump bu commit).
+
 -------------------------------------------------------------------------------
 ## 10. Haftalik Takip Rutini
 -------------------------------------------------------------------------------
