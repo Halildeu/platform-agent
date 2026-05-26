@@ -221,6 +221,42 @@ Password reset payload'inda password loglanmaz:
 }
 ```
 
+`COLLECT_INVENTORY` result detail identity block ornegi:
+
+```json
+{
+  "inventory": {
+    "hostname": "HALILKOOLUB735",
+    "osFamily": "WINDOWS",
+    "osName": "windows",
+    "architecture": "amd64",
+    "agentVersion": "0.1.0-dev",
+    "identity": {
+      "hostname": "HALILKOOLUB735",
+      "osVersion": "10.0.26200",
+      "osBuild": "26200",
+      "domain": "WORKGROUP",
+      "workgroup": "WORKGROUP",
+      "partOfDomain": false,
+      "azureAdJoined": "NO",
+      "domainJoined": "NO",
+      "workplaceJoined": "NO",
+      "domainProbe": "SKIPPED_NOT_DOMAIN_JOINED",
+      "loggedIn": {
+        "accountHash": "sha256:<16hex>",
+        "accountAuthorityHash": "sha256:<16hex>",
+        "sidHash": "sha256:<16hex>",
+        "sidMask": "sid:<16hex>"
+      },
+      "classification": "LOCAL"
+    }
+  }
+}
+```
+
+Identity block read-only'dir. Raw UPN/e-posta, full SID, raw tenant/device GUID,
+password, token veya Bearer degeri tasimaz; hash veya mask kullanir.
+
 -------------------------------------------------------------------------------
 ## 7. Command Result
 -------------------------------------------------------------------------------
@@ -272,13 +308,14 @@ Windows agent ornegi:
     "COLLECT_INVENTORY",
     "LIST_LOCAL_USERS",
     "GET_LOGGED_IN_USER",
-    "GET_USER_HOME_PATHS",
-    "DISABLE_LOCAL_USER",
-    "ENABLE_LOCAL_USER",
-    "RESET_LOCAL_USER_PASSWORD"
+    "GET_USER_HOME_PATHS"
   ]
 }
 ```
+
+Not: `DISABLE_LOCAL_USER`, `ENABLE_LOCAL_USER` ve
+`RESET_LOCAL_USER_PASSWORD` intentionally capability listesinde yoktur. Adapter,
+RBAC/audit/saga ve pilot gate kanitlari gelmeden backend'e advertise edilmez.
 
 macOS agent ilk faz ornegi:
 
@@ -288,10 +325,8 @@ macOS agent ilk faz ornegi:
   "architecture": "arm64",
   "capabilities": [
     "COLLECT_INVENTORY",
-    "LIST_LOCAL_USERS",
     "GET_LOGGED_IN_USER",
-    "GET_USER_HOME_PATHS",
-    "LIST_ALLOWED_DIRECTORY"
+    "GET_USER_HOME_PATHS"
   ]
 }
 ```

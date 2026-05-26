@@ -8,16 +8,18 @@ import (
 	"strings"
 	"time"
 
+	"platform-agent/internal/identity"
 	"platform-agent/internal/protocol"
 )
 
 type Snapshot struct {
-	Hostname     string            `json:"hostname"`
-	OSFamily     protocol.OSFamily `json:"osFamily"`
-	OSName       string            `json:"osName"`
-	Architecture string            `json:"architecture"`
-	AgentVersion string            `json:"agentVersion"`
-	CollectedAt  time.Time         `json:"collectedAt"`
+	Hostname     string             `json:"hostname"`
+	OSFamily     protocol.OSFamily  `json:"osFamily"`
+	OSName       string             `json:"osName"`
+	Architecture string             `json:"architecture"`
+	AgentVersion string             `json:"agentVersion"`
+	CollectedAt  time.Time          `json:"collectedAt"`
+	Identity     identity.Inventory `json:"identity"`
 }
 
 func Collect(agentVersion string, now time.Time) Snapshot {
@@ -32,6 +34,7 @@ func Collect(agentVersion string, now time.Time) Snapshot {
 		Architecture: runtime.GOARCH,
 		AgentVersion: agentVersion,
 		CollectedAt:  now,
+		Identity:     identity.Collect(now),
 	}
 }
 
