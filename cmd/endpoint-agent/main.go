@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"platform-agent/internal/app"
 	"platform-agent/internal/config"
+	"platform-agent/internal/identity"
 	agentlog "platform-agent/internal/logging"
 	winservice "platform-agent/internal/platform/windows/service"
 	"platform-agent/internal/protocol"
@@ -171,6 +173,11 @@ func handleDiagnoseCommand(args []string) {
 	}
 
 	switch args[0] {
+	case "identity":
+		snapshot := identity.Collect(time.Now())
+		if err := json.NewEncoder(os.Stdout).Encode(snapshot); err != nil {
+			log.Fatalf("diagnose identity encode failed: %v", err)
+		}
 	case "local-users":
 		localUsers, err := users.ListLocal()
 		if err != nil {
@@ -186,5 +193,5 @@ func handleDiagnoseCommand(args []string) {
 }
 
 func printDiagnoseUsage() {
-	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <local-users>")
+	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users>")
 }
