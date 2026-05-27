@@ -111,7 +111,8 @@ func (e *LocalExecutor) now() time.Time {
 // drift (true vs "true" vs 1) is normalised here once rather than at
 // every call site. Anything else returns false — the default for
 // includeSoftware is "off" so unknown shapes degrade safely to the
-// summary-only behaviour.
+// AG-025H lightweight contract (no software registry enumeration, no
+// WinGet probe; Snapshot.Software stays nil).
 func boolPayload(payload map[string]interface{}, key string) bool {
 	if payload == nil {
 		return false
