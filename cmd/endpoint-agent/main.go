@@ -29,8 +29,10 @@ import (
 	winservice "platform-agent/internal/platform/windows/service"
 	"platform-agent/internal/protocol"
 	"platform-agent/internal/security"
+	"platform-agent/internal/software"
 	"platform-agent/internal/state"
 	"platform-agent/internal/users"
+	"platform-agent/internal/winget"
 )
 
 func main() {
@@ -400,6 +402,24 @@ func handleDiagnoseCommand(args []string) {
 		if err := json.NewEncoder(os.Stdout).Encode(localUsers); err != nil {
 			log.Fatalf("diagnose local-users encode failed: %v", err)
 		}
+	case "software":
+		// Software inventory and winget readiness are deliberately
+		// split into separate subcommands so a slow / hung winget
+		// probe (LocalSystem can stall behind msstore source
+		// agreements) does not stop an operator from getting at
+		// the registry-only software snapshot. ProbeErrors on the
+		// snapshot are visible in stdout JSON; exit code is 0
+		// regardless so error isolation lives in the data, not the
+		// exit status.
+		snapshot := software.Collect(time.Now(), software.CollectOptions{})
+		if err := json.NewEncoder(os.Stdout).Encode(snapshot); err != nil {
+			log.Fatalf("diagnose software encode failed: %v", err)
+		}
+	case "winget":
+		readiness := winget.Detect(time.Now())
+		if err := json.NewEncoder(os.Stdout).Encode(readiness); err != nil {
+			log.Fatalf("diagnose winget encode failed: %v", err)
+		}
 	default:
 		printDiagnoseUsage()
 		os.Exit(2)
@@ -407,5 +427,5 @@ func handleDiagnoseCommand(args []string) {
 }
 
 func printDiagnoseUsage() {
-	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users>")
+	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users|software|winget>")
 }
