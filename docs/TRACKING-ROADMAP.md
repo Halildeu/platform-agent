@@ -83,6 +83,8 @@ Her live gate icin Up, Functional ve Secured kaniti ayri yazilir.
 | AG-022 | Logged-in identity classification | `IN_PROGRESS` | Son/current user LOCAL, DOMAIN, ENTRA, WORKPLACE veya UNKNOWN olarak siniflanir; UPN, SID, tenant/device id raw loglanmaz, hash/mask kullanilir. | `internal/identity/types_test.go`, issue #16 |
 | AG-023 | Domain user adapter read-only | `TODO` | Domain ortaminda kullanici status/list sorgusu read-only ve capability-gated calisir; password reset acmaz. | Yok |
 | AG-024 | Signed update manifest verification | `TODO` | Agent update manifest imzasini dogrular; imzasiz veya digest uyusmayan update reddedilir. | Yok |
+| AG-025 | Windows software inventory (read-only) | `IN_PROGRESS` | Agent HKLM + HKLM\WOW6432Node Uninstall hivelerini native registry ile okur. `UninstallString` payload'a girmez; sadece presence bool + MSI ProductCode hash. HKCU LocalSystem altinda default DISI. Sanitization JWT/email/UPN/full SID/user path/license key kapsar. Max 5000 app + 1 MiB payload cap'i. | `internal/software/`, `diagnose software` subcommand, `go test ./internal/software/...`, Codex thread `019e685b-924a-75b2-b60a-7d921c6269cb` (REVISE absorb) |
+| AG-026 | WinGet App Installer readiness probe | `IN_PROGRESS` | Agent `winget.exe` path + version + LocalSystem context status'u tek fixed-arg `--version` cagrisi ile 5s timeout altinda olcer. `availableInCurrentContext` + `systemContextReady` ayri sinyal. install/search/source komutu YOK. | `internal/winget/`, `diagnose winget` subcommand, `go test ./internal/winget/...` |
 
 -------------------------------------------------------------------------------
 ## 4. Backend Is Kalemleri

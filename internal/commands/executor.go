@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"platform-agent/internal/inventory"
@@ -50,7 +51,9 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 
 	switch command.Type {
 	case protocol.CommandCollectInventory:
-		snapshot := inventory.Collect(e.AgentVersion, e.now())
+		snapshot := inventory.CollectWithOptions(e.AgentVersion, e.now(), inventory.CollectOptions{
+			IncludeSoftwareApps: boolPayload(command.Payload, "includeSoftware"),
+		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"
 		result.Details = map[string]interface{}{"inventory": snapshot}
@@ -101,6 +104,37 @@ func (e *LocalExecutor) now() time.Time {
 		return time.Now()
 	}
 	return e.Now()
+}
+
+// boolPayload reads an optional bool argument from a command payload.
+// The wire payload is map[string]interface{} so backend-side typing
+// drift (true vs "true" vs 1) is normalised here once rather than at
+// every call site. Anything else returns false — the default for
+// includeSoftware is "off" so unknown shapes degrade safely to the
+// summary-only behaviour.
+func boolPayload(payload map[string]interface{}, key string) bool {
+	if payload == nil {
+		return false
+	}
+	switch v := payload[key].(type) {
+	case bool:
+		return v
+	case string:
+		// case-insensitive truthy. "1", "true", "True", "TRUE" all
+		// flip the flag; everything else (including empty string)
+		// keeps the safe default of false.
+		switch strings.ToLower(v) {
+		case "true", "1":
+			return true
+		}
+		return false
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	default:
+		return false
+	}
 }
 
 func withValidationError(r protocol.CommandResult, err error, finishedAt time.Time) protocol.CommandResult {

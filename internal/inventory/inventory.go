@@ -10,6 +10,8 @@ import (
 
 	"platform-agent/internal/identity"
 	"platform-agent/internal/protocol"
+	"platform-agent/internal/software"
+	"platform-agent/internal/winget"
 )
 
 type Snapshot struct {
@@ -20,14 +22,38 @@ type Snapshot struct {
 	AgentVersion string             `json:"agentVersion"`
 	CollectedAt  time.Time          `json:"collectedAt"`
 	Identity     identity.Inventory `json:"identity"`
+	Software     *software.Summary  `json:"software,omitempty"`
 }
 
+// CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
+// asks for. Zero value gives the historical behaviour plus the default
+// software summary (count + WinGet readiness, no Apps list).
+type CollectOptions struct {
+	// IncludeSoftwareApps switches the Software block from "summary only"
+	// (count + winget readiness) to "summary + full Apps list with size
+	// caps applied". The backend uses this for compliance scans; the
+	// heartbeat / default poll loop never sets it.
+	IncludeSoftwareApps bool
+}
+
+// Collect keeps the historical signature so the heartbeat loop and the
+// existing tests stay untouched. It is equivalent to CollectWithOptions
+// with a zero CollectOptions value.
 func Collect(agentVersion string, now time.Time) Snapshot {
+	return CollectWithOptions(agentVersion, now, CollectOptions{})
+}
+
+// CollectWithOptions is the new entry point COLLECT_INVENTORY uses
+// when it needs to honour an includeSoftware=true payload arg. The
+// software + winget probes are run unconditionally on Windows (their
+// result is cheap and ships as a summary by default); the opts flag
+// controls only whether the Apps list rides along.
+func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions) Snapshot {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
 	}
-	return Snapshot{
+	snapshot := Snapshot{
 		Hostname:     hostname,
 		OSFamily:     RuntimeOSFamily(),
 		OSName:       runtime.GOOS,
@@ -36,6 +62,20 @@ func Collect(agentVersion string, now time.Time) Snapshot {
 		CollectedAt:  now,
 		Identity:     identity.Collect(now),
 	}
+	snapshot.Software = collectSoftwareSummary(now, opts.IncludeSoftwareApps)
+	return snapshot
+}
+
+// collectSoftwareSummary runs the software inventory + winget readiness
+// probes and folds their results into a single Summary. On non-Windows
+// builds both probes return Supported=false so the Summary is a
+// no-op rollup rather than missing entirely — that keeps the wire
+// payload shape identical across platforms.
+func collectSoftwareSummary(now time.Time, includeApps bool) *software.Summary {
+	softwareSnapshot := software.Collect(now, software.CollectOptions{})
+	wingetReadiness := winget.Detect(now)
+	summary := software.Summarize(softwareSnapshot, wingetReadiness.SystemContextReady, wingetReadiness.Version, includeApps)
+	return &summary
 }
 
 func RuntimeCapabilityReport() protocol.CapabilityReport {

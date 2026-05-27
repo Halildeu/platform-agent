@@ -112,3 +112,55 @@ EDR/antivirus izni
 ```
 
 Canli AD/GPO deployment bu test stratejisinin sonraki fazidir.
+
+-------------------------------------------------------------------------------
+## 6. Software + WinGet Diagnose Smoke (AG-025 / AG-026)
+-------------------------------------------------------------------------------
+
+`endpoint-agent diagnose software` HKLM Uninstall hive'larini JSON olarak
+stdout'a dump eder; `endpoint-agent diagnose winget` ise `winget.exe`
+path + version + `systemContextReady` durumunu rapor eder. Iki komut
+ayri olarak akar — slow winget probe registry inventarini bloklamaz
+(error isolation).
+
+Parallels Windows 11 reproducer:
+
+```powershell
+# 1. Software envanteri — HKLM + WOW6432Node, no shell, no PowerShell
+.\endpoint-agent.exe diagnose software | Out-File -Encoding utf8 software.json
+Get-Content software.json | ConvertFrom-Json | Select-Object -ExpandProperty apps | Measure-Object
+
+# 2. PII sizinti yok kanit
+Select-String -Path software.json -Pattern '@example\.com|S-1-5-21-\d|C:\\Users\\[^\\\[]'
+# Bos sonuc PASS
+
+# 3. WinGet readiness
+.\endpoint-agent.exe diagnose winget
+
+# 4. LocalSystem context — psexec -s ile servis hesabi simulasyonu
+psexec -s -i .\endpoint-agent.exe diagnose winget
+# systemContextReady=true/false net rapor edilir; install/search/source YOK
+```
+
+Non-Windows runner uzerinde:
+
+```sh
+./endpoint-agent diagnose software
+# {"supported":false,"reason":"unsupported_os",...} exit 0
+./endpoint-agent diagnose winget
+# {"supported":false,...} exit 0
+```
+
+`COLLECT_INVENTORY` includeSoftware payload arg ile envanter command:
+
+```json
+{
+  "type": "COLLECT_INVENTORY",
+  "payload": { "includeSoftware": true }
+}
+```
+
+Default (`includeSoftware` yok veya false) — payload `inventory.software`
+ozet (count + winget ready) tasir, `inventory.software.apps` YOK.
+Opt-in ile `inventory.software.apps` size cap altinda tasinir
+(`truncated=true` flag'i ile rapor).

@@ -110,6 +110,17 @@ Windows local user read-only diagnostik:
 .\endpoint-agent.exe diagnose local-users
 ```
 
+Windows yazilim envanteri ve WinGet hazirligi diagnostik (AG-025/AG-026):
+
+```powershell
+.\endpoint-agent.exe diagnose software   # HKLM + WOW6432Node, sanitized
+.\endpoint-agent.exe diagnose winget     # winget.exe path + version + systemContextReady
+```
+
+`diagnose software` yalnizca okur — install/uninstall/upgrade yok.
+`diagnose winget` yalnizca `winget --version` cagirir; `install`,
+`search`, `source` veya `upgrade` cagrilmaz.
+
 ## License
 
 Bu proje Apache License 2.0 ile lisanslanmistir. Detaylar `LICENSE` dosyasinda.

@@ -257,6 +257,55 @@ Password reset payload'inda password loglanmaz:
 Identity block read-only'dir. Raw UPN/e-posta, full SID, raw tenant/device GUID,
 password, token veya Bearer degeri tasimaz; hash veya mask kullanir.
 
+`COLLECT_INVENTORY` payload `includeSoftware` argumani (opsiyonel, default
+false) yazilim envanteri detayini secer (AG-025/AG-026):
+
+```json
+{
+  "commandId": "...",
+  "type": "COLLECT_INVENTORY",
+  "payload": {
+    "includeSoftware": true
+  }
+}
+```
+
+`includeSoftware=false` (default): inventory.software alani yalniz ozet
+tasir — `appCount`, `wingetReady`, `wingetVersion`. Apps listesi yer
+almaz.
+
+`includeSoftware=true`: inventory.software.apps full liste tasir, ama
+agent tarafinda size cap uygulanir (`DefaultMaxApps=5000`,
+`DefaultMaxPayloadBytes=1 MiB`) ve `truncated=true` flag'i ile rapor
+edilir.
+
+`COLLECT_INVENTORY` result detail software block ornegi (default summary):
+
+```json
+{
+  "inventory": {
+    "software": {
+      "supported": true,
+      "appCount": 138,
+      "wingetReady": true,
+      "wingetVersion": "1.7.10861",
+      "schemaVersion": 1
+    }
+  }
+}
+```
+
+Software block icin HARD boundary:
+
+```text
+1. UninstallString full degeri payload'a girmez; sadece uninstallStringPresent bool
+2. MSI ProductCode GUID raw tasinmaz; sadece msiProductCodeHash (SHA-256 ilk 16 hex)
+3. HKCU default scope DISI; default sadece HKLM + HKLM\WOW6432Node
+4. WinGet readiness yalniz path + version + systemContextReady; install/search/source yok
+5. DisplayName / Publisher / DisplayVersion serbest metni sanitize edilir
+   (JWT, email, UPN, full SID, user path, license key -> [REDACTED])
+```
+
 -------------------------------------------------------------------------------
 ## 7. Command Result
 -------------------------------------------------------------------------------
