@@ -64,14 +64,18 @@ to avoid clobbering versioned filenames or release strings.
 
 ## How the inventory wiring uses it
 
-`internal/inventory/inventory.go`:
+`internal/inventory/inventory.go` (AG-025H lightweight contract):
 
-* `inventory.Collect(...)` — historical entry point, embeds
-  `Software *software.Summary` with `Apps=nil` (summary only).
+* `inventory.Collect(...)` — heartbeat / auto-enroll default. Leaves
+  `Snapshot.Software` **nil**; no registry enumeration, no WinGet probe.
+  The wire payload omits the `software` field entirely thanks to the
+  `omitempty` JSON tag.
 * `inventory.CollectWithOptions(..., CollectOptions{IncludeSoftwareApps: true})`
-  — fills `Software.Apps` with the size-capped full list. This is the
-  branch `internal/commands/executor.go` selects when the
-  `COLLECT_INVENTORY` payload carries `includeSoftware: true`.
+  — explicit opt-in. Runs the registry enumeration + WinGet `--version`
+  probe and attaches a full `Software *software.Summary` with the
+  size-capped `Apps` list. This is the branch `internal/commands/executor.go`
+  selects when the `COLLECT_INVENTORY` payload carries
+  `includeSoftware: true`.
 
 ## Diagnose subcommands
 

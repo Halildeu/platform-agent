@@ -270,16 +270,18 @@ false) yazilim envanteri detayini secer (AG-025/AG-026):
 }
 ```
 
-`includeSoftware=false` (default): inventory.software alani yalniz ozet
-tasir — `appCount`, `wingetReady`, `wingetVersion`. Apps listesi yer
-almaz.
+`includeSoftware=false` (AG-025H lightweight default): inventory.software
+alani PAYLOAD'DA YER ALMAZ. Registry enumeration ve WinGet probe hic
+calistirilmaz; heartbeat / auto-enroll bu defaulti kullanir. Wire
+payload yalniz host/os/identity tasir.
 
-`includeSoftware=true`: inventory.software.apps full liste tasir, ama
-agent tarafinda size cap uygulanir (`DefaultMaxApps=5000`,
+`includeSoftware=true`: inventory.software blogu attach edilir + apps
+full liste tasir; agent tarafinda size cap uygulanir (`DefaultMaxApps=5000`,
 `DefaultMaxPayloadBytes=1 MiB`) ve `truncated=true` flag'i ile rapor
 edilir.
 
-`COLLECT_INVENTORY` result detail software block ornegi (default summary):
+`COLLECT_INVENTORY` result detail software block ornegi (yalnizca
+includeSoftware=true ile gonderilir):
 
 ```json
 {
