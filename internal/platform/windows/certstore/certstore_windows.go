@@ -84,11 +84,6 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 	// has been minted but the key/cert binding has not yet propagated,
 	// the agent falls back to an older cert that still has a valid
 	// signer rather than dying on `acquire CNG signer` for the newest.
-	rankedRaw := make(map[string]bool, len(ranked))
-	for _, leaf := range ranked {
-		rankedRaw[string(leaf.Raw)] = true
-	}
-
 	type rankedCtx struct {
 		leaf *x509.Certificate
 		ctx  *windows.CertContext
