@@ -42,9 +42,10 @@ var piiPatterns = []*regexp.Regexp{
 	// Case-insensitive on the drive letter to cover %SystemDrive% drift.
 	regexp.MustCompile(`(?i)([A-Z]:\\Users\\)[^\\/:*?"<>|]+`),
 	// Product-key-shaped strings: five 5-char groups separated by
-	// hyphens (Windows / Office style). Tightened to mixed
-	// alphanumerics to avoid clobbering version triplets.
-	regexp.MustCompile(`\b[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\b`),
+	// hyphens (Windows / Office style). Case-insensitive so non-canonical
+	// keys (some vendor formats use lowercase) get scrubbed too. Still
+	// won't match version triplets — those don't have four hyphens.
+	regexp.MustCompile(`(?i)\b[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\b`),
 }
 
 // "S-1-5-21-REDACTED" preserves the SID shape while still replacing

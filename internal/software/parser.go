@@ -77,9 +77,12 @@ func Normalize(sources []RegistrySource, now time.Time, opts CollectOptions) Sof
 		CollectedAt:   now.UTC(),
 	}
 
-	// Dedup by (displayName, displayVersion, label) — Windows often
-	// records the same product under both HKLM64 and HKLM32 views and
-	// we don't want to double-count.
+	// Dedup is per (displayName, displayVersion, label). The label is
+	// part of the key so a product genuinely installed under both the
+	// 64-bit and 32-bit views (a real Windows pattern) survives as
+	// two entries with different InstallSource values — that's the
+	// correct view of disk state. Only same-hive duplicates collapse,
+	// which is what we want.
 	seen := map[string]struct{}{}
 	candidates := make([]InstalledApp, 0, 256)
 	totalSize := 0

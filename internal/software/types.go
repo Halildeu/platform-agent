@@ -126,8 +126,17 @@ type Summary struct {
 
 // CollectOptions controls how Collect populates the snapshot. Zero value
 // gives the safe defaults (HKLM only, default caps).
+//
+// Note on the absent HKCU knob: a future "real per-user inventory"
+// path is intentionally NOT exposed here. That work needs to walk
+// `HKEY_USERS\<SID>` for *loaded* interactive-user hives (HIGH 1) and
+// is a separate ticket. Adding an IncludeHKCU toggle to this struct
+// today would invite callers to flip it under LocalSystem and get the
+// S-1-5-18 service-account hive — which is exactly the misleading
+// scope the HIGH 1 boundary forbids. Codex peer review iter-1
+// (thread 019e691c) flagged a dormant field; remediation is "do not
+// add the field, document the gap".
 type CollectOptions struct {
-	MaxApps         int  // 0 → DefaultMaxApps
-	MaxPayloadBytes int  // 0 → DefaultMaxPayloadBytes
-	IncludeHKCU     bool // reserved; default false. See HIGH 1 in package doc.
+	MaxApps         int // 0 → DefaultMaxApps
+	MaxPayloadBytes int // 0 → DefaultMaxPayloadBytes
 }

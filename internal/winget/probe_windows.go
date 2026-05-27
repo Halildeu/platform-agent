@@ -15,12 +15,20 @@ import (
 // It is the only function callers outside this package should ever
 // invoke; the lower-level Probe / Locator / Executor primitives exist
 // for testability.
+//
+// The `now` parameter is kept on the signature for caller-side audit
+// stamping (the inventory snapshot uses it as CollectedAt), but the
+// probe's internal duration measurement uses the real wall clock — a
+// fixed-clock stub would collapse ProbeDurationMs to zero and lose the
+// telemetry signal even though context.WithTimeout still works (Codex
+// peer review iter-1, thread 019e691c).
 func Detect(now time.Time) Readiness {
+	_ = now
 	return Probe(ProbeOptions{
 		Locator: defaultLocator,
 		Execute: defaultExecutor,
 		Timeout: DefaultProbeTimeout * time.Second,
-		Now:     func() time.Time { return now },
+		Now:     time.Now,
 	})
 }
 

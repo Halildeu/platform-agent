@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"platform-agent/internal/inventory"
@@ -119,7 +120,14 @@ func boolPayload(payload map[string]interface{}, key string) bool {
 	case bool:
 		return v
 	case string:
-		return v == "true" || v == "TRUE" || v == "1"
+		// case-insensitive truthy. "1", "true", "True", "TRUE" all
+		// flip the flag; everything else (including empty string)
+		// keeps the safe default of false.
+		switch strings.ToLower(v) {
+		case "true", "1":
+			return true
+		}
+		return false
 	case float64:
 		return v != 0
 	case int:

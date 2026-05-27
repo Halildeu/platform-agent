@@ -33,12 +33,14 @@ const DefaultProbeTimeout = 5 // seconds
 //
 //   - supported is false on non-Windows; everything else is then
 //     trivially false / zero and the rest of the struct is informational.
-//   - availableInCurrentContext means "we found winget.exe on disk AND
-//     it returned a version string within the timeout". It does NOT
-//     mean "winget can install something right now".
-//   - systemContextReady is the stricter sibling: winget responded
-//     within budget, the version string parsed, and there was no
-//     timeout. The two fields are decoupled on purpose — see HIGH 2.
+//   - availableInCurrentContext means "the locator found winget.exe
+//     for the current process context" — nothing more. It does NOT
+//     imply that the version probe ran or succeeded. A host can flag
+//     available=true and still fail to install anything (no source
+//     agreements, no AppX activation, etc.).
+//   - systemContextReady is the stricter sibling: winget was located
+//     AND responded within the timeout budget AND the version string
+//     parsed. The two fields are decoupled on purpose — see HIGH 2.
 //   - executablePath is sanitised (the user-segment of any
 //     "C:\Users\<name>\…" path is redacted via
 //     security.RedactSoftwareString) so the wire payload doesn't leak
