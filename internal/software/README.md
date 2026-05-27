@@ -100,6 +100,10 @@ hard JSON-marshal failures, which should never happen in practice.
 * **AG-027 7-Zip install adapter** — first WinGet pilot install, gated by
   BE-020.
 * `HKEY_USERS\<SID>` enumeration for real per-user software view.
-* `winget search` / `winget upgrade` / `winget source` invocation.
+* `winget search` / `winget upgrade` invocation.
+* Any `winget source` mutation subcommand (`add`, `remove`, `update`,
+  `reset`). AG-026A read-only `winget source list` is in scope today
+  (see scope table above); mutation paths stay out.
+* `winget install` / `winget uninstall` (AG-027 + BE-021A scope).
 
 These belong in separate, individually-reviewed PRs.

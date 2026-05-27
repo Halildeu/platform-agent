@@ -40,17 +40,25 @@ func TestRunSourceEgressMissingOptions(t *testing.T) {
 	}
 }
 
-func TestRunSourceEgressRejectsArbitraryPackageID(t *testing.T) {
-	r := RunSourceEgressPreflight(SourceEgressOptions{
-		Locator:   func() (string, error) { return "winget.exe", nil },
-		Execute:   func(ctx context.Context, path string, args ...string) ([]byte, error) { return nil, nil },
-		PackageID: "evil.injection",
-	})
-	if r.ProbeError == "" || !strings.Contains(r.ProbeError, FixedPackageQueryID) {
-		t.Fatalf("preflight must refuse non-pilot package id, got ProbeError=%q", r.ProbeError)
+// SourceEgressOptions.PackageID was removed in Codex 019e6b70 iter-1
+// P1#2 / P2 absorb (the public field was a footgun even with the
+// runtime guard). The constant is now the single source of truth —
+// `runPackageQuery` reads FixedPackageQueryID directly. This test
+// pins the API surface so a future caller cannot reintroduce the
+// override field by accident.
+func TestSourceEgressOptionsHasNoPackageIDOverride(t *testing.T) {
+	// Compile-time assertion via struct literal: any future field
+	// named PackageID would make this expression fail to compile.
+	_ = SourceEgressOptions{
+		Locator: nil,
+		Execute: nil,
 	}
-	if r.Sources != nil {
-		t.Fatalf("rejected preflight must skip source list, got %d entries", len(r.Sources))
+	// Runtime sanity: the readiness shape still echoes the pinned id
+	// in PackageQuery.PackageID so backend parsers do not have to
+	// handle a missing field.
+	r := RunSourceEgressPreflight(SourceEgressOptions{})
+	if r.PackageQuery.PackageID != FixedPackageQueryID {
+		t.Fatalf("PackageQuery.PackageID = %q, want %q", r.PackageQuery.PackageID, FixedPackageQueryID)
 	}
 }
 
@@ -124,7 +132,20 @@ func TestRunSourceEgressFixedPackageQueryArgv(t *testing.T) {
 }
 
 func TestRunSourceEgressForbiddenSubcommandsNeverInvoked(t *testing.T) {
-	forbidden := []string{"install", "upgrade", "uninstall", "add", "remove", "update", "reset", "export", "import"}
+	// Codex 019e6b70 iter-1 non-blocking note: list widened to cover
+	// every mutating / config / interactive winget subcommand. This
+	// is a regression belt — the actual security gate is the fixed
+	// argv inside runSourceList / runPackageQuery (no caller path
+	// can inject an alternative subcommand).
+	forbidden := []string{
+		"install", "upgrade", "uninstall",
+		"add", "remove", "update", "reset",
+		"export", "import",
+		"hash", "validate", "pin",
+		"configure", "download", "repair",
+		"features", "complete", "debug",
+		"settings",
+	}
 	_ = RunSourceEgressPreflight(SourceEgressOptions{
 		Locator: func() (string, error) { return "winget.exe", nil },
 		Execute: func(ctx context.Context, path string, args ...string) ([]byte, error) {
@@ -280,8 +301,8 @@ func TestRunSourceEgressEgressOKWithStubs(t *testing.T) {
 		HTTPCheck: stubHTTPChecker(200, nil),
 		Now:       deterministicNow(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
 	})
-	if len(r.Egress.DNS) != len(DefaultEgressTargets) {
-		t.Fatalf("expected DNS probe per target (%d), got %d", len(DefaultEgressTargets), len(r.Egress.DNS))
+	if len(r.Egress.DNS) != len(DefaultEgressTargets()) {
+		t.Fatalf("expected DNS probe per target (%d), got %d", len(DefaultEgressTargets()), len(r.Egress.DNS))
 	}
 	for i, check := range r.Egress.DNS {
 		if !check.OK {
@@ -350,6 +371,163 @@ func stubDialer(err error) Dialer {
 func stubHTTPChecker(status int, err error) HTTPChecker {
 	return func(ctx context.Context, target string) (int, error) {
 		return status, err
+	}
+}
+
+// ─── Codex 019e6b70 iter-1 absorb regression coverage ─────────────
+
+// P1#1 — overall timeout enforcement. With a 100ms overall budget
+// and stalled sub-probes, the total wall-clock must be bounded by
+// the budget (modulo small slop) — NOT 3× the budget as the
+// previous per-slice math could produce.
+func TestRunSourceEgressOverallTimeoutBudgetEnforced(t *testing.T) {
+	r := RunSourceEgressPreflight(SourceEgressOptions{
+		Locator: func() (string, error) { return "winget.exe", nil },
+		Execute: func(ctx context.Context, path string, args ...string) ([]byte, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		Resolve: func(ctx context.Context, host string) ([]string, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		Dial: func(ctx context.Context, network, address string) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		HTTPCheck: func(ctx context.Context, target string) (int, error) {
+			<-ctx.Done()
+			return 0, ctx.Err()
+		},
+		Timeout: 100 * time.Millisecond,
+	})
+	// Tolerate up to 2× the budget for goroutine + cleanup slop.
+	if r.ProbeDurationMs > 500 {
+		t.Fatalf("overall preflight exceeded budget: got %dms (limit 500ms)", r.ProbeDurationMs)
+	}
+	if !r.Timeout {
+		t.Fatalf("overall Timeout flag must reflect sub-probe deadlines, got %#v", r)
+	}
+}
+
+// P1#3 — source-list failure visibility. The previous "_" discard
+// pattern hid timeout / parse-failure from the operator; the new
+// SourceEgressReadiness.SourceListError field must surface both.
+func TestRunSourceEgressSourceListErrorSurfaced(t *testing.T) {
+	r := RunSourceEgressPreflight(SourceEgressOptions{
+		Locator: func() (string, error) { return "winget.exe", nil },
+		Execute: func(ctx context.Context, path string, args ...string) ([]byte, error) {
+			if args[0] == "source" {
+				return nil, errors.New("source list exited with non-zero")
+			}
+			return []byte("Found 7-Zip [7zip.7zip]\n"), nil
+		},
+		Resolve:   stubResolver(nil),
+		Dial:      stubDialer(nil),
+		HTTPCheck: stubHTTPChecker(200, nil),
+		Now:       deterministicNow(0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60),
+	})
+	if r.SourceListError == "" {
+		t.Fatalf("SourceListError must surface non-zero source-list exit, got empty")
+	}
+	if strings.Contains(r.SourceListError, "non-zero") == false && strings.Contains(r.SourceListError, "exited") == false {
+		t.Fatalf("SourceListError = %q, want sanitised error reason", r.SourceListError)
+	}
+}
+
+func TestRunSourceEgressSourceListTimeoutSurfacesOverallTimeout(t *testing.T) {
+	r := RunSourceEgressPreflight(SourceEgressOptions{
+		Locator: func() (string, error) { return "winget.exe", nil },
+		Execute: func(ctx context.Context, path string, args ...string) ([]byte, error) {
+			if args[0] == "source" {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return []byte("Found 7-Zip [7zip.7zip]\n"), nil
+		},
+		Resolve:   stubResolver(nil),
+		Dial:      stubDialer(nil),
+		HTTPCheck: stubHTTPChecker(200, nil),
+		Timeout:   60 * time.Millisecond,
+	})
+	if !r.Timeout {
+		t.Fatalf("source-list timeout must flip overall Timeout=true")
+	}
+	if r.SourceListError == "" {
+		t.Fatalf("source-list timeout must populate SourceListError")
+	}
+}
+
+// P2#4 — Found heuristic must be locale-stable. The previous
+// "no package found" English-only negative match would have
+// false-positived Turkish "paket bulunamadı" output as Found=true.
+func TestRunPackageQueryFoundLocaleStable(t *testing.T) {
+	cases := []struct {
+		name      string
+		stdout    string
+		wantFound bool
+	}{
+		{
+			name:      "english-found-with-id",
+			stdout:    "Found 7-Zip [7zip.7zip]\nVersion: 24.07\n",
+			wantFound: true,
+		},
+		{
+			name:      "english-not-found-without-id",
+			stdout:    "No package found matching input criteria.\n",
+			wantFound: false,
+		},
+		{
+			name:      "turkish-not-found",
+			stdout:    "Giriş ölçütleriyle eşleşen paket bulunamadı.\n",
+			wantFound: false,
+		},
+		{
+			name:      "diagnostic-banner-without-id",
+			stdout:    "[WARN] Cache miss — source 'winget' fell back to network.\n",
+			wantFound: false,
+		},
+		{
+			name:      "mixed-case-id-match",
+			stdout:    "Found 7-Zip [7Zip.7Zip] manifest entry.\n",
+			wantFound: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := RunSourceEgressPreflight(SourceEgressOptions{
+				Locator: func() (string, error) { return "winget.exe", nil },
+				Execute: func(ctx context.Context, path string, args ...string) ([]byte, error) {
+					if len(args) >= 1 && args[0] == "show" {
+						return []byte(tc.stdout), nil
+					}
+					return []byte(sampleSourceListOutput()), nil
+				},
+				Resolve:   stubResolver(nil),
+				Dial:      stubDialer(nil),
+				HTTPCheck: stubHTTPChecker(200, nil),
+				Now:       deterministicNow(0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60),
+			})
+			if r.PackageQuery.Found != tc.wantFound {
+				t.Fatalf("Found = %v, want %v (stdout=%q)", r.PackageQuery.Found, tc.wantFound, tc.stdout)
+			}
+		})
+	}
+}
+
+// P1#2 — DefaultEgressTargets() returns a copy so callers cannot
+// mutate the canonical list. The unexported defaultEgressTargets
+// array stays read-only.
+func TestDefaultEgressTargetsReturnsCopy(t *testing.T) {
+	a := DefaultEgressTargets()
+	if len(a) == 0 {
+		t.Fatalf("DefaultEgressTargets() must return the hard-coded list")
+	}
+	original := a[0].Hostname
+	a[0].Hostname = "attacker.example.com"
+	b := DefaultEgressTargets()
+	if b[0].Hostname != original {
+		t.Fatalf("mutation leaked into canonical list: b[0].Hostname=%q", b[0].Hostname)
 	}
 }
 

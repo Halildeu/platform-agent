@@ -68,15 +68,30 @@ const DefaultSourceEgressTimeout = 15 // seconds
 // (which stays pinned to AG-026's `--version` probe shape).
 const SourceEgressSchemaVersion = 1
 
-// DefaultEgressTargets is the hard-coded list of hostnames that
-// WinGet's two default sources rely on. The list is fixed
-// (NOT payload-controlled) so a future caller cannot ask the
-// agent to dial an arbitrary host.
-var DefaultEgressTargets = []EgressTarget{
+// defaultEgressTargets is the hard-coded list of hostnames that
+// WinGet's two default sources rely on. Unexported + read-only: the
+// only way to surface this list to a caller is DefaultEgressTargets()
+// which returns a copy. A future contributor cannot mutate the list
+// in-place or wire an alternative via SourceEgressOptions (the
+// options struct intentionally has no Targets field — see Codex
+// 019e6b70 iter-1 P1#2 absorb).
+var defaultEgressTargets = [...]EgressTarget{
 	// Community repo (winget source) CDN endpoint.
 	{Source: "winget", Hostname: "cdn.winget.microsoft.com", Port: 443},
 	// Microsoft Store source (msstore) edge.
 	{Source: "msstore", Hostname: "storeedgefd.dsx.mp.microsoft.com", Port: 443},
+}
+
+// DefaultEgressTargets returns a copy of the hard-coded egress
+// target list. Callers cannot mutate the canonical slice — every
+// invocation allocates a fresh backing array. The preflight runner
+// uses this internally; external code uses it for diagnostics
+// (e.g. operator runbooks listing the expected reachability
+// surface).
+func DefaultEgressTargets() []EgressTarget {
+	out := make([]EgressTarget, len(defaultEgressTargets))
+	copy(out, defaultEgressTargets[:])
+	return out
 }
 
 // EgressTarget pairs a logical source with the network endpoint
@@ -105,28 +120,27 @@ type Dialer func(ctx context.Context, network, address string) error
 // stub; production wires an http.Client with short timeouts.
 type HTTPChecker func(ctx context.Context, target string) (statusCode int, err error)
 
-// SourceEgressOptions controls how RunSourceEgressPreflight
-// acquires winget.exe, invokes its read-only subcommands, and
-// probes the upstream endpoints. Zero value yields safe defaults
-// on Windows; the seam fields allow tests to override every I/O
-// boundary so the package can be exercised hermetically.
+// SourceEgressOptions controls how RunSourceEgressPreflight acquires
+// winget.exe, invokes its read-only subcommands, and probes the
+// upstream endpoints. Zero value yields safe defaults on Windows;
+// the seam fields allow tests to override every I/O boundary so the
+// package can be exercised hermetically.
 //
-// The slice of EgressTarget is taken from opts.Targets when set
-// (allowing tests to inject a different probe surface) and
-// otherwise defaults to DefaultEgressTargets — NEVER from a
-// payload-controlled list. The function checks at call time that
-// no caller has snuck a `.Targets = userControlled` past the
-// constructor.
+// HARD BOUNDARY (Codex 019e6b70 iter-1 P1#2 absorb): the options
+// struct intentionally has no Targets or PackageID field. The egress
+// target list is hard-coded (defaultEgressTargets) and the package
+// id is hard-coded (FixedPackageQueryID); a future caller cannot
+// override either via the public surface. Tests inject alternative
+// targets via the unexported runEgressWith helper inside the package
+// — that is the only way the preflight will dial a non-default host.
 type SourceEgressOptions struct {
-	Locator     Locator
-	Execute     Executor
-	Resolve     Resolver
-	Dial        Dialer
-	HTTPCheck   HTTPChecker
-	Timeout     time.Duration
-	Now         func() time.Time
-	Targets     []EgressTarget
-	PackageID   string // override only honored when explicitly == FixedPackageQueryID
+	Locator   Locator
+	Execute   Executor
+	Resolve   Resolver
+	Dial      Dialer
+	HTTPCheck HTTPChecker
+	Timeout   time.Duration
+	Now       func() time.Time
 }
 
 // SourceInfo is one row from `winget source list`.
@@ -179,12 +193,21 @@ type EgressSummary struct {
 //
 //   - Supported is false on non-Windows builds.
 //   - Sources lists what `winget source list` returned (read-only).
+//     Empty list with a non-empty SourceListError means the source-list
+//     subcommand failed or timed out (Codex 019e6b70 iter-1 P1#3
+//     absorb); empty list with no error means winget reported no
+//     configured sources.
+//   - SourceListError is the sanitised reason `winget source list`
+//     failed (timeout, non-zero exit, parse failure). Set only on
+//     failure; absent from the wire when the subcommand returned a
+//     parseable table.
 //   - PackageQuery is the result of the FixedPackageQueryID probe.
 //   - Egress is the DNS / TCP / HTTPS reachability rollup.
 //   - SchemaVersion gates wire-evolution.
 //   - Timeout is true when the overall preflight budget was exceeded
-//     for at least one sub-probe; individual NetworkCheck rows still
-//     carry per-probe error reasons.
+//     OR any sub-probe (source list, package query, egress) hit its
+//     own deadline. Individual NetworkCheck rows + PackageQuery.Timeout
+//     still carry per-probe error reasons.
 type SourceEgressReadiness struct {
 	Supported       bool               `json:"supported"`
 	SchemaVersion   int                `json:"schemaVersion"`
@@ -192,6 +215,7 @@ type SourceEgressReadiness struct {
 	Timeout         bool               `json:"timeout"`
 	ProbeError      string             `json:"probeError,omitempty"`
 	Sources         []SourceInfo       `json:"sources,omitempty"`
+	SourceListError string             `json:"sourceListError,omitempty"`
 	PackageQuery    PackageQueryResult `json:"packageQuery"`
 	Egress          EgressSummary      `json:"egress"`
 }
@@ -203,6 +227,24 @@ type SourceEgressReadiness struct {
 // The function never invokes a mutating subcommand and never accepts
 // a caller-supplied argv. Every argv element is constructed inside
 // this file so there is a single audit point for the boundary.
+//
+// Timeout discipline (Codex 019e6b70 iter-1 P1#1 absorb):
+//
+//   - opts.Timeout is the OVERALL budget for the entire preflight.
+//   - A single root context with that deadline is created here; every
+//     sub-probe derives a child context from it via the per-probe
+//     slice. The deadline ALSO clamps the total wall-clock even if
+//     the per-probe slice is larger.
+//   - The per-probe slice is `remaining / N` where N is the number of
+//     sub-probes still to run, with a 250ms floor; this gives the
+//     short-budget worst case a chance to finish at least one cheap
+//     probe before the root deadline elapses. (The previous fixed
+//     `opts.Timeout / 3` slice violated the overall budget on
+//     pathological inputs where every sub-probe stalled to the slice
+//     deadline.)
+//   - Source-list, package-query, AND egress timeouts ALL flip
+//     readiness.Timeout=true (previously only PackageQuery.Timeout
+//     surfaced — see Codex 019e6b70 P1#3).
 func RunSourceEgressPreflight(opts SourceEgressOptions) (readiness SourceEgressReadiness) {
 	if opts.Timeout <= 0 {
 		opts.Timeout = DefaultSourceEgressTimeout * time.Second
@@ -210,27 +252,12 @@ func RunSourceEgressPreflight(opts SourceEgressOptions) (readiness SourceEgressR
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	if opts.PackageID == "" {
-		opts.PackageID = FixedPackageQueryID
-	}
-	// Hard guard: reject any callsite that tries to query a package
-	// other than the fixed pilot id. This keeps the boundary
-	// auditable from this file alone.
-	if opts.PackageID != FixedPackageQueryID {
-		readiness.ProbeError = "package id not allowed (only " + FixedPackageQueryID + " supported)"
-		readiness.SchemaVersion = SourceEgressSchemaVersion
-		return readiness
-	}
-	targets := opts.Targets
-	if len(targets) == 0 {
-		targets = DefaultEgressTargets
-	}
 
 	readiness = SourceEgressReadiness{
 		Supported:     true,
 		SchemaVersion: SourceEgressSchemaVersion,
 		PackageQuery: PackageQueryResult{
-			PackageID: opts.PackageID,
+			PackageID: FixedPackageQueryID,
 		},
 	}
 
@@ -250,26 +277,32 @@ func RunSourceEgressPreflight(opts SourceEgressOptions) (readiness SourceEgressR
 		return readiness
 	}
 
-	// Per-sub-probe timeout slices the overall budget so a stalled
-	// `winget show` cannot starve the egress checks (and vice versa).
-	subTimeout := opts.Timeout / 3
-	if subTimeout < time.Second {
-		subTimeout = time.Second
-	}
+	// Root context with the overall preflight deadline. Every
+	// sub-probe is bounded by this AND its per-probe slice.
+	rootCtx, rootCancel := context.WithTimeout(context.Background(), opts.Timeout)
+	defer rootCancel()
 
 	// 1. Source list (read-only, fixed argv).
-	readiness.Sources, _ = runSourceList(opts, wingetPath, subTimeout)
+	sources, sourceListErr, sourceListTimedOut := runSourceList(rootCtx, opts, wingetPath, perProbeSlice(rootCtx, opts.Now, 3))
+	readiness.Sources = sources
+	if sourceListErr != "" {
+		readiness.SourceListError = sourceListErr
+	}
+	if sourceListTimedOut {
+		readiness.Timeout = true
+	}
 
 	// 2. Fixed package-id query (read-only, fixed argv).
-	readiness.PackageQuery = runPackageQuery(opts, wingetPath, subTimeout)
+	readiness.PackageQuery = runPackageQuery(rootCtx, opts, wingetPath, perProbeSlice(rootCtx, opts.Now, 2))
 	if readiness.PackageQuery.Timeout {
 		readiness.Timeout = true
 	}
 
-	// 3. Egress reachability (DNS / TCP / HTTPS). Each sub-probe
-	//    gets its own short timeout — these are the cheap probes
-	//    so they share the remaining budget.
-	readiness.Egress = runEgress(opts, targets, subTimeout)
+	// 3. Egress reachability (DNS / TCP / HTTPS).
+	readiness.Egress = runEgressWith(rootCtx, opts, defaultEgressTargets[:], perProbeSlice(rootCtx, opts.Now, 1))
+	if egressTimedOut(readiness.Egress) {
+		readiness.Timeout = true
+	}
 
 	// 4. Proxy snapshot. Reads the standard env vars on the agent
 	//    host; the URL is sanitised before leaving the function.
@@ -278,23 +311,84 @@ func RunSourceEgressPreflight(opts SourceEgressOptions) (readiness SourceEgressR
 	return readiness
 }
 
+// perProbeSlice returns the per-sub-probe deadline given the remaining
+// root-context budget and the number of sub-probes still to run. A
+// 250ms floor keeps the cheap egress probes responsive even when the
+// overall budget is nearly spent; the root context still clamps the
+// total wall-clock so a slow probe cannot exceed the overall deadline.
+func perProbeSlice(rootCtx context.Context, now func() time.Time, remainingProbes int) time.Duration {
+	deadline, ok := rootCtx.Deadline()
+	if !ok || remainingProbes <= 0 {
+		return time.Second
+	}
+	remaining := deadline.Sub(now())
+	if remaining <= 0 {
+		return 0
+	}
+	slice := remaining / time.Duration(remainingProbes)
+	const floor = 250 * time.Millisecond
+	if slice < floor {
+		return floor
+	}
+	return slice
+}
+
+// egressTimedOut reports whether any DNS / TCP / HTTPS check
+// recorded a context-deadline error. Used to roll the per-probe
+// timeout signal up into readiness.Timeout for the overall flag.
+func egressTimedOut(summary EgressSummary) bool {
+	for _, check := range summary.DNS {
+		if isTimeoutReason(check.ErrorReason) {
+			return true
+		}
+	}
+	for _, check := range summary.TCP {
+		if isTimeoutReason(check.ErrorReason) {
+			return true
+		}
+	}
+	for _, check := range summary.HTTPS {
+		if isTimeoutReason(check.ErrorReason) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTimeoutReason(reason string) bool {
+	if reason == "" {
+		return false
+	}
+	lc := strings.ToLower(reason)
+	return strings.Contains(lc, "deadline exceeded") || strings.Contains(lc, "timed out") || strings.Contains(lc, "timeout")
+}
+
 // runSourceList invokes `winget source list` and parses the
-// fixed tabular output into SourceInfo rows. The function never
-// returns an error to the caller because a failed source list is
-// a readiness signal (sources missing), not an implementation
-// bug.
-func runSourceList(opts SourceEgressOptions, wingetPath string, timeout time.Duration) ([]SourceInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+// fixed tabular output into SourceInfo rows.
+//
+// Codex 019e6b70 iter-1 P1#3 absorb: the function now returns the
+// sanitised error reason + a timeout flag so the caller can surface
+// both on the wire (SourceEgressReadiness.SourceListError +
+// .Timeout). The previous "_" discard pattern hid timeout / non-zero
+// / parse failures from the operator.
+func runSourceList(parent context.Context, opts SourceEgressOptions, wingetPath string, timeout time.Duration) (sources []SourceInfo, errorReason string, timedOut bool) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	// FIXED ARGV — never composed from payload.
 	stdout, err := opts.Execute(ctx, wingetPath, "source", "list")
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return nil, errors.New("winget source list timed out")
+		return nil, "winget source list timed out", true
 	}
 	if err != nil {
-		return nil, err
+		return nil, security.RedactSoftwareString(err.Error()), false
 	}
-	return parseSourceListOutput(string(stdout)), nil
+	parsed := parseSourceListOutput(string(stdout))
+	if len(parsed) == 0 && strings.TrimSpace(string(stdout)) != "" {
+		// Stdout had content but did not parse — flag for operator
+		// without dropping the underlying signal.
+		return parsed, "winget source list output not parseable", false
+	}
+	return parsed, "", false
 }
 
 // parseSourceListOutput accepts the raw `winget source list`
@@ -423,20 +517,26 @@ func splitByColumns(line string, columns []int) []string {
 }
 
 // runPackageQuery executes `winget show --id <FixedPackageQueryID>`
-// with the package id pinned to the hard-coded constant. The
-// success criterion is "winget produced a non-empty manifest";
-// the exact package version is not parsed.
-func runPackageQuery(opts SourceEgressOptions, wingetPath string, timeout time.Duration) PackageQueryResult {
+// with the package id pinned to the hard-coded constant.
+//
+// Codex 019e6b70 iter-1 P2#4 absorb: the success criterion is now
+// "winget exited cleanly AND emitted the pinned package id (case-
+// insensitive) somewhere in stdout" rather than the previous
+// English-only "no package found" negative heuristic. The new check
+// is robust against localized winget output (Turkish "paket
+// bulunamadı", German "Kein Paket gefunden", Japanese
+// "パッケージが見つかりません", etc.) because the canonical id is the
+// same in every locale.
+func runPackageQuery(parent context.Context, opts SourceEgressOptions, wingetPath string, timeout time.Duration) PackageQueryResult {
 	result := PackageQueryResult{
-		PackageID: opts.PackageID,
+		PackageID: FixedPackageQueryID,
 	}
 	startedAt := opts.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	// FIXED ARGV. The "--id" + opts.PackageID pair is the only
-	// payload-shaped parameter and opts.PackageID was already
-	// pinned to FixedPackageQueryID by the entry-point guard.
-	stdout, err := opts.Execute(ctx, wingetPath, "show", "--id", opts.PackageID, "--exact", "--disable-interactivity")
+	// FIXED ARGV. The package id is the constant — no SourceEgressOptions
+	// field can override it (Codex 019e6b70 iter-1 P1#2 / P2 absorb).
+	stdout, err := opts.Execute(ctx, wingetPath, "show", "--id", FixedPackageQueryID, "--exact", "--disable-interactivity")
 	result.DurationMs = int(opts.Now().Sub(startedAt) / time.Millisecond)
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		result.Timeout = true
@@ -453,22 +553,27 @@ func runPackageQuery(opts SourceEgressOptions, wingetPath string, timeout time.D
 		result.ErrorReason = security.RedactSoftwareString(err.Error())
 		return result
 	}
-	// Heuristic: winget show emits a manifest when it finds the
-	// package. We do not parse the manifest version because
-	// AG-026A's job is reachability, not version pinning. An
-	// empty stdout with exit code 0 is uncommon but still counts
-	// as "found" — winget is responsive and the source served a
-	// response.
-	body := strings.TrimSpace(string(stdout))
-	result.Found = body != "" && !strings.Contains(strings.ToLower(body), "no package found")
+	// Locale-stable check: the canonical package id (FixedPackageQueryID
+	// = "7zip.7zip") appears in any successful `winget show --exact`
+	// output, regardless of the operator's regional settings. Exit code
+	// 0 alone is not sufficient because winget can emit diagnostic
+	// banners without a manifest.
+	body := string(stdout)
+	result.Found = strings.Contains(strings.ToLower(body), strings.ToLower(FixedPackageQueryID))
 	return result
 }
 
-// runEgress runs DNS / TCP / HTTPS probes against every target.
-// Each sub-probe uses its own short context derived from the
-// overall preflight timeout so one stalled host cannot starve
-// the others.
-func runEgress(opts SourceEgressOptions, targets []EgressTarget, timeout time.Duration) EgressSummary {
+// runEgressWith runs DNS / TCP / HTTPS probes against the supplied
+// target slice. Production callers always pass the unexported
+// defaultEgressTargets — no public path exists for an alternative
+// target list (Codex 019e6b70 iter-1 P1#2 absorb). Tests inside the
+// same package can pass their own targets via this internal helper
+// without exposing a Targets field on SourceEgressOptions.
+//
+// Each sub-probe uses its own context derived from the parent root
+// context so the overall preflight deadline always clamps the total
+// wall-clock even if the per-probe slice is larger.
+func runEgressWith(parent context.Context, opts SourceEgressOptions, targets []EgressTarget, perProbe time.Duration) EgressSummary {
 	summary := EgressSummary{}
 	resolve := opts.Resolve
 	if resolve == nil {
@@ -482,22 +587,18 @@ func runEgress(opts SourceEgressOptions, targets []EgressTarget, timeout time.Du
 	if httpCheck == nil {
 		httpCheck = defaultHTTPChecker
 	}
-	perProbe := timeout / 3
-	if perProbe < time.Second {
-		perProbe = time.Second
-	}
 	for _, target := range targets {
-		summary.DNS = append(summary.DNS, runDNS(resolve, target.Hostname, perProbe, opts.Now))
-		summary.TCP = append(summary.TCP, runTCP(dial, target.Hostname, target.Port, perProbe, opts.Now))
-		summary.HTTPS = append(summary.HTTPS, runHTTPS(httpCheck, target.Hostname, target.Port, perProbe, opts.Now))
+		summary.DNS = append(summary.DNS, runDNS(parent, resolve, target.Hostname, perProbe, opts.Now))
+		summary.TCP = append(summary.TCP, runTCP(parent, dial, target.Hostname, target.Port, perProbe, opts.Now))
+		summary.HTTPS = append(summary.HTTPS, runHTTPS(parent, httpCheck, target.Hostname, target.Port, perProbe, opts.Now))
 	}
 	return summary
 }
 
-func runDNS(resolve Resolver, host string, timeout time.Duration, now func() time.Time) NetworkCheck {
+func runDNS(parent context.Context, resolve Resolver, host string, timeout time.Duration, now func() time.Time) NetworkCheck {
 	check := NetworkCheck{Target: host}
 	startedAt := now()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	_, err := resolve(ctx, host)
 	check.DurationMs = int(now().Sub(startedAt) / time.Millisecond)
@@ -509,11 +610,11 @@ func runDNS(resolve Resolver, host string, timeout time.Duration, now func() tim
 	return check
 }
 
-func runTCP(dial Dialer, host string, port int, timeout time.Duration, now func() time.Time) NetworkCheck {
+func runTCP(parent context.Context, dial Dialer, host string, port int, timeout time.Duration, now func() time.Time) NetworkCheck {
 	address := host + ":" + portString(port)
 	check := NetworkCheck{Target: address}
 	startedAt := now()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	err := dial(ctx, "tcp", address)
 	check.DurationMs = int(now().Sub(startedAt) / time.Millisecond)
@@ -525,14 +626,14 @@ func runTCP(dial Dialer, host string, port int, timeout time.Duration, now func(
 	return check
 }
 
-func runHTTPS(httpCheck HTTPChecker, host string, port int, timeout time.Duration, now func() time.Time) NetworkCheck {
+func runHTTPS(parent context.Context, httpCheck HTTPChecker, host string, port int, timeout time.Duration, now func() time.Time) NetworkCheck {
 	target := "https://" + host
 	if port != 443 {
 		target += ":" + portString(port)
 	}
 	check := NetworkCheck{Target: target}
 	startedAt := now()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	_, err := httpCheck(ctx, target)
 	check.DurationMs = int(now().Sub(startedAt) / time.Millisecond)
