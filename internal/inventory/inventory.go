@@ -22,32 +22,47 @@ type Snapshot struct {
 	AgentVersion string             `json:"agentVersion"`
 	CollectedAt  time.Time          `json:"collectedAt"`
 	Identity     identity.Inventory `json:"identity"`
-	Software     *software.Summary  `json:"software,omitempty"`
+	// Software is intentionally nil unless the caller opted into the full
+	// software/WinGet block via CollectOptions.IncludeSoftwareApps. The
+	// JSON tag omitempty hides the field from the heartbeat / auto-enroll
+	// wire payload when the lightweight default applies (AG-025H).
+	Software *software.Summary `json:"software,omitempty"`
 }
 
 // CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
-// asks for. Zero value gives the historical behaviour plus the default
-// software summary (count + WinGet readiness, no Apps list).
+// asks for. Zero value is the AG-025H lightweight contract: host / os /
+// identity only — no software registry enumeration, no WinGet probe. The
+// heartbeat and auto-enroll loops keep the zero default and therefore
+// never pay the registry / probe cost.
 type CollectOptions struct {
-	// IncludeSoftwareApps switches the Software block from "summary only"
-	// (count + winget readiness) to "summary + full Apps list with size
-	// caps applied". The backend uses this for compliance scans; the
-	// heartbeat / default poll loop never sets it.
+	// IncludeSoftwareApps gates the entire software block. When true,
+	// CollectWithOptions enumerates HKLM + HKLM\WOW6432Node, runs the
+	// WinGet --version readiness probe, and emits a Summary that includes
+	// the full Apps list. When false (the default), the software registry
+	// enumeration and the WinGet probe are not invoked at all — the
+	// resulting Snapshot.Software stays nil and the wire payload omits it.
+	// The backend uses true for explicit COLLECT_INVENTORY scans
+	// (includeSoftware=true on the command payload); heartbeat /
+	// auto-enroll never opt in.
 	IncludeSoftwareApps bool
 }
 
-// Collect keeps the historical signature so the heartbeat loop and the
-// existing tests stay untouched. It is equivalent to CollectWithOptions
-// with a zero CollectOptions value.
+// Collect returns the AG-025H lightweight default snapshot: host / os /
+// identity only, no software registry enumeration, no WinGet probe. It is
+// equivalent to CollectWithOptions(agentVersion, now, CollectOptions{}).
+// Heartbeat and auto-enroll call this; the registry / probe cost is paid
+// only when COLLECT_INVENTORY explicitly opts into full software via
+// CollectWithOptions(... IncludeSoftwareApps: true ...).
 func Collect(agentVersion string, now time.Time) Snapshot {
 	return CollectWithOptions(agentVersion, now, CollectOptions{})
 }
 
-// CollectWithOptions is the new entry point COLLECT_INVENTORY uses
-// when it needs to honour an includeSoftware=true payload arg. The
-// software + winget probes are run unconditionally on Windows (their
-// result is cheap and ships as a summary by default); the opts flag
-// controls only whether the Apps list rides along.
+// CollectWithOptions is the COLLECT_INVENTORY entry point. When
+// opts.IncludeSoftwareApps is true, the software registry enumeration and
+// the WinGet --version readiness probe run and a full Summary (including
+// the Apps list under the package's size caps) is attached. When false
+// (the heartbeat / auto-enroll default), neither probe runs and
+// Snapshot.Software stays nil.
 func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions) Snapshot {
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -62,21 +77,38 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		CollectedAt:  now,
 		Identity:     identity.Collect(now),
 	}
-	snapshot.Software = collectSoftwareSummary(now, opts.IncludeSoftwareApps)
+	if opts.IncludeSoftwareApps {
+		snapshot.Software = collectSoftwareSummary(now, true)
+	}
 	return snapshot
 }
 
 // collectSoftwareSummary runs the software inventory + winget readiness
-// probes and folds their results into a single Summary. On non-Windows
-// builds both probes return Supported=false so the Summary is a
-// no-op rollup rather than missing entirely — that keeps the wire
-// payload shape identical across platforms.
+// probes and folds their results into a single Summary. It is invoked ONLY
+// from the explicit IncludeSoftwareApps=true path in CollectWithOptions —
+// the AG-025H heartbeat / auto-enroll lightweight contract never reaches
+// it. On non-Windows builds both probes return Supported=false so the
+// Summary is a no-op rollup rather than missing entirely.
+//
+// The package-level collectSoftware / detectWinget function variables are
+// the test seam: tests override them with t.Cleanup to assert lightweight
+// paths never invoke the probes, and to inject fake snapshots when
+// asserting full-mode output shape.
 func collectSoftwareSummary(now time.Time, includeApps bool) *software.Summary {
-	softwareSnapshot := software.Collect(now, software.CollectOptions{})
-	wingetReadiness := winget.Detect(now)
+	softwareSnapshot := collectSoftware(now, software.CollectOptions{})
+	wingetReadiness := detectWinget(now)
 	summary := software.Summarize(softwareSnapshot, wingetReadiness.SystemContextReady, wingetReadiness.Version, includeApps)
 	return &summary
 }
+
+// collectSoftware and detectWinget are package-level function variables
+// so tests can override them with t.Cleanup-restored stubs (AG-025H test
+// seam). Production code always wires them to the real software.Collect /
+// winget.Detect implementations.
+var (
+	collectSoftware = software.Collect
+	detectWinget    = winget.Detect
+)
 
 func RuntimeCapabilityReport() protocol.CapabilityReport {
 	return protocol.CapabilityReport{
