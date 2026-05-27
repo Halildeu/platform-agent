@@ -27,13 +27,22 @@ type Snapshot struct {
 	// JSON tag omitempty hides the field from the heartbeat / auto-enroll
 	// wire payload when the lightweight default applies (AG-025H).
 	Software *software.Summary `json:"software,omitempty"`
+	// WinGetEgress is intentionally nil unless the caller opted into the
+	// AG-026A WinGet source/egress preflight via
+	// CollectOptions.IncludeWinGetEgress. The JSON tag omitempty hides
+	// the field from the heartbeat / auto-enroll wire payload and from
+	// COLLECT_INVENTORY runs that did not request the preflight, so the
+	// lightweight default never pays the source-list + package-query +
+	// DNS/TCP/HTTPS probe cost.
+	WinGetEgress *winget.SourceEgressReadiness `json:"wingetEgress,omitempty"`
 }
 
 // CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
 // asks for. Zero value is the AG-025H lightweight contract: host / os /
-// identity only — no software registry enumeration, no WinGet probe. The
-// heartbeat and auto-enroll loops keep the zero default and therefore
-// never pay the registry / probe cost.
+// identity only — no software registry enumeration, no WinGet probe,
+// no WinGet source/egress preflight. The heartbeat and auto-enroll
+// loops keep the zero default and therefore never pay the registry /
+// probe / preflight cost.
 type CollectOptions struct {
 	// IncludeSoftwareApps gates the entire software block. When true,
 	// CollectWithOptions enumerates HKLM + HKLM\WOW6432Node, runs the
@@ -45,6 +54,26 @@ type CollectOptions struct {
 	// (includeSoftware=true on the command payload); heartbeat /
 	// auto-enroll never opt in.
 	IncludeSoftwareApps bool
+
+	// IncludeWinGetEgress gates the AG-026A WinGet source/egress
+	// preflight: `winget source list` (read-only, fixed argv),
+	// fixed-id `winget show --id 7zip.7zip` package-query reachability
+	// probe, and DNS / TCP / HTTPS reachability checks against the
+	// hard-coded DefaultEgressTargets list. When true,
+	// CollectWithOptions invokes winget.DetectSourceEgress and
+	// attaches the result to Snapshot.WinGetEgress. When false (the
+	// default), the preflight is not invoked at all and the wire
+	// payload omits the field. The backend uses true via
+	// COLLECT_INVENTORY's includeWinGetEgress payload bit when an
+	// install pilot is being evaluated; heartbeat / auto-enroll /
+	// lightweight inventory never opt in.
+	//
+	// HARD BOUNDARY (Codex 019e6b5d plan-time AGREE): this flag never
+	// triggers any install, upgrade, uninstall, or source-mutating
+	// subcommand. The preflight is read-only by construction in the
+	// winget package (fixed argv, hard-coded package id, hard-coded
+	// egress hosts).
+	IncludeWinGetEgress bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -80,6 +109,10 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 	if opts.IncludeSoftwareApps {
 		snapshot.Software = collectSoftwareSummary(now, true)
 	}
+	if opts.IncludeWinGetEgress {
+		readiness := detectSourceEgress(now)
+		snapshot.WinGetEgress = &readiness
+	}
 	return snapshot
 }
 
@@ -101,13 +134,15 @@ func collectSoftwareSummary(now time.Time, includeApps bool) *software.Summary {
 	return &summary
 }
 
-// collectSoftware and detectWinget are package-level function variables
-// so tests can override them with t.Cleanup-restored stubs (AG-025H test
-// seam). Production code always wires them to the real software.Collect /
-// winget.Detect implementations.
+// collectSoftware, detectWinget, and detectSourceEgress are package-level
+// function variables so tests can override them with t.Cleanup-restored
+// stubs (AG-025H + AG-026A test seam). Production code always wires
+// them to the real software.Collect / winget.Detect /
+// winget.DetectSourceEgress implementations.
 var (
-	collectSoftware = software.Collect
-	detectWinget    = winget.Detect
+	collectSoftware    = software.Collect
+	detectWinget       = winget.Detect
+	detectSourceEgress = winget.DetectSourceEgress
 )
 
 func RuntimeCapabilityReport() protocol.CapabilityReport {

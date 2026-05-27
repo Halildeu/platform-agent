@@ -308,6 +308,116 @@ Software block icin HARD boundary:
    (JWT, email, UPN, full SID, user path, license key -> [REDACTED])
 ```
 
+### 6.A `COLLECT_INVENTORY` payload `includeWinGetEgress` (AG-026A, Faz 22.5)
+
+`COLLECT_INVENTORY` payload `includeWinGetEgress` argumani (opsiyonel,
+default false) **AG-026A read-only WinGet source/egress readiness
+preflight**ini secer:
+
+```json
+{
+  "commandId": "...",
+  "type": "COLLECT_INVENTORY",
+  "payload": {
+    "includeSoftware": true,
+    "includeWinGetEgress": true
+  }
+}
+```
+
+`includeWinGetEgress=false` (default): inventory.wingetEgress alani
+PAYLOAD'DA YER ALMAZ. Source list, package query, ve DNS/TCP/HTTPS
+egress probleri hic calistirilmaz; heartbeat / auto-enroll bu defaulti
+kullanir. AG-025H lightweight contract bozulmaz.
+
+`includeWinGetEgress=true`: inventory.wingetEgress blogu attach edilir;
+agent `winget source list` (read-only fixed argv) + `winget show --id
+7zip.7zip --exact --disable-interactivity` (sabit package id) +
+hard-coded egress hostname listesine karsi DNS/TCP/HTTPS reachability
+probleri calistirir.
+
+`inventory.wingetEgress` result detail ornegi:
+
+```json
+{
+  "inventory": {
+    "wingetEgress": {
+      "supported": true,
+      "schemaVersion": 1,
+      "probeDurationMs": 4380,
+      "timeout": false,
+      "sources": [
+        {
+          "name": "winget",
+          "argument": "https://cdn.winget.microsoft.com/cache",
+          "type": "Microsoft.PreIndexed.Package",
+          "trustLevel": "Trusted"
+        },
+        {
+          "name": "msstore",
+          "argument": "https://storeedgefd.dsx.mp.microsoft.com/v9.0",
+          "type": "Microsoft.Rest",
+          "trustLevel": "Trusted"
+        }
+      ],
+      "packageQuery": {
+        "packageId": "7zip.7zip",
+        "found": true,
+        "exitCode": 0,
+        "durationMs": 1820,
+        "timeout": false
+      },
+      "egress": {
+        "dns": [
+          {"target": "cdn.winget.microsoft.com", "ok": true, "durationMs": 12},
+          {"target": "storeedgefd.dsx.mp.microsoft.com", "ok": true, "durationMs": 14}
+        ],
+        "tcp": [
+          {"target": "cdn.winget.microsoft.com:443", "ok": true, "durationMs": 38},
+          {"target": "storeedgefd.dsx.mp.microsoft.com:443", "ok": true, "durationMs": 41}
+        ],
+        "https": [
+          {"target": "https://cdn.winget.microsoft.com", "ok": true, "durationMs": 152},
+          {"target": "https://storeedgefd.dsx.mp.microsoft.com", "ok": true, "durationMs": 167}
+        ],
+        "proxyConfigured": false
+      }
+    }
+  }
+}
+```
+
+AG-026A WinGet source/egress block icin HARD boundary (Codex 019e6b5d
+plan-time kilit sart):
+
+```text
+1. install / upgrade / uninstall / source add|remove|update|reset
+   subcommand'lari HIC calistirilmaz; package fixed-argv `show` ve
+   `source list` disinda winget yardimi cagrilamaz.
+2. Package id `7zip.7zip` (FixedPackageQueryID) hard-coded; payload
+   override edilemez (override denenirse readiness `probeError` ile
+   reddedilir).
+3. Egress hostname listesi (DefaultEgressTargets) hard-coded; payload
+   ile arbitrary URL/host gonderilemez.
+4. Approved catalog client / unauthorized software detection / install
+   execution AG-026A scope'unda DEGIL — sirayla BE-020, BE-023/BE-025,
+   AG-027 sorumlu.
+5. Source argument (URL), source error reason, proxy URL ve egress
+   error reason serbest metni `security.RedactSoftwareString` (proxy
+   userinfo `url.User=nil` ile ek olarak strip edilir) ile sanitize
+   edilir — user path, SID, JWT, license-shaped string, embedded
+   credential payload'a raw girmez.
+6. winget LocalSystem'da `source list` veya `show` icin fail dondurursa
+   readiness `PASS/WARN/BLOCK` sinyali uretir; implementation failure
+   degildir (`probeError` veya per-row `errorReason` ile rapor edilir,
+   agent exit code degismez).
+```
+
+Implementation referansi: `internal/winget/source_egress.go`
+(`RunSourceEgressPreflight` + `DetectSourceEgress` platform giris noktasi),
+`internal/inventory/inventory.go` (`CollectOptions.IncludeWinGetEgress`),
+`internal/commands/executor.go` (`COLLECT_INVENTORY` payload parse).
+
 -------------------------------------------------------------------------------
 ## 7. Command Result
 -------------------------------------------------------------------------------

@@ -122,6 +122,58 @@ func TestLocalExecutorBoolPayloadAccepts(t *testing.T) {
 	}
 }
 
+// AG-026A — COLLECT_INVENTORY default omits the WinGet source/egress
+// preflight. The boolean payload bit `includeWinGetEgress` opts in;
+// when absent or false the wire payload must NOT carry the wingetEgress
+// field and the preflight runner must NOT be invoked. Mirrors the
+// AG-025H lightweight-default contract for includeSoftware.
+func TestLocalExecutorCollectInventoryDefaultOmitsWinGetEgress(t *testing.T) {
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandCollectInventory}, "test")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-egress-default",
+		ClaimID:        "claim-egress-default",
+		AttemptNumber:  1,
+		Type:           protocol.CommandCollectInventory,
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusSucceeded {
+		t.Fatalf("status = %s", result.Status)
+	}
+	snap := snapshotFromDetails(t, result.Details)
+	if snap.WinGetEgress != nil {
+		t.Fatalf("AG-026A: default payload must keep Snapshot.WinGetEgress nil (got %+v)", snap.WinGetEgress)
+	}
+}
+
+// AG-026A — boolPayload mapping for the new includeWinGetEgress key.
+// The function reuses the same logic as includeSoftware so the cases
+// are intentionally a subset of the includeSoftware matrix; the focus
+// is "the key name is wired and the default is safe".
+func TestLocalExecutorBoolPayloadIncludeWinGetEgress(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]interface{}
+		wantOn  bool
+	}{
+		{"nil-payload", nil, false},
+		{"missing-key", map[string]interface{}{"includeSoftware": true}, false},
+		{"bool-true", map[string]interface{}{"includeWinGetEgress": true}, true},
+		{"bool-false", map[string]interface{}{"includeWinGetEgress": false}, false},
+		{"string-true", map[string]interface{}{"includeWinGetEgress": "true"}, true},
+		{"string-1", map[string]interface{}{"includeWinGetEgress": "1"}, true},
+		{"int-0", map[string]interface{}{"includeWinGetEgress": 0}, false},
+	}
+	for _, tc := range cases {
+		got := boolPayload(tc.payload, "includeWinGetEgress")
+		if got != tc.wantOn {
+			t.Errorf("%s: boolPayload(includeWinGetEgress) = %v, want %v", tc.name, got, tc.wantOn)
+		}
+	}
+}
+
 func TestLocalExecutorListLocalUsersUnsupportedOutsideWindows(t *testing.T) {
 	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandListLocalUsers}, "test")
 	command := protocol.AgentCommand{

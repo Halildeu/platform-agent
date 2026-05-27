@@ -1,4 +1,4 @@
-# internal/software (AG-025) + internal/winget (AG-026)
+# internal/software (AG-025) + internal/winget (AG-026, AG-026A)
 
 Read-only Windows software inventory + WinGet App Installer readiness
 probe foundation for the endpoint agent. **Discovery / enumeration
@@ -11,14 +11,20 @@ only — no install, no uninstall, no source repair, no elevation.**
 | `software.Collect(now, opts)` | HKLM + HKLM\WOW6432Node Uninstall hives via `golang.org/x/sys/windows/registry`. Returns a `SoftwareSnapshot` with normalised `InstalledApp` entries. |
 | `software.Normalize(sources, now, opts)` | Pure function: parses pre-read registry data into the wire-safe snapshot. Lets tests drive the parser without a real registry. |
 | `software.Summarize(snap, wingetReady, wingetVersion, includeApps)` | Collapses snapshot + WinGet readiness into the `Summary` embedded in `inventory.Snapshot.Software`. |
-| `winget.Detect(now)` / `winget.Probe(opts)` | Locates `winget.exe`, runs `winget --version` under a 5 s timeout, reports `availableInCurrentContext` + `systemContextReady` separately. |
+| `winget.Detect(now)` / `winget.Probe(opts)` | AG-026 — locates `winget.exe`, runs `winget --version` under a 5 s timeout, reports `availableInCurrentContext` + `systemContextReady` separately. |
+| `winget.DetectSourceEgress(now)` / `winget.RunSourceEgressPreflight(opts)` | AG-026A — read-only `winget source list` parser + fixed-id `winget show --id 7zip.7zip --exact --disable-interactivity` reachability probe + DNS/TCP/HTTPS checks against the hard-coded `DefaultEgressTargets` list. |
 
 ## Hard boundaries (verbatim — do not remove)
 
 This package **NEVER**:
 
 1. opens a raw shell, runs PowerShell, or invokes `winget install` /
-   `winget search` / `winget source` / `winget upgrade` / `winget settings`;
+   `winget upgrade` / `winget uninstall` / `winget source add|remove|update|reset` /
+   `winget settings` / `winget export` / `winget import`.
+   AG-026A widens the read-only surface to `winget source list` and
+   `winget show --id 7zip.7zip --exact --disable-interactivity` (both
+   fixed argv, hard-coded package id) but DOES NOT open install /
+   mutation paths — those are scoped to AG-027 + BE-021A;
 2. downloads a binary from any URL;
 3. installs / uninstalls / upgrades / repairs any package;
 4. resets passwords, disables/enables users, or touches any local-user

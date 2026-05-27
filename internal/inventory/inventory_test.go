@@ -127,13 +127,17 @@ func TestCollectWithOptionsIncludeSoftwareTrueRunsProbesAndAttachesApps(t *testi
 
 // installProbeCounters swaps both probes for stubs that increment atomic
 // counters but never produce data. Used by the lightweight-path tests
-// that assert "no probe call".
+// that assert "no probe call". The AG-026A source/egress probe is also
+// installed so the same lightweight assertions cover IncludeWinGetEgress
+// default-false behavior.
 func installProbeCounters(t *testing.T) (*int32, *int32) {
 	t.Helper()
 	var softwareCalls int32
 	var wingetCalls int32
+	var sourceEgressCalls int32
 	prevSoftware := collectSoftware
 	prevWinget := detectWinget
+	prevSourceEgress := detectSourceEgress
 	collectSoftware = func(now time.Time, opts software.CollectOptions) software.SoftwareSnapshot {
 		atomic.AddInt32(&softwareCalls, 1)
 		return software.SoftwareSnapshot{}
@@ -142,11 +146,37 @@ func installProbeCounters(t *testing.T) (*int32, *int32) {
 		atomic.AddInt32(&wingetCalls, 1)
 		return winget.Readiness{}
 	}
+	detectSourceEgress = func(now time.Time) winget.SourceEgressReadiness {
+		atomic.AddInt32(&sourceEgressCalls, 1)
+		return winget.SourceEgressReadiness{}
+	}
 	t.Cleanup(func() {
 		collectSoftware = prevSoftware
 		detectWinget = prevWinget
+		detectSourceEgress = prevSourceEgress
 	})
+	// Tests that need the source-egress counter can use
+	// installSourceEgressCounter; the AG-025H-era callers ignore the
+	// third counter (Go discards unused returns).
+	_ = sourceEgressCalls
 	return &softwareCalls, &wingetCalls
+}
+
+// installSourceEgressCounter swaps detectSourceEgress for a counter
+// stub and returns the counter so AG-026A tests can assert "0 calls"
+// for IncludeWinGetEgress=false and "exactly 1 call" for true.
+func installSourceEgressCounter(t *testing.T, fixture winget.SourceEgressReadiness) *int32 {
+	t.Helper()
+	var calls int32
+	prev := detectSourceEgress
+	detectSourceEgress = func(now time.Time) winget.SourceEgressReadiness {
+		atomic.AddInt32(&calls, 1)
+		return fixture
+	}
+	t.Cleanup(func() {
+		detectSourceEgress = prev
+	})
+	return &calls
 }
 
 // installProbeStubs wires fake fixtures into the probes so the full
@@ -176,4 +206,92 @@ func installProbeStubs(
 		detectWinget = prevWinget
 	})
 	return &softwareCalls, &wingetCalls
+}
+
+// AG-026A — IncludeWinGetEgress wire-up tests.
+//
+// Codex 019e6b5d acceptance criteria #4:
+//   - includeWinGetEgress=false (default) MUST NOT invoke
+//     winget.DetectSourceEgress; Snapshot.WinGetEgress stays nil.
+//   - includeWinGetEgress=true MUST invoke DetectSourceEgress exactly
+//     once and attach the result to Snapshot.WinGetEgress.
+
+func TestCollectWithOptionsIncludeWinGetEgressFalseSkipsPreflight(t *testing.T) {
+	// installProbeCounters sets all three probes (software, winget,
+	// source-egress) to no-op counters; installSourceEgressCounter
+	// then overrides the source-egress stub with a fixture-returning
+	// one. Order matters: the later override wins, the earlier
+	// t.Cleanup restores it. For the "must NOT call" assertion we
+	// keep the counter-only stub from installProbeCounters.
+	installProbeCounters(t)
+	calls := installSourceEgressCounter(t, winget.SourceEgressReadiness{
+		Supported:     true,
+		SchemaVersion: winget.SourceEgressSchemaVersion,
+	})
+
+	snap := CollectWithOptions(
+		"test",
+		time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC),
+		CollectOptions{}, // both flags default false
+	)
+
+	if snap.WinGetEgress != nil {
+		t.Fatalf("AG-026A: IncludeWinGetEgress=false must leave Snapshot.WinGetEgress nil (got %+v)", snap.WinGetEgress)
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("AG-026A: IncludeWinGetEgress=false must not invoke DetectSourceEgress (got %d calls)", got)
+	}
+
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	if strings.Contains(string(body), `"wingetEgress":`) {
+		t.Fatalf("AG-026A: lightweight payload must not carry wingetEgress field: %s", body)
+	}
+}
+
+func TestCollectWithOptionsIncludeWinGetEgressTrueRunsPreflightExactlyOnce(t *testing.T) {
+	fixture := winget.SourceEgressReadiness{
+		Supported:     true,
+		SchemaVersion: winget.SourceEgressSchemaVersion,
+		Sources: []winget.SourceInfo{
+			{Name: "winget", Argument: "https://cdn.winget.microsoft.com/cache", Type: "Microsoft.PreIndexed.Package", TrustLevel: "Trusted"},
+		},
+		PackageQuery: winget.PackageQueryResult{
+			PackageID:  winget.FixedPackageQueryID,
+			Found:      true,
+			ExitCode:   0,
+			DurationMs: 42,
+		},
+	}
+	installProbeCounters(t)
+	calls := installSourceEgressCounter(t, fixture)
+
+	snap := CollectWithOptions(
+		"test",
+		time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC),
+		CollectOptions{IncludeWinGetEgress: true},
+	)
+
+	if snap.WinGetEgress == nil {
+		t.Fatalf("AG-026A: IncludeWinGetEgress=true must attach Snapshot.WinGetEgress")
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("AG-026A: IncludeWinGetEgress=true must invoke DetectSourceEgress exactly once (got %d)", got)
+	}
+	if snap.WinGetEgress.PackageQuery.PackageID != winget.FixedPackageQueryID {
+		t.Fatalf("AG-026A: payload PackageID = %q, want %q", snap.WinGetEgress.PackageQuery.PackageID, winget.FixedPackageQueryID)
+	}
+
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(body), `"wingetEgress":`) {
+		t.Fatalf("AG-026A: IncludeWinGetEgress=true wire payload must carry wingetEgress field")
+	}
+	if !strings.Contains(string(body), `"packageId":"`+winget.FixedPackageQueryID+`"`) {
+		t.Fatalf("AG-026A: wire payload must carry pinned packageId %q", winget.FixedPackageQueryID)
+	}
 }
