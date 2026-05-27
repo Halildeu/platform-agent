@@ -29,6 +29,25 @@ type Config struct {
 	CommandTimeout         time.Duration
 	NonceSkewWindow        time.Duration
 	NonceReplayCacheWindow time.Duration
+
+	// AutoEnrollAPIURL is the full canonical mTLS base path used by the
+	// --auto-enroll mode (ADR-0029 Katman 3). Empty means use the
+	// production default baked into autoenroll.Defaults().
+	AutoEnrollAPIURL string
+	// AutoEnrollConfigPath is the on-disk location of the DPAPI-encrypted
+	// PersistedConfig the auto-enroll runner reads/writes. Empty means
+	// the Windows default under %ProgramData%\EndpointAgent\config.
+	AutoEnrollConfigPath string
+	// AutoEnrollCertSubjectSuffix narrows the cert-store query when the
+	// LocalMachine\My store carries multiple Client Authentication certs
+	// (e.g. corp PCs with both AD machine cert and a third-party VPN
+	// cert). Optional.
+	AutoEnrollCertSubjectSuffix string
+	// AutoEnrollCertSANURIPrefix similarly narrows the cert-store query
+	// by URI SAN prefix. ADR-0029 Katman 1 mints
+	// URI:adcomputer:{objectGUID} so "adcomputer:" is the production
+	// suffix.
+	AutoEnrollCertSANURIPrefix string
 }
 
 func Default() Config {
@@ -65,6 +84,10 @@ func LoadFromEnv() Config {
 	cfg.NonceSkewWindow = envDuration("ENDPOINT_AGENT_NONCE_SKEW_WINDOW", cfg.NonceSkewWindow)
 	cfg.NonceReplayCacheWindow = envDuration("ENDPOINT_AGENT_NONCE_REPLAY_CACHE_WINDOW", cfg.NonceReplayCacheWindow)
 	cfg.JitterPercent = envInt("ENDPOINT_AGENT_JITTER_PERCENT", cfg.JitterPercent)
+	cfg.AutoEnrollAPIURL = strings.TrimRight(envString("ENDPOINT_AGENT_AUTO_ENROLL_API_URL", cfg.AutoEnrollAPIURL), "/")
+	cfg.AutoEnrollConfigPath = envString("ENDPOINT_AGENT_AUTO_ENROLL_CONFIG_PATH", cfg.AutoEnrollConfigPath)
+	cfg.AutoEnrollCertSubjectSuffix = envString("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX", cfg.AutoEnrollCertSubjectSuffix)
+	cfg.AutoEnrollCertSANURIPrefix = envString("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX", cfg.AutoEnrollCertSANURIPrefix)
 	return cfg
 }
 
