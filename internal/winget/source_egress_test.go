@@ -3,6 +3,7 @@ package winget
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -40,21 +41,27 @@ func TestRunSourceEgressMissingOptions(t *testing.T) {
 	}
 }
 
-// SourceEgressOptions.PackageID was removed in Codex 019e6b70 iter-1
-// P1#2 / P2 absorb (the public field was a footgun even with the
-// runtime guard). The constant is now the single source of truth —
-// `runPackageQuery` reads FixedPackageQueryID directly. This test
-// pins the API surface so a future caller cannot reintroduce the
-// override field by accident.
-func TestSourceEgressOptionsHasNoPackageIDOverride(t *testing.T) {
-	// Compile-time assertion via struct literal: any future field
-	// named PackageID would make this expression fail to compile.
-	_ = SourceEgressOptions{
-		Locator: nil,
-		Execute: nil,
+// SourceEgressOptions.PackageID and SourceEgressOptions.Targets were
+// removed in Codex 019e6b70 iter-1 absorb (public fields were
+// footguns even with runtime guards). The constants
+// (FixedPackageQueryID, defaultEgressTargets) are now the single
+// source of truth.
+//
+// Codex 019e6b70 iter-2 absorb: reflection-based assertion replaces
+// the previous struct-literal guard. A struct literal that only
+// sets Locator+Execute would still compile if either field came
+// back, so it does NOT actually pin the API surface. Reflection on
+// the field set catches reintroduction directly.
+func TestSourceEgressOptionsHasNoOverrideFields(t *testing.T) {
+	typ := reflect.TypeOf(SourceEgressOptions{})
+	forbidden := []string{"PackageID", "Targets"}
+	for _, name := range forbidden {
+		if _, ok := typ.FieldByName(name); ok {
+			t.Fatalf("SourceEgressOptions must not expose %q (Codex 019e6b70 iter-1 P1#2 absorb)", name)
+		}
 	}
-	// Runtime sanity: the readiness shape still echoes the pinned id
-	// in PackageQuery.PackageID so backend parsers do not have to
+	// Runtime sanity: the readiness shape still echoes the pinned
+	// id in PackageQuery.PackageID so backend parsers do not have to
 	// handle a missing field.
 	r := RunSourceEgressPreflight(SourceEgressOptions{})
 	if r.PackageQuery.PackageID != FixedPackageQueryID {

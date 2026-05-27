@@ -221,22 +221,45 @@ bit'leridir; backend ikisini birlikte de gonderebilir, ayri ayri da. Hicbiri
 verilmediginde AG-025H lightweight default korunur (registry / winget
 probe / source-egress preflight HIC calistirilmaz).
 
-AG-026A hard boundary (Codex 019e6b5d plan-time AGREE kilit sart):
+AG-026A hard boundary (Codex 019e6b5d plan-time AGREE kilit sart +
+019e6b70 iter-1/iter-2 absorb):
 
 ```text
-1. install / upgrade / uninstall / source mutation komutlari calismaz —
-   testler `TestRunSourceEgressForbiddenSubcommandsNeverInvoked` ile
-   her sub-probe argv'sini denetler.
-2. Package id `7zip.7zip` (FixedPackageQueryID) hard-coded; arbitrary
-   payload override testle reddedilir (`TestRunSourceEgressRejectsArbitraryPackageID`).
+1. install / upgrade / uninstall / settings / export / import / hash /
+   validate / pin / configure / download / repair / features /
+   complete / debug / source mutation komutlari calismaz — 19-verb
+   regression belt `TestRunSourceEgressForbiddenSubcommandsNeverInvoked`
+   her sub-probe argv'sini denetler. (Asil guvenlik gate fixed argv;
+   bu test regression belt.)
+2. Package id `7zip.7zip` (FixedPackageQueryID) hard-coded;
+   `SourceEgressOptions` uzerinde override alani YOK
+   (`TestSourceEgressOptionsHasNoOverrideFields` reflection ile
+   PackageID/Targets alanlarinin geri eklenmesini engeller).
 3. Argv pinning: `source list` icin tam `["source","list"]`, `show` icin
    `["show","--id",FixedPackageQueryID,"--exact","--disable-interactivity"]`
    (`TestRunSourceEgressFixedSourceListArgv` + `TestRunSourceEgressFixedPackageQueryArgv`).
-4. Timeout slicing: bir sub-probe hang olursa diger sub-probeleri starve
-   etmez (`TestRunSourceEgressPackageQueryTimeoutDoesNotMaskSourceList`).
-5. Redaction: probe error, source argument, proxy URL, egress error
-   reason hepsi `security.RedactSoftwareString` (proxy userinfo `url.User=nil`
-   ile ek olarak strip edilir) — testlerle dogrulanir.
-6. Non-Windows build: `DetectSourceEgress` Supported=false doner, hicbir
-   probe calistirilmaz (`source_egress_other_test.go`).
+4. Overall timeout enforcement: root `context.WithTimeout(opts.Timeout)`
+   her sub-probe'u clamp eder; per-probe slice 250ms floor ile remaining
+   budget'i still-to-run probelar arasinda boler. Hicbir sub-probe stall
+   total wall-clock'u opts.Timeout'tan fazla yapamaz
+   (`TestRunSourceEgressOverallTimeoutBudgetEnforced` 100ms budget +
+   stalled probes -> ProbeDurationMs<=500 + Timeout=true).
+5. Source-list failure visibility: `sourceListError` wire field
+   (sanitised reason) + overall `timeout` flag flips
+   (`TestRunSourceEgressSourceListErrorSurfaced` +
+   `TestRunSourceEgressSourceListTimeoutSurfacesOverallTimeout`).
+6. PackageQuery Found locale-stable: `err==nil && case-insensitive
+   contains FixedPackageQueryID` — Turkish/German/Japanese localized
+   "paket bulunamadi" cikilarinda false-positive uretmez
+   (`TestRunPackageQueryFoundLocaleStable` 5 case dahil
+   `turkish-not-found`).
+7. Egress target boundary: `defaultEgressTargets` unexported array;
+   `DefaultEgressTargets()` callerlara KOPYA doner
+   (`TestDefaultEgressTargetsReturnsCopy`).
+8. Redaction: probe error, source list error, source argument, proxy
+   URL, package query error, egress error reason hepsi
+   `security.RedactSoftwareString` (proxy userinfo `url.User=nil` ile
+   ek strip edilir).
+9. Non-Windows build: `DetectSourceEgress` Supported=false doner,
+   hicbir probe calistirilmaz (`source_egress_other_test.go`).
 ```

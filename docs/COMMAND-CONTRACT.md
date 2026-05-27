@@ -360,6 +360,7 @@ probleri calistirir.
           "trustLevel": "Trusted"
         }
       ],
+      "sourceListError": "",
       "packageQuery": {
         "packageId": "7zip.7zip",
         "found": true,
@@ -388,17 +389,23 @@ probleri calistirir.
 ```
 
 AG-026A WinGet source/egress block icin HARD boundary (Codex 019e6b5d
-plan-time kilit sart):
+plan-time kilit sart + 019e6b70 iter-1 absorb):
 
 ```text
-1. install / upgrade / uninstall / source add|remove|update|reset
-   subcommand'lari HIC calistirilmaz; package fixed-argv `show` ve
-   `source list` disinda winget yardimi cagrilamaz.
-2. Package id `7zip.7zip` (FixedPackageQueryID) hard-coded; payload
-   override edilemez (override denenirse readiness `probeError` ile
-   reddedilir).
-3. Egress hostname listesi (DefaultEgressTargets) hard-coded; payload
-   ile arbitrary URL/host gonderilemez.
+1. install / upgrade / uninstall / settings / export / import / hash /
+   validate / pin / configure / download / repair / features /
+   complete / debug / source add|remove|update|reset subcommand'lari
+   HIC calistirilmaz; package fixed-argv `show` ve `source list`
+   disinda winget yardimi cagrilamaz.
+2. Package id `7zip.7zip` (FixedPackageQueryID) hard-coded.
+   `SourceEgressOptions` artik `PackageID` alani TASIMAZ; `runPackageQuery`
+   sabiti dogrudan kullanir (compile-time pinning — runtime guard'a
+   gerek yok). Reflection-based `TestSourceEgressOptionsHasNoOverrideFields`
+   testi alan eklendiginde build kirilmasini saglar.
+3. Egress hostname listesi unexported `defaultEgressTargets` arrayinde
+   tutulur. `DefaultEgressTargets()` callerlara KOPYA doner —
+   canonical liste mutate edilemez. `SourceEgressOptions` `Targets`
+   alani TASIMAZ; production callerlar listeyi degistiremez.
 4. Approved catalog client / unauthorized software detection / install
    execution AG-026A scope'unda DEGIL — sirayla BE-020, BE-023/BE-025,
    AG-027 sorumlu.
@@ -407,10 +414,18 @@ plan-time kilit sart):
    userinfo `url.User=nil` ile ek olarak strip edilir) ile sanitize
    edilir — user path, SID, JWT, license-shaped string, embedded
    credential payload'a raw girmez.
-6. winget LocalSystem'da `source list` veya `show` icin fail dondurursa
-   readiness `PASS/WARN/BLOCK` sinyali uretir; implementation failure
-   degildir (`probeError` veya per-row `errorReason` ile rapor edilir,
-   agent exit code degismez).
+6. winget LocalSystem'da `source list` icin fail dondurursa readiness
+   yeni `sourceListError` alaninda sanitised reason tasir + timeout
+   ise overall `timeout` flag flips. `show` icin fail dondurursa
+   `packageQuery.errorReason` doldurulur. Egress fail her bir
+   `egress.{dns,tcp,https}[i].errorReason` ile rapor edilir; timeout
+   olusursa yine overall `timeout` flag flips. Implementation failure
+   degildir — agent exit code degismez.
+7. Overall preflight bütçesi `opts.Timeout` ile clamp edilir: root
+   `context.WithTimeout` her sub-probe'u kapsar; `perProbeSlice` 250ms
+   floor ile remaining root budget'i still-to-run probelar arasinda
+   böler. Bir sub-probe stall etse bile total wall-clock budget'i
+   asmaz.
 ```
 
 Implementation referansi: `internal/winget/source_egress.go`

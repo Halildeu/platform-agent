@@ -22,10 +22,9 @@ import (
 func DetectSourceEgress(now time.Time) SourceEgressReadiness {
 	_ = now
 	return RunSourceEgressPreflight(SourceEgressOptions{
-		Locator:   defaultLocator,
-		Execute:   defaultExecutor,
-		Timeout:   DefaultSourceEgressTimeout * time.Second,
-		Now:       time.Now,
-		PackageID: FixedPackageQueryID,
+		Locator: defaultLocator,
+		Execute: defaultExecutor,
+		Timeout: DefaultSourceEgressTimeout * time.Second,
+		Now:     time.Now,
 	})
 }
