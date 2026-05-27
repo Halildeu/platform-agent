@@ -420,6 +420,28 @@ func handleDiagnoseCommand(args []string) {
 		if err := json.NewEncoder(os.Stdout).Encode(readiness); err != nil {
 			log.Fatalf("diagnose winget encode failed: %v", err)
 		}
+	case "winget-egress":
+		// AG-026A — WinGet source/egress readiness preflight.
+		//
+		// Read-only: invokes `winget source list` and a fixed
+		// `winget show --id 7zip.7zip` query (no install, no
+		// upgrade, no source mutation), then runs DNS / TCP /
+		// HTTPS reachability checks against the hard-coded
+		// DefaultEgressTargets list. The subcommand is split
+		// from `diagnose winget` so a slow / hung source listing
+		// or stalled egress probe (proxied environments, blocked
+		// CDN) does not stop an operator from getting at the
+		// `--version` readiness via the older command.
+		//
+		// Exit code is 0 regardless of probe outcome — error
+		// isolation lives in the JSON payload (ProbeError,
+		// PackageQuery.ErrorReason, Egress.{DNS,TCP,HTTPS}[*].
+		// ErrorReason), not the exit status. This matches the
+		// AG-026 `winget` subcommand contract.
+		readiness := winget.DetectSourceEgress(time.Now())
+		if err := json.NewEncoder(os.Stdout).Encode(readiness); err != nil {
+			log.Fatalf("diagnose winget-egress encode failed: %v", err)
+		}
 	default:
 		printDiagnoseUsage()
 		os.Exit(2)
@@ -427,5 +449,5 @@ func handleDiagnoseCommand(args []string) {
 }
 
 func printDiagnoseUsage() {
-	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users|software|winget>")
+	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users|software|winget|winget-egress>")
 }

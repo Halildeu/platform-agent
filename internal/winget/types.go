@@ -1,23 +1,34 @@
-// Package winget exposes a read-only WinGet App Installer readiness
-// probe for AG-026. It tells the backend whether winget.exe is on the
-// host and whether the LocalSystem service context can invoke it
-// without prompting — nothing more.
+// Package winget exposes read-only WinGet App Installer readiness
+// probes for AG-026 (basic `--version` health) and AG-026A (source
+// list parser + fixed-id package query + egress reachability).
 //
-// Hard boundary (HIGH 2 in the spawn brief):
+// Hard boundary (verbatim — do not weaken):
 //
-//   - This package NEVER runs `winget install`, `winget search`,
-//     `winget source`, `winget upgrade`, `winget export`, or
-//     `winget settings`. The only subcommand invoked is `--version`,
-//     with fixed args, no user-controlled input on the argv.
-//   - `availableInCurrentContext` and `systemContextReady` are SEPARATE
-//     signals. Plenty of hosts have winget.exe on disk but cannot
-//     invoke it from a LocalSystem service (no source agreements
-//     accepted, no AppX alias, no per-user PATH). The probe reports
-//     both so the backend can pick the right rollout strategy
-//     downstream without conflating them.
-//   - A successful probe does NOT mean "this host is deployment-ready
-//     for WinGet installs" — that decision lives in BE-020 + AG-027,
-//     not here.
+//   - The package NEVER runs `winget install`, `winget upgrade`,
+//     `winget uninstall`, `winget settings`, `winget export`,
+//     `winget import`, `winget hash`, `winget validate`, `winget pin`,
+//     `winget configure`, `winget download`, `winget repair`,
+//     `winget features`, `winget complete`, `winget debug`, or any
+//     `winget source` mutation (`add`, `remove`, `update`, `reset`).
+//   - Read-only surface allowed:
+//       * AG-026 `Detect` → `winget --version` (fixed argv).
+//       * AG-026A `DetectSourceEgress` → `winget source list` (fixed
+//         argv) + `winget show --id 7zip.7zip --exact
+//         --disable-interactivity` (hard-coded package id).
+//     Every argv element is constructed inside this package — no
+//     caller path can inject an alternative subcommand or argument.
+//   - `availableInCurrentContext` and `systemContextReady` (AG-026)
+//     are SEPARATE signals. Plenty of hosts have winget.exe on disk
+//     but cannot invoke it from a LocalSystem service (no source
+//     agreements accepted, no AppX alias, no per-user PATH). The
+//     probe reports both so the backend can pick the right rollout
+//     strategy downstream without conflating them.
+//   - AG-026A readiness signals (PASS / WARN / BLOCK semantics via
+//     SourceEgressReadiness.SourceListError, .PackageQuery.ErrorReason,
+//     .Egress.*[].ErrorReason, .Timeout) are reachability evidence —
+//     NOT install authority. The install decision lives in
+//     BE-020 (approved catalog) + BE-021A (preflight contract) +
+//     AG-027 (executor), not here.
 package winget
 
 // SchemaVersion is bumped when a non-additive change ships.

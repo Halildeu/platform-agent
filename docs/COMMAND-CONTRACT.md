@@ -308,6 +308,131 @@ Software block icin HARD boundary:
    (JWT, email, UPN, full SID, user path, license key -> [REDACTED])
 ```
 
+### 6.A `COLLECT_INVENTORY` payload `includeWinGetEgress` (AG-026A, Faz 22.5)
+
+`COLLECT_INVENTORY` payload `includeWinGetEgress` argumani (opsiyonel,
+default false) **AG-026A read-only WinGet source/egress readiness
+preflight**ini secer:
+
+```json
+{
+  "commandId": "...",
+  "type": "COLLECT_INVENTORY",
+  "payload": {
+    "includeSoftware": true,
+    "includeWinGetEgress": true
+  }
+}
+```
+
+`includeWinGetEgress=false` (default): inventory.wingetEgress alani
+PAYLOAD'DA YER ALMAZ. Source list, package query, ve DNS/TCP/HTTPS
+egress probleri hic calistirilmaz; heartbeat / auto-enroll bu defaulti
+kullanir. AG-025H lightweight contract bozulmaz.
+
+`includeWinGetEgress=true`: inventory.wingetEgress blogu attach edilir;
+agent `winget source list` (read-only fixed argv) + `winget show --id
+7zip.7zip --exact --disable-interactivity` (sabit package id) +
+hard-coded egress hostname listesine karsi DNS/TCP/HTTPS reachability
+probleri calistirir.
+
+`inventory.wingetEgress` result detail ornegi:
+
+```json
+{
+  "inventory": {
+    "wingetEgress": {
+      "supported": true,
+      "schemaVersion": 1,
+      "probeDurationMs": 4380,
+      "timeout": false,
+      "sources": [
+        {
+          "name": "winget",
+          "argument": "https://cdn.winget.microsoft.com/cache",
+          "type": "Microsoft.PreIndexed.Package",
+          "trustLevel": "Trusted"
+        },
+        {
+          "name": "msstore",
+          "argument": "https://storeedgefd.dsx.mp.microsoft.com/v9.0",
+          "type": "Microsoft.Rest",
+          "trustLevel": "Trusted"
+        }
+      ],
+      "sourceListError": "",
+      "packageQuery": {
+        "packageId": "7zip.7zip",
+        "found": true,
+        "exitCode": 0,
+        "durationMs": 1820,
+        "timeout": false
+      },
+      "egress": {
+        "dns": [
+          {"target": "cdn.winget.microsoft.com", "ok": true, "durationMs": 12},
+          {"target": "storeedgefd.dsx.mp.microsoft.com", "ok": true, "durationMs": 14}
+        ],
+        "tcp": [
+          {"target": "cdn.winget.microsoft.com:443", "ok": true, "durationMs": 38},
+          {"target": "storeedgefd.dsx.mp.microsoft.com:443", "ok": true, "durationMs": 41}
+        ],
+        "https": [
+          {"target": "https://cdn.winget.microsoft.com", "ok": true, "durationMs": 152},
+          {"target": "https://storeedgefd.dsx.mp.microsoft.com", "ok": true, "durationMs": 167}
+        ],
+        "proxyConfigured": false
+      }
+    }
+  }
+}
+```
+
+AG-026A WinGet source/egress block icin HARD boundary (Codex 019e6b5d
+plan-time kilit sart + 019e6b70 iter-1 absorb):
+
+```text
+1. install / upgrade / uninstall / settings / export / import / hash /
+   validate / pin / configure / download / repair / features /
+   complete / debug / source add|remove|update|reset subcommand'lari
+   HIC calistirilmaz; package fixed-argv `show` ve `source list`
+   disinda winget yardimi cagrilamaz.
+2. Package id `7zip.7zip` (FixedPackageQueryID) hard-coded.
+   `SourceEgressOptions` artik `PackageID` alani TASIMAZ; `runPackageQuery`
+   sabiti dogrudan kullanir (compile-time pinning — runtime guard'a
+   gerek yok). Reflection-based `TestSourceEgressOptionsHasNoOverrideFields`
+   testi alan eklendiginde build kirilmasini saglar.
+3. Egress hostname listesi unexported `defaultEgressTargets` arrayinde
+   tutulur. `DefaultEgressTargets()` callerlara KOPYA doner —
+   canonical liste mutate edilemez. `SourceEgressOptions` `Targets`
+   alani TASIMAZ; production callerlar listeyi degistiremez.
+4. Approved catalog client / unauthorized software detection / install
+   execution AG-026A scope'unda DEGIL — sirayla BE-020, BE-023/BE-025,
+   AG-027 sorumlu.
+5. Source argument (URL), source error reason, proxy URL ve egress
+   error reason serbest metni `security.RedactSoftwareString` (proxy
+   userinfo `url.User=nil` ile ek olarak strip edilir) ile sanitize
+   edilir — user path, SID, JWT, license-shaped string, embedded
+   credential payload'a raw girmez.
+6. winget LocalSystem'da `source list` icin fail dondurursa readiness
+   yeni `sourceListError` alaninda sanitised reason tasir + timeout
+   ise overall `timeout` flag flips. `show` icin fail dondurursa
+   `packageQuery.errorReason` doldurulur. Egress fail her bir
+   `egress.{dns,tcp,https}[i].errorReason` ile rapor edilir; timeout
+   olusursa yine overall `timeout` flag flips. Implementation failure
+   degildir — agent exit code degismez.
+7. Overall preflight bütçesi `opts.Timeout` ile clamp edilir: root
+   `context.WithTimeout` her sub-probe'u kapsar; `perProbeSlice` 250ms
+   floor ile remaining root budget'i still-to-run probelar arasinda
+   böler. Bir sub-probe stall etse bile total wall-clock budget'i
+   asmaz.
+```
+
+Implementation referansi: `internal/winget/source_egress.go`
+(`RunSourceEgressPreflight` + `DetectSourceEgress` platform giris noktasi),
+`internal/inventory/inventory.go` (`CollectOptions.IncludeWinGetEgress`),
+`internal/commands/executor.go` (`COLLECT_INVENTORY` payload parse).
+
 -------------------------------------------------------------------------------
 ## 7. Command Result
 -------------------------------------------------------------------------------

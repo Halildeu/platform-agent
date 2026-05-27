@@ -51,8 +51,15 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 
 	switch command.Type {
 	case protocol.CommandCollectInventory:
+		// AG-025H + AG-026A — opt-in payload bits:
+		//   includeSoftware    -> software registry + winget --version probe
+		//   includeWinGetEgress -> AG-026A read-only source/egress preflight
+		// Both default to false so the lightweight heartbeat / auto-enroll
+		// contract pays neither cost. Backend opts in explicitly when an
+		// install pilot is being evaluated.
 		snapshot := inventory.CollectWithOptions(e.AgentVersion, e.now(), inventory.CollectOptions{
 			IncludeSoftwareApps: boolPayload(command.Payload, "includeSoftware"),
+			IncludeWinGetEgress: boolPayload(command.Payload, "includeWinGetEgress"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"
