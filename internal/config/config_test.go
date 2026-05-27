@@ -40,3 +40,34 @@ func TestLoadFromEnvSigningPathPrefix(t *testing.T) {
 		t.Fatalf("SigningPathPrefix = %q", cfg.SigningPathPrefix)
 	}
 }
+
+func TestLoadFromEnv_AutoEnrollOverrides(t *testing.T) {
+	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_API_URL", "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin/")
+	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_CONFIG_PATH", `C:\ProgramData\EndpointAgent\config\auto-enroll.dpapi`)
+	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX", ".acik.local")
+	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX", "adcomputer:")
+
+	cfg := LoadFromEnv()
+	if cfg.AutoEnrollAPIURL != "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin" {
+		t.Fatalf("AutoEnrollAPIURL = %q (trailing slash should be trimmed)", cfg.AutoEnrollAPIURL)
+	}
+	if cfg.AutoEnrollConfigPath != `C:\ProgramData\EndpointAgent\config\auto-enroll.dpapi` {
+		t.Fatalf("AutoEnrollConfigPath = %q", cfg.AutoEnrollConfigPath)
+	}
+	if cfg.AutoEnrollCertSubjectSuffix != ".acik.local" {
+		t.Fatalf("AutoEnrollCertSubjectSuffix = %q", cfg.AutoEnrollCertSubjectSuffix)
+	}
+	if cfg.AutoEnrollCertSANURIPrefix != "adcomputer:" {
+		t.Fatalf("AutoEnrollCertSANURIPrefix = %q", cfg.AutoEnrollCertSANURIPrefix)
+	}
+}
+
+func TestLoadFromEnv_AutoEnrollDefaultsEmpty(t *testing.T) {
+	// Ensure that without env vars the new fields are empty (the
+	// autoenroll.Defaults bake-in handles the production URL).
+	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_API_URL", "")
+	cfg := LoadFromEnv()
+	if cfg.AutoEnrollAPIURL != "" {
+		t.Fatalf("expected empty AutoEnrollAPIURL when env not set, got %q", cfg.AutoEnrollAPIURL)
+	}
+}

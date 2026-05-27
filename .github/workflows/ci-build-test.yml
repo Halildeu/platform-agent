@@ -353,3 +353,47 @@ jobs:
             Remove-Item "lab-cert.pfx" -Force
             Write-Host "PFX file deleted"
           }
+
+  # ============================================================
+  # Job 3: Windows go test (AG-EA-AUTO Faz 22.3 Katman 3)
+  # ============================================================
+  # Codex iter-3 absorb: Windows-specific code paths (certstore /
+  # registry / DPAPI) build only with //go:build windows. The Ubuntu job
+  # exercises the non-Windows stubs and the platform-agnostic code; this
+  # job exercises the Windows build tag so the production binary's unit
+  # coverage is real, not just cross-compile pass.
+  #
+  # Race detector is intentionally NOT enabled here — Linux job covers
+  # race coverage; Windows runner time-budget is tight and CNG/DPAPI
+  # syscalls don't benefit from -race in the same way.
+  windows-go-test:
+    name: Windows Go test
+    runs-on: windows-latest
+    timeout-minutes: 15
+    needs: test-and-build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Read Go version from go.mod
+        id: go-version
+        shell: pwsh
+        run: |
+          $version = (Get-Content go.mod | Select-String '^go ').ToString().Split(' ')[1]
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Go version: $version"
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ steps.go-version.outputs.version }}
+          cache: true
+
+      - name: Go vet (Windows)
+        shell: pwsh
+        run: go vet ./...
+
+      - name: Go test (Windows)
+        shell: pwsh
+        run: go test ./... -v

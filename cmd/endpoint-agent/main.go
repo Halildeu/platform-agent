@@ -2,23 +2,34 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
 	"platform-agent/internal/app"
+	"platform-agent/internal/autoenroll"
+	"platform-agent/internal/commands"
 	"platform-agent/internal/config"
 	"platform-agent/internal/identity"
+	"platform-agent/internal/inventory"
 	agentlog "platform-agent/internal/logging"
+	"platform-agent/internal/mtls"
+	"platform-agent/internal/platform/windows/certstore"
+	"platform-agent/internal/platform/windows/dpapi"
+	winregistry "platform-agent/internal/platform/windows/registry"
 	winservice "platform-agent/internal/platform/windows/service"
 	"platform-agent/internal/protocol"
 	"platform-agent/internal/security"
+	"platform-agent/internal/state"
 	"platform-agent/internal/users"
 )
 
@@ -26,6 +37,9 @@ func main() {
 	once := flag.Bool("once", false, "run one enroll/heartbeat/command iteration and exit")
 	version := flag.Bool("version", false, "print agent version and exit")
 	serviceRunName := flag.String("service-run-name", winservice.DefaultName, "internal Windows service name")
+	autoEnrollFlag := flag.Bool("auto-enroll", false, "run in mTLS auto-enroll mode (ADR-0029 Faz 22.3 Katman 3); requires Windows")
+	autoEnrollAPIURL := flag.String("api-url", "", "auto-enroll API base URL override (full canonical path, e.g. https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin)")
+	dryRun := flag.Bool("dry-run", false, "auto-enroll only: load cert + build TLS config + validate persisted config without making HTTP calls")
 	flag.Parse()
 
 	cfg := config.LoadFromEnv()
@@ -58,6 +72,50 @@ func main() {
 	logger := loggerBundle.Logger
 	logger.Printf("logger initialized logPath=%s serviceMode=%t", loggerBundle.LogPath, runningAsService)
 
+	mode := resolveMode(*autoEnrollFlag, *dryRun)
+	logger.Printf("agent mode=%s", mode)
+
+	if mode == modeAutoEnroll {
+		if *dryRun {
+			if err := runAutoEnrollDryRun(cfg, *autoEnrollAPIURL, logger); err != nil {
+				logger.Fatalf("auto-enroll dry-run failed: %v", err)
+			}
+			return
+		}
+		if runningAsService {
+			if err := winservice.Run(*serviceRunName, func(ctx context.Context) error {
+				runner, err := newAutoEnrollRunner(cfg, *autoEnrollAPIURL, logger)
+				if err != nil {
+					return err
+				}
+				return runner.RunLoop(ctx)
+			}); err != nil {
+				logger.Fatalf("auto-enroll service run failed: %v", err)
+			}
+			return
+		}
+		runner, err := newAutoEnrollRunner(cfg, *autoEnrollAPIURL, logger)
+		if err != nil {
+			logger.Fatalf("auto-enroll init failed: %v", err)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if *once {
+			if err := runner.RunOnce(ctx); err != nil {
+				logger.Fatalf("auto-enroll run failed: %v", err)
+			}
+			return
+		}
+		if err := runner.RunLoop(ctx); err != nil && err != context.Canceled {
+			logger.Fatalf("auto-enroll loop failed: %v", err)
+		}
+		return
+	}
+
+	// Default HMAC-signed mode (mevcut app.Runner).
+	if *dryRun {
+		logger.Fatalf("--dry-run requires --auto-enroll (HMAC mode has no dry-run semantic)")
+	}
 	if runningAsService {
 		if err := winservice.Run(*serviceRunName, func(ctx context.Context) error {
 			runner, err := newRunner(cfg, logger)
@@ -86,6 +144,162 @@ func main() {
 	if err := runner.RunLoop(ctx); err != nil && err != context.Canceled {
 		logger.Fatalf("agent loop failed: %v", err)
 	}
+}
+
+const (
+	modeHMAC       = "hmac"
+	modeAutoEnroll = "auto-enroll"
+)
+
+// resolveMode picks between the existing HMAC-signed mode and the
+// ADR-0029 mTLS auto-enroll mode. Precedence:
+//
+//  1. --auto-enroll flag wins outright.
+//  2. Otherwise the Windows registry value HKLM\SOFTWARE\EndpointAgent\Mode
+//     decides — MSI installers ship "auto-enroll" there to flip the binary
+//     when the service starts without explicit CLI args (Codex F9 + B
+//     absorb).
+//  3. Otherwise HMAC mode.
+//
+// On non-Windows builds the registry reader silently returns the default,
+// so the function reduces to "honour the flag". --dry-run alone is NOT a
+// valid mode trigger (Codex iter-3 guardrail): it requires either the flag
+// or the registry to put us in auto-enroll mode first.
+func resolveMode(flagSet bool, dryRunFlag bool) string {
+	if flagSet {
+		return modeAutoEnroll
+	}
+	reader := winregistry.New()
+	val := reader.ReadString(`HKLM:\SOFTWARE\EndpointAgent`, "Mode", "")
+	if val == modeAutoEnroll {
+		return modeAutoEnroll
+	}
+	_ = dryRunFlag // see comment on dry-run validation above; main() enforces.
+	return modeHMAC
+}
+
+// resolveAutoEnrollAPIURL applies the documented precedence:
+// CLI flag > ENDPOINT_AGENT_AUTO_ENROLL_API_URL env > HKLM registry
+// ApiUrl > baked default — Codex F8 absorb. The registry fallback is
+// what the MSI installer (ADR-0029 Katman 4) writes when it deploys the
+// service.
+func resolveAutoEnrollAPIURL(cfg config.Config, apiURLOverride string, reader winregistry.Reader, baked string) string {
+	if apiURLOverride != "" {
+		return apiURLOverride
+	}
+	if cfg.AutoEnrollAPIURL != "" {
+		return cfg.AutoEnrollAPIURL
+	}
+	if regVal := reader.ReadString(`HKLM:\SOFTWARE\EndpointAgent`, "ApiUrl", ""); regVal != "" {
+		return regVal
+	}
+	return baked
+}
+
+// newAutoEnrollRunner wires up the autoenroll.Runner with the production
+// providers (certstore + registry + DPAPI). Non-Windows builds get the
+// same wiring but the providers refuse all calls with ErrUnsupportedOS, so
+// the runner returns immediately and main() prints a clear error.
+func newAutoEnrollRunner(cfg config.Config, apiURLOverride string, logger *log.Logger) (*autoenroll.Runner, error) {
+	if runtime.GOOS != "windows" {
+		return nil, fmt.Errorf("auto-enroll requires Windows (current GOOS=%s)", runtime.GOOS)
+	}
+	aeCfg := autoenroll.Defaults()
+	registryReader := winregistry.New()
+	aeCfg.APIURL = resolveAutoEnrollAPIURL(cfg, apiURLOverride, registryReader, aeCfg.APIURL)
+	aeCfg.AgentVersion = cfg.AgentVersion
+	if cfg.HeartbeatInterval > 0 {
+		aeCfg.HeartbeatInterval = cfg.HeartbeatInterval
+	}
+	if cfg.CommandPollInterval > 0 {
+		aeCfg.CommandPollInterval = cfg.CommandPollInterval
+	}
+	if cfg.CommandTimeout > 0 {
+		aeCfg.CommandTimeout = cfg.CommandTimeout
+	}
+	aeCfg.CertFilter.SubjectSuffix = cfg.AutoEnrollCertSubjectSuffix
+	aeCfg.CertFilter.SANURIPrefix = cfg.AutoEnrollCertSANURIPrefix
+
+	certProvider := certstore.New()
+	configStore := dpapi.New(cfg.AutoEnrollConfigPath, nil)
+	tracker := state.NewTracker(state.StateStarting)
+	executor := commands.NewLocalExecutor(inventory.RuntimeCapabilities(), cfg.AgentVersion)
+
+	return autoenroll.NewRunner(aeCfg, certProvider, registryReader, configStore, executor, tracker, logger)
+}
+
+// runAutoEnrollDryRun proves the cert + TLS config + persisted config path
+// works without making any HTTP call. Exits non-zero on any failure so
+// CI/operator smoke can rely on the exit code.
+func runAutoEnrollDryRun(cfg config.Config, apiURLOverride string, logger *log.Logger) error {
+	if runtime.GOOS != "windows" {
+		return fmt.Errorf("auto-enroll dry-run requires Windows (current GOOS=%s)", runtime.GOOS)
+	}
+	aeCfg := autoenroll.Defaults()
+	registryReader := winregistry.New()
+	aeCfg.APIURL = resolveAutoEnrollAPIURL(cfg, apiURLOverride, registryReader, aeCfg.APIURL)
+	aeCfg.CertFilter.SubjectSuffix = cfg.AutoEnrollCertSubjectSuffix
+	aeCfg.CertFilter.SANURIPrefix = cfg.AutoEnrollCertSANURIPrefix
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	provider := certstore.New()
+	material, err := provider.LoadEligibleCert(ctx, aeCfg.CertFilter)
+	if err != nil {
+		return fmt.Errorf("cert load: %w", err)
+	}
+	logger.Printf("dry-run cert: subject=%q thumbprint_sha256=%s not_after=%s",
+		material.Leaf.Subject.CommonName, material.ThumbprintSHA256, material.Leaf.NotAfter.Format(time.RFC3339))
+
+	serverName, err := hostnameOnly(aeCfg.APIURL)
+	if err != nil {
+		return fmt.Errorf("derive server name from api url: %w", err)
+	}
+	tlsCfg, err := mtls.TLSConfigFor(mtls.Options{
+		Cert:       material.TLSCertificate,
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+	})
+	if err != nil {
+		return fmt.Errorf("tls config: %w", err)
+	}
+	logger.Printf("dry-run tls config: server_name=%s min_version=%#x certs=%d",
+		tlsCfg.ServerName, tlsCfg.MinVersion, len(tlsCfg.Certificates))
+
+	store := dpapi.New(cfg.AutoEnrollConfigPath, nil)
+	persisted, err := store.Read(ctx)
+	if err != nil && !autoenroll.IsEmptyStore(err) {
+		return fmt.Errorf("persisted config read: %w", err)
+	}
+	if autoenroll.IsEmptyStore(err) {
+		logger.Printf("dry-run persisted config: empty store (first-run path would enroll)")
+	} else {
+		logger.Printf("dry-run persisted config: device_id=%s thumbprint_sha256=%s expires_at=%s",
+			persisted.DeviceID, persisted.CertThumbprintSHA256, persisted.TokenExpiresAt.Format(time.RFC3339))
+	}
+	logger.Printf("dry-run OK — no HTTP call made")
+	return nil
+}
+
+// hostnameOnly extracts the host portion (without port) of a URL via
+// net/url so IPv6 brackets, userinfo, and other URL edge-cases stay
+// well-defined — Codex F9 absorb. Returns an error when the URL
+// parses but carries no host, so the caller can fail fast rather than
+// proceeding with an empty SNI value.
+func hostnameOnly(raw string) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("hostname: url is empty")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("hostname: parse %q: %w", raw, err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("hostname: url %q has no host", raw)
+	}
+	return host, nil
 }
 
 func newRunner(cfg config.Config, logger *log.Logger) (*app.Runner, error) {
