@@ -354,3 +354,51 @@ func TestClient_BaseURL_TrimsTrailingSlash(t *testing.T) {
 		t.Fatalf("trailing slash not trimmed: %q", wire.BaseURL())
 	}
 }
+
+func TestClient_NewClient_RejectsQueryOrFragment(t *testing.T) {
+	pki := setupTestPKI(t)
+	httpClient, _ := mtls.NewClient(mtls.Options{Cert: pki.clientCert, RootCAs: pki.caPool, ServerName: "127.0.0.1"})
+	for _, raw := range []string{
+		"https://host/api?x=1",
+		"https://host/api#frag",
+	} {
+		if _, err := NewClient(raw, httpClient); err == nil {
+			t.Fatalf("expected NewClient(%q) to reject query/fragment", raw)
+		}
+	}
+}
+
+func TestRunner_HeartbeatAcceptedFalse_FailsClosed(t *testing.T) {
+	pki := setupTestPKI(t)
+	recorder := &requestRecorder{hit: map[string]int{}}
+	cfg := &handlerConfig{
+		heartbeat: HeartbeatResponse{
+			Accepted:   false,
+			Status:     "device_disabled",
+			ServerTime: time.Now().UTC(),
+		},
+	}
+	srv := newTestServer(t, pki, cfg, recorder)
+	store := NewMemoryStore()
+	provider := &fakeCertProvider{pki: pki}
+	mat, _ := provider.LoadEligibleCert(context.Background(), DefaultCertFilter())
+	_ = store.Write(context.Background(), PersistedConfig{
+		DeviceID:             "dev-1",
+		ServiceToken:         "tok-1",
+		TokenExpiresAt:       time.Now().Add(24 * time.Hour).UTC(),
+		CertThumbprintSHA256: mat.ThumbprintSHA256,
+	})
+	registry := &fakeRegistry{intMap: map[string]int{}, stringMap: map[string]string{}}
+
+	runner := buildRunner(t, pki, srv, registry, store, provider)
+	err := runner.RunOnce(context.Background())
+	if !errors.Is(err, ErrAuthFailure) {
+		t.Fatalf("expected ErrAuthFailure on accepted=false, got %v", err)
+	}
+	if !runner.isFatal(err) {
+		t.Fatalf("expected fatal classification, got %v", err)
+	}
+	if got := recorder.count(PathCommandsNext); got != 0 {
+		t.Fatalf("commands/next should NOT be polled after accepted=false; got %d calls", got)
+	}
+}

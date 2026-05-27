@@ -38,10 +38,11 @@ type Client struct {
 	http    *http.Client
 }
 
-// NewClient constructs a wire client. baseURL must include the full
-// canonical base path (e.g. https://host/api/v1/endpoint-admin); the suffix
-// constants are appended via url.JoinPath so query/trailing-slash edge
-// cases are handled by net/url, not by string concatenation.
+// NewClient constructs a wire client. baseURL must be a full canonical
+// base path (e.g. https://host/api/v1/endpoint-admin) and must NOT carry
+// a query string or fragment — the suffix constants are joined onto the
+// path via url.JoinPath so query/trailing-slash edge cases stay
+// well-defined (Codex F7 absorb).
 func NewClient(baseURL string, httpClient *http.Client) (*Client, error) {
 	if httpClient == nil {
 		return nil, fmt.Errorf("autoenroll: http client is required")
@@ -52,6 +53,9 @@ func NewClient(baseURL string, httpClient *http.Client) (*Client, error) {
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, fmt.Errorf("autoenroll: base url must include scheme and host")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("autoenroll: base url must not carry query or fragment (got %q)", baseURL)
 	}
 	return &Client{baseURL: parsed, http: httpClient}, nil
 }
@@ -148,7 +152,14 @@ func (c *Client) doRaw(ctx context.Context, method, suffix, query, token string,
 		body = b
 	}
 
-	target := c.baseURL.String() + suffix
+	// JoinPath handles trailing/leading-slash collisions in both base
+	// and suffix; concatenation here would lead to "//endpoint-..."
+	// when callers ever passed a trailing slash. (Codex F7 absorb.)
+	joined, err := url.JoinPath(c.baseURL.String(), suffix)
+	if err != nil {
+		return fmt.Errorf("join %s with %s: %w", c.baseURL, suffix, err)
+	}
+	target := joined
 	if query != "" {
 		target += "?" + query
 	}

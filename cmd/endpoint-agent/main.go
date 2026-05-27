@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -177,6 +178,24 @@ func resolveMode(flagSet bool, dryRunFlag bool) string {
 	return modeHMAC
 }
 
+// resolveAutoEnrollAPIURL applies the documented precedence:
+// CLI flag > ENDPOINT_AGENT_AUTO_ENROLL_API_URL env > HKLM registry
+// ApiUrl > baked default — Codex F8 absorb. The registry fallback is
+// what the MSI installer (ADR-0029 Katman 4) writes when it deploys the
+// service.
+func resolveAutoEnrollAPIURL(cfg config.Config, apiURLOverride string, reader winregistry.Reader, baked string) string {
+	if apiURLOverride != "" {
+		return apiURLOverride
+	}
+	if cfg.AutoEnrollAPIURL != "" {
+		return cfg.AutoEnrollAPIURL
+	}
+	if regVal := reader.ReadString(`HKLM:\SOFTWARE\EndpointAgent`, "ApiUrl", ""); regVal != "" {
+		return regVal
+	}
+	return baked
+}
+
 // newAutoEnrollRunner wires up the autoenroll.Runner with the production
 // providers (certstore + registry + DPAPI). Non-Windows builds get the
 // same wiring but the providers refuse all calls with ErrUnsupportedOS, so
@@ -186,12 +205,8 @@ func newAutoEnrollRunner(cfg config.Config, apiURLOverride string, logger *log.L
 		return nil, fmt.Errorf("auto-enroll requires Windows (current GOOS=%s)", runtime.GOOS)
 	}
 	aeCfg := autoenroll.Defaults()
-	if cfg.AutoEnrollAPIURL != "" {
-		aeCfg.APIURL = cfg.AutoEnrollAPIURL
-	}
-	if apiURLOverride != "" {
-		aeCfg.APIURL = apiURLOverride
-	}
+	registryReader := winregistry.New()
+	aeCfg.APIURL = resolveAutoEnrollAPIURL(cfg, apiURLOverride, registryReader, aeCfg.APIURL)
 	aeCfg.AgentVersion = cfg.AgentVersion
 	if cfg.HeartbeatInterval > 0 {
 		aeCfg.HeartbeatInterval = cfg.HeartbeatInterval
@@ -206,7 +221,6 @@ func newAutoEnrollRunner(cfg config.Config, apiURLOverride string, logger *log.L
 	aeCfg.CertFilter.SANURIPrefix = cfg.AutoEnrollCertSANURIPrefix
 
 	certProvider := certstore.New()
-	registryReader := winregistry.New()
 	configStore := dpapi.New(cfg.AutoEnrollConfigPath, nil)
 	tracker := state.NewTracker(state.StateStarting)
 	executor := commands.NewLocalExecutor(inventory.RuntimeCapabilities(), cfg.AgentVersion)
@@ -222,12 +236,8 @@ func runAutoEnrollDryRun(cfg config.Config, apiURLOverride string, logger *log.L
 		return fmt.Errorf("auto-enroll dry-run requires Windows (current GOOS=%s)", runtime.GOOS)
 	}
 	aeCfg := autoenroll.Defaults()
-	if cfg.AutoEnrollAPIURL != "" {
-		aeCfg.APIURL = cfg.AutoEnrollAPIURL
-	}
-	if apiURLOverride != "" {
-		aeCfg.APIURL = apiURLOverride
-	}
+	registryReader := winregistry.New()
+	aeCfg.APIURL = resolveAutoEnrollAPIURL(cfg, apiURLOverride, registryReader, aeCfg.APIURL)
 	aeCfg.CertFilter.SubjectSuffix = cfg.AutoEnrollCertSubjectSuffix
 	aeCfg.CertFilter.SANURIPrefix = cfg.AutoEnrollCertSANURIPrefix
 
@@ -242,9 +252,13 @@ func runAutoEnrollDryRun(cfg config.Config, apiURLOverride string, logger *log.L
 	logger.Printf("dry-run cert: subject=%q thumbprint_sha256=%s not_after=%s",
 		material.Leaf.Subject.CommonName, material.ThumbprintSHA256, material.Leaf.NotAfter.Format(time.RFC3339))
 
+	serverName, err := hostnameOnly(aeCfg.APIURL)
+	if err != nil {
+		return fmt.Errorf("derive server name from api url: %w", err)
+	}
 	tlsCfg, err := mtls.TLSConfigFor(mtls.Options{
 		Cert:       material.TLSCertificate,
-		ServerName: hostnameOnly(aeCfg.APIURL),
+		ServerName: serverName,
 		MinVersion: tls.VersionTLS12,
 	})
 	if err != nil {
@@ -268,35 +282,24 @@ func runAutoEnrollDryRun(cfg config.Config, apiURLOverride string, logger *log.L
 	return nil
 }
 
-// hostnameOnly extracts the host portion of a URL string. Empty when the
-// URL fails to parse or carries no host.
-func hostnameOnly(raw string) string {
+// hostnameOnly extracts the host portion (without port) of a URL via
+// net/url so IPv6 brackets, userinfo, and other URL edge-cases stay
+// well-defined — Codex F9 absorb. Returns an error when the URL
+// parses but carries no host, so the caller can fail fast rather than
+// proceeding with an empty SNI value.
+func hostnameOnly(raw string) (string, error) {
 	if raw == "" {
-		return ""
+		return "", fmt.Errorf("hostname: url is empty")
 	}
-	// Cheap parser that avoids importing net/url just for one call.
-	rest := raw
-	if i := indexOf(rest, "://"); i >= 0 {
-		rest = rest[i+3:]
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("hostname: parse %q: %w", raw, err)
 	}
-	if i := indexOf(rest, "/"); i >= 0 {
-		rest = rest[:i]
+	host := u.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("hostname: url %q has no host", raw)
 	}
-	if i := indexOf(rest, ":"); i >= 0 {
-		rest = rest[:i]
-	}
-	return rest
-}
-
-// indexOf is strings.Index without the import; the build-time cost is
-// negligible and keeps the file lean.
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
+	return host, nil
 }
 
 func newRunner(cfg config.Config, logger *log.Logger) (*app.Runner, error) {

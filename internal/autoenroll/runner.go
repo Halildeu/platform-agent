@@ -196,6 +196,14 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 // terminating returns are ctx.Done(), ErrAuthFailure (fail-closed), and
 // "grace window expired".
 func (r *Runner) RunLoop(ctx context.Context) error {
+	// In the RunLoop path, an empty cert store is recoverable — the AD
+	// CS auto-enrollment GPO may not have fired yet. waitForCert applies
+	// the bounded backoff schedule (5/10/20/40/60 min capped) so the
+	// service keeps the right cadence rather than re-hammering the store
+	// every CommandPollInterval (Codex F5 absorb).
+	if err := r.waitForCert(ctx); err != nil {
+		return err
+	}
 	if err := r.RunOnce(ctx); err != nil {
 		if r.isFatal(err) {
 			return err
@@ -256,11 +264,13 @@ func (r *Runner) isFatal(err error) bool {
 	return errors.Is(err, ErrAuthFailure) || strings.Contains(err.Error(), "grace window expired")
 }
 
-// ensureCert loads the eligible cert (waiting through backoff when the
-// store is empty, e.g. AD CS auto-enrollment hasn't fired yet) and, when
-// the thumbprint changes, rebuilds the mTLS client.
+// ensureCert loads the eligible cert and, when the thumbprint changes,
+// rebuilds the mTLS client. RunOnce / --dry-run callers see the first
+// error immediately (deterministic exit); the RunLoop path applies the
+// no-cert backoff schedule through waitForCert before calling ensureCert
+// again (Codex F5 absorb).
 func (r *Runner) ensureCert(ctx context.Context) error {
-	cert, err := r.loadCertWithBackoff(ctx)
+	cert, err := r.CertProvider.LoadEligibleCert(ctx, r.Config.CertFilter)
 	if err != nil {
 		return err
 	}
@@ -287,6 +297,13 @@ func (r *Runner) ensureCert(ctx context.Context) error {
 		return fmt.Errorf("build wire client: %w", err)
 	}
 
+	// Release idle keep-alives bound to the previous cert before
+	// replacing the transport — Codex F6 absorb. Without this the
+	// old mTLS connections live another IdleConnTimeout (~90s) and
+	// might serve requests under the old cert identity.
+	if r.httpClient != nil {
+		r.httpClient.CloseIdleConnections()
+	}
 	r.httpClient = httpClient
 	r.wireClient = wire
 	r.loadedCert = cert
@@ -295,25 +312,47 @@ func (r *Runner) ensureCert(ctx context.Context) error {
 	return nil
 }
 
-// loadCertWithBackoff retries cert load with the documented schedule
-// (5/10/20/40/60 minutes capped). The first attempt is immediate; on
-// failure the goroutine sleeps with context cancellation respect. When
-// running in --once or --dry-run, the caller is responsible for not
-// invoking RunLoop — RunOnce returns the first error so non-Windows tests
-// and dry-runs surface "no cert" immediately.
-func (r *Runner) loadCertWithBackoff(ctx context.Context) (CertMaterial, error) {
-	cert, err := r.CertProvider.LoadEligibleCert(ctx, r.Config.CertFilter)
-	if err == nil {
-		return cert, nil
+// noCertBackoffSchedule returns the bounded retry intervals used when
+// the cert store is empty (AD CS auto-enrollment race). The cap stays
+// at 60 minutes; the schedule is exposed so tests can shrink it.
+func noCertBackoffSchedule() []time.Duration {
+	return []time.Duration{
+		5 * time.Minute,
+		10 * time.Minute,
+		20 * time.Minute,
+		40 * time.Minute,
+		60 * time.Minute,
 	}
-	if !errors.Is(err, ErrNoCertMatch) {
-		return CertMaterial{}, err
+}
+
+// waitForCert applies the bounded backoff schedule until either ctx is
+// cancelled, a cert appears, or a non-ErrNoCertMatch error surfaces.
+// Used by RunLoop only; RunOnce and --dry-run skip this and surface the
+// first ErrNoCertMatch immediately (Codex F5 absorb).
+func (r *Runner) waitForCert(ctx context.Context) error {
+	schedule := noCertBackoffSchedule()
+	attempt := 0
+	for {
+		_, err := r.CertProvider.LoadEligibleCert(ctx, r.Config.CertFilter)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrNoCertMatch) {
+			return err
+		}
+		d := schedule[len(schedule)-1]
+		if attempt < len(schedule) {
+			d = schedule[attempt]
+		}
+		// Small additive jitter (up to 30s) avoids a synchronized fleet
+		// retry storm when AD CS comes back up.
+		d += Jitter(30)
+		r.logf("no eligible cert (attempt=%d), retry in %v", attempt+1, d)
+		if err := SleepWithContext(ctx, d); err != nil {
+			return err
+		}
+		attempt++
 	}
-	// On first-run with no cert yet, RunLoop's caller will see this error
-	// and decide whether to retry; we let RunOnce return immediately so
-	// --once produces a deterministic exit. The backoff schedule lives in
-	// Wait* helpers for the RunLoop path.
-	return CertMaterial{}, err
 }
 
 // reconcileEnrollment makes the persisted state match the currently
@@ -353,6 +392,9 @@ func (r *Runner) reconcileEnrollment(ctx context.Context, persisted PersistedCon
 		CertThumbprintSHA1:   r.loadedCert.ThumbprintSHA1,
 		Issued:               now,
 	}
+	if err := cfg.Validate(); err != nil {
+		return persisted, fmt.Errorf("auto-enroll response invalid: %w", err)
+	}
 	if err := r.ConfigStore.Write(ctx, cfg); err != nil {
 		return persisted, fmt.Errorf("persist enrollment: %w", err)
 	}
@@ -389,6 +431,9 @@ func (r *Runner) maybeRefreshToken(ctx context.Context, persisted PersistedConfi
 
 	persisted.ServiceToken = resp.ServiceToken
 	persisted.TokenExpiresAt = resp.TokenExpiresAt
+	if err := persisted.Validate(); err != nil {
+		return persisted, fmt.Errorf("token refresh response invalid: %w", err)
+	}
 	if err := r.ConfigStore.Write(ctx, persisted); err != nil {
 		return persisted, fmt.Errorf("persist refreshed token: %w", err)
 	}
@@ -396,7 +441,12 @@ func (r *Runner) maybeRefreshToken(ctx context.Context, persisted PersistedConfi
 	return persisted, nil
 }
 
-// heartbeat sends a single heartbeat and enforces the grace-window contract.
+// heartbeat sends a single heartbeat and enforces the grace-window
+// contract plus the accepted-false fail-closed contract (Codex F3
+// absorb). 200 + accepted=false MUST stop the agent from polling
+// commands — the backend uses this to signal "device disabled" or
+// "device-state rejected" without dropping to 401/403, and the agent
+// must respect that as terminal.
 func (r *Runner) heartbeat(ctx context.Context, persisted PersistedConfig) error {
 	snapshot := inventory.Collect(r.Config.AgentVersion, time.Now())
 	currentState := r.StateTracker.RecordSuccess()
@@ -414,6 +464,10 @@ func (r *Runner) heartbeat(ctx context.Context, persisted PersistedConfig) error
 	if err != nil {
 		r.StateTracker.RecordFailure(time.Now())
 		return err
+	}
+	if !resp.Accepted {
+		r.StateTracker.RecordFailure(time.Now())
+		return fmt.Errorf("%w: heartbeat accepted=false status=%q", ErrAuthFailure, resp.Status)
 	}
 	if resp.GraceWindow && resp.GraceUntil != nil {
 		ref := resp.ServerTime

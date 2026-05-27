@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+// (errors used by Validate are declared at the bottom of the file.)
+
 // PersistedConfig is the on-disk state the agent owns between runs. It is
 // stored DPAPI-encrypted with machine scope and a hardened DACL on Windows;
 // on non-Windows builds a plaintext file store is available behind an
@@ -32,6 +34,38 @@ type PersistedConfig struct {
 func (p PersistedConfig) IsZero() bool {
 	return p.DeviceID == "" && p.ServiceToken == ""
 }
+
+// Validate enforces the persisted-config invariants the runner relies on
+// after a successful enroll or refresh. A response missing any of the
+// mandatory fields means the backend contract drifted (or a corrupted
+// blob was decoded) and the runner must NOT silently continue — Codex
+// F4 absorb. Validate is called both after Wire decode and before the
+// runner uses a snapshot loaded from disk.
+func (p PersistedConfig) Validate() error {
+	if p.IsZero() {
+		return ErrEmptyStore
+	}
+	if p.DeviceID == "" {
+		return fmt.Errorf("%w: device_id empty", ErrInvalidPersistedConfig)
+	}
+	if p.ServiceToken == "" {
+		return fmt.Errorf("%w: service_token empty", ErrInvalidPersistedConfig)
+	}
+	if p.TokenExpiresAt.IsZero() {
+		return fmt.Errorf("%w: token_expires_at zero", ErrInvalidPersistedConfig)
+	}
+	if p.CertThumbprintSHA256 == "" {
+		return fmt.Errorf("%w: cert_thumbprint_sha256 empty", ErrInvalidPersistedConfig)
+	}
+	return nil
+}
+
+// ErrInvalidPersistedConfig is returned by Validate when the snapshot
+// fails its required-field check. The runner treats this as fatal —
+// silently continuing with a half-populated config risks heartbeat
+// loops with an empty bearer token, which the backend cannot
+// distinguish from "no token" and which would mask a real config drift.
+var ErrInvalidPersistedConfig = errors.New("persisted config is invalid")
 
 // TokenExpired reports whether the persisted token's TTL has elapsed. The
 // agent must then take the idempotent auto-enroll reissue path rather than

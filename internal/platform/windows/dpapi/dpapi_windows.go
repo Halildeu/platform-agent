@@ -139,7 +139,12 @@ func protect(plain, entropy []byte) ([]byte, error) {
 	return buf, nil
 }
 
-// unprotect reverses protect.
+// unprotect reverses protect. Codex F2 absorb: the flags argument to
+// CryptUnprotectData must NOT carry CRYPTPROTECT_LOCAL_MACHINE — that flag
+// is only meaningful on the protect side (scope selection). On the
+// unprotect side it is rejected as ERROR_INVALID_PARAMETER on some
+// Windows builds. We pass CRYPTPROTECT_UI_FORBIDDEN to make sure no UI
+// prompt can ever appear from a SYSTEM service context.
 func unprotect(cipher, entropy []byte) ([]byte, error) {
 	if len(cipher) == 0 {
 		return nil, errors.New("dpapi: empty ciphertext")
@@ -150,7 +155,7 @@ func unprotect(cipher, entropy []byte) ([]byte, error) {
 		ent = &windows.DataBlob{Size: uint32(len(entropy)), Data: &entropy[0]}
 	}
 	var out windows.DataBlob
-	if err := windows.CryptUnprotectData(&in, nil, ent, 0, nil, windows.CRYPTPROTECT_LOCAL_MACHINE, &out); err != nil {
+	if err := windows.CryptUnprotectData(&in, nil, ent, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &out); err != nil {
 		return nil, err
 	}
 	defer windows.LocalFree(windows.Handle(unsafe.Pointer(out.Data))) //nolint:govet // OS-owned buffer release
