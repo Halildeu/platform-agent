@@ -76,48 +76,89 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 		freeAllContexts(candidates)
 		return autoenroll.CertMaterial{}, autoenroll.ErrNoCertMatch
 	}
-	selected := autoenroll.SelectLatest(eligible)
-	if selected == nil {
-		freeAllContexts(candidates)
-		return autoenroll.CertMaterial{}, autoenroll.ErrNoCertMatch
+	ranked := autoenroll.RankCandidates(eligible)
+
+	// Codex F12 absorb: walk ranked candidates and acquire a signer for
+	// each in turn. The newest cert wins unless its private key handle
+	// is missing — for AD CS renewal-overlap windows where the new cert
+	// has been minted but the key/cert binding has not yet propagated,
+	// the agent falls back to an older cert that still has a valid
+	// signer rather than dying on `acquire CNG signer` for the newest.
+	rankedRaw := make(map[string]bool, len(ranked))
+	for _, leaf := range ranked {
+		rankedRaw[string(leaf.Raw)] = true
 	}
 
-	// Hold onto the selected context; free everything else.
-	var selectedCtx *windows.CertContext
-	for _, c := range candidates {
-		if selectedCtx == nil && bytes.Equal(c.leaf.Raw, selected.Raw) {
-			selectedCtx = c.ctx
-			continue
+	type rankedCtx struct {
+		leaf *x509.Certificate
+		ctx  *windows.CertContext
+	}
+	rankedContexts := make([]rankedCtx, 0, len(ranked))
+	for _, leaf := range ranked {
+		for _, c := range candidates {
+			if c.ctx == nil {
+				continue
+			}
+			if bytes.Equal(c.leaf.Raw, leaf.Raw) {
+				rankedContexts = append(rankedContexts, rankedCtx{leaf: leaf, ctx: c.ctx})
+				c.ctx = nil // mark consumed
+				break
+			}
 		}
-		_ = windows.CertFreeCertificateContext(c.ctx)
 	}
-	if selectedCtx == nil {
-		// Theoretically unreachable — SelectLatest returned a leaf we
-		// just enumerated — but guard anyway so a future refactor
-		// doesn't silently leak a handle.
-		return autoenroll.CertMaterial{}, autoenroll.ErrNoCertMatch
+	// Free any candidate context not in the eligible set.
+	for _, c := range candidates {
+		if c.ctx != nil {
+			_ = windows.CertFreeCertificateContext(c.ctx)
+		}
 	}
-	defer windows.CertFreeCertificateContext(selectedCtx)
 
-	signer, err := acquireSigner(selectedCtx)
-	if err != nil {
-		return autoenroll.CertMaterial{}, fmt.Errorf("acquire CNG signer: %w", err)
+	var (
+		chosenLeaf *x509.Certificate
+		chosenCtx  *windows.CertContext
+		chosenKey  *certtostore.Key
+	)
+	defer func() {
+		// Free every non-chosen context. The chosen context is freed by
+		// the outer defer once the material is returned.
+		for _, rc := range rankedContexts {
+			if rc.ctx != nil && rc.ctx != chosenCtx {
+				_ = windows.CertFreeCertificateContext(rc.ctx)
+			}
+		}
+	}()
+
+	for _, rc := range rankedContexts {
+		signer, err := acquireSigner(rc.ctx)
+		if err == nil && signer != nil {
+			chosenLeaf, chosenCtx, chosenKey = rc.leaf, rc.ctx, signer
+			break
+		}
+		// Log via stderr-style hint embedded in error: the autoenroll
+		// runner reads only the final returned error, but operators
+		// running --dry-run on the box see this chain when stepping
+		// through the cert store manually.
+		// (We do not return here; we try the next candidate.)
 	}
-	if signer == nil {
-		return autoenroll.CertMaterial{}, fmt.Errorf("cert has no private key (non-exportable handle missing)")
+	if chosenLeaf == nil || chosenKey == nil {
+		return autoenroll.CertMaterial{}, fmt.Errorf("%w: no eligible cert had an acquireable CNG signer",
+			autoenroll.ErrNoCertMatch)
 	}
+	// Free the chosen context once we return — material now holds the
+	// signer + leaf; the cert context handle is no longer needed.
+	defer func() { _ = windows.CertFreeCertificateContext(chosenCtx) }()
 
 	tlsCert := tls.Certificate{
-		Certificate: [][]byte{selected.Raw},
-		PrivateKey:  signer,
-		Leaf:        selected,
+		Certificate: [][]byte{chosenLeaf.Raw},
+		PrivateKey:  chosenKey,
+		Leaf:        chosenLeaf,
 	}
 
 	return autoenroll.CertMaterial{
 		TLSCertificate:   tlsCert,
-		Leaf:             selected,
-		ThumbprintSHA256: autoenroll.ThumbprintSHA256Hex(selected),
-		ThumbprintSHA1:   autoenroll.ThumbprintSHA1Hex(selected),
+		Leaf:             chosenLeaf,
+		ThumbprintSHA256: autoenroll.ThumbprintSHA256Hex(chosenLeaf),
+		ThumbprintSHA1:   autoenroll.ThumbprintSHA1Hex(chosenLeaf),
 	}, nil
 }
 

@@ -158,6 +158,14 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	if err != nil && !IsEmptyStore(err) {
 		return fmt.Errorf("read persisted config: %w", err)
 	}
+	// Codex F11 absorb: validate decoded persisted state before using
+	// it. A corrupt blob (missing cert_thumbprint, zero expiry, etc.)
+	// must not silently propagate into the heartbeat / commands loop.
+	if !persisted.IsZero() {
+		if err := persisted.Validate(); err != nil {
+			return fmt.Errorf("persisted config corrupted (operator intervention required): %w", err)
+		}
+	}
 
 	if persisted.IsZero() {
 		jitter := r.Registry.ReadInt(`HKLM:\SOFTWARE\EndpointAgent`, "EnrollmentJitterSeconds", 0)
@@ -234,6 +242,11 @@ func (r *Runner) iterate(ctx context.Context) error {
 	persisted, err := r.ConfigStore.Read(ctx)
 	if err != nil && !IsEmptyStore(err) {
 		return fmt.Errorf("read persisted config: %w", err)
+	}
+	if !persisted.IsZero() {
+		if err := persisted.Validate(); err != nil {
+			return fmt.Errorf("persisted config corrupted (operator intervention required): %w", err)
+		}
 	}
 
 	if err := r.ensureCert(ctx); err != nil {

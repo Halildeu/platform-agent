@@ -45,6 +45,19 @@ func FilterCandidates(certs []*x509.Certificate, filter CertFilter, now time.Tim
 //
 // Returns nil when candidates is empty. Codex Q5 + F1 absorb.
 func SelectLatest(candidates []*x509.Certificate) *x509.Certificate {
+	ranked := RankCandidates(candidates)
+	if len(ranked) == 0 {
+		return nil
+	}
+	return ranked[0]
+}
+
+// RankCandidates returns the candidates sorted by the same order used
+// by SelectLatest. Useful when the caller wants to try candidates in
+// preference order — e.g. acquire the signer for the newest cert and
+// fall back to the next one if the private key handle is missing
+// (Codex F12 absorb).
+func RankCandidates(candidates []*x509.Certificate) []*x509.Certificate {
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -60,7 +73,7 @@ func SelectLatest(candidates []*x509.Certificate) *x509.Certificate {
 		}
 		return ThumbprintSHA256Hex(a) < ThumbprintSHA256Hex(b)
 	})
-	return sorted[0]
+	return sorted
 }
 
 // hasEKU reports whether cert carries the given dotted-OID EKU. Both the

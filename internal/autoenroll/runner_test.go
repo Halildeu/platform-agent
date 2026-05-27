@@ -406,6 +406,43 @@ func TestRunner_GraceWindowExpired_FailsClosed(t *testing.T) {
 	}
 }
 
+func TestRunner_CorruptPersistedConfig_FailsClosed(t *testing.T) {
+	pki := setupTestPKI(t)
+	recorder := &requestRecorder{hit: map[string]int{}}
+	cfg := &handlerConfig{
+		heartbeat: HeartbeatResponse{Accepted: true, Status: "active", ServerTime: time.Now().UTC()},
+	}
+	srv := newTestServer(t, pki, cfg, recorder)
+	store := NewMemoryStore()
+	provider := &fakeCertProvider{pki: pki}
+	// Pre-load persisted state that looks plausible (device_id + token
+	// set) but is missing cert_thumbprint_sha256 — Codex F11 absorb: a
+	// stale or hand-corrupted blob that would otherwise sail past
+	// IsZero() and skip the renewal-rebind path.
+	_ = store.Write(context.Background(), PersistedConfig{
+		DeviceID:       "dev-1",
+		ServiceToken:   "tok-1",
+		TokenExpiresAt: time.Now().Add(24 * time.Hour).UTC(),
+		// CertThumbprintSHA256 deliberately empty.
+	})
+	registry := &fakeRegistry{intMap: map[string]int{}, stringMap: map[string]string{}}
+
+	runner := buildRunner(t, pki, srv, registry, store, provider)
+	err := runner.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected error from corrupted persisted config")
+	}
+	if !errors.Is(err, ErrInvalidPersistedConfig) {
+		t.Fatalf("expected ErrInvalidPersistedConfig, got %v", err)
+	}
+	if got := recorder.count(PathCommandsNext); got != 0 {
+		t.Fatalf("commands/next must NOT be polled when persisted is corrupt; got %d calls", got)
+	}
+	if got := recorder.count(PathHeartbeat); got != 0 {
+		t.Fatalf("heartbeat must NOT be sent when persisted is corrupt; got %d calls", got)
+	}
+}
+
 func TestRunner_AuthFailure_PropagatesAsFatal(t *testing.T) {
 	pki := setupTestPKI(t)
 	recorder := &requestRecorder{hit: map[string]int{}}
