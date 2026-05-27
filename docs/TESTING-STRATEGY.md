@@ -160,7 +160,10 @@ Non-Windows runner uzerinde:
 }
 ```
 
-Default (`includeSoftware` yok veya false) — payload `inventory.software`
-ozet (count + winget ready) tasir, `inventory.software.apps` YOK.
-Opt-in ile `inventory.software.apps` size cap altinda tasinir
-(`truncated=true` flag'i ile rapor).
+AG-025H lightweight default (`includeSoftware` yok veya false) — payload
+`inventory.software` alanini HIC TASIMAZ. Registry enumeration ve WinGet
+probe hic calistirilmaz. Heartbeat / auto-enroll bu defaulti kullanir.
+
+`includeSoftware=true` opt-in path ile `inventory.software` blogu aktarilir;
+`inventory.software.apps` size cap altinda tasinir (`truncated=true` flag'i
+ile rapor).

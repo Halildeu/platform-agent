@@ -97,21 +97,24 @@ type SoftwareSnapshot struct {
 	CollectedAt   time.Time      `json:"collectedAt"`
 }
 
-// Summary is the aggregate the COLLECT_INVENTORY payload embeds in the
-// inventory snapshot. Two shapes share the struct:
+// Summary is the aggregate the COLLECT_INVENTORY payload embeds when the
+// caller explicitly opts into the full software block via
+// includeSoftware=true (AG-025H). It NEVER ships on heartbeat / auto-enroll
+// payloads — the AG-025H lightweight default leaves Snapshot.Software nil
+// so the wire payload omits the software field entirely. Two shapes share
+// the struct when it IS attached:
 //
-//   - Default ("summary only"): Apps is nil and TotalSizeKB / Truncated
-//     / ProbeErrors carry the rollup figures from the underlying
-//     SoftwareSnapshot. AppCount + WinGetReady is enough to drive the
-//     fleet dashboard without shipping ~100 KB of app metadata on
-//     every heartbeat.
-//   - Opt-in ("include full list"): the COLLECT_INVENTORY caller passed
-//     includeSoftware=true and Apps is populated. The size caps already
-//     enforced by Normalize still apply.
+//   - Apps == nil (legacy "summary only"): rollup figures from the
+//     underlying SoftwareSnapshot without shipping the per-app metadata.
+//     This shape is reserved for explicit summary-only requests; it is
+//     not the heartbeat default any more.
+//   - Apps populated ("include full list"): the COLLECT_INVENTORY caller
+//     passed includeSoftware=true and Apps is populated. The size caps
+//     already enforced by Normalize still apply.
 //
-// The two shapes share one field so backends only need one JSONB
-// column; default payload stays well under the existing inventory
-// details budget because Apps is omitempty.
+// The two shapes share one field so backends only need one JSONB column;
+// payload stays well under the existing inventory details budget because
+// Apps is omitempty.
 type Summary struct {
 	Supported     bool           `json:"supported"`
 	AppCount      int            `json:"appCount"`
