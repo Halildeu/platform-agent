@@ -79,6 +79,12 @@ type Config struct {
 	CommandPollInterval time.Duration
 	// CommandTimeout caps individual command execution time.
 	CommandTimeout time.Duration
+	// InstallCommandTimeout overrides CommandTimeout specifically for
+	// the AG-027 INSTALL_SOFTWARE command type. WinGet installs
+	// routinely exceed the lightweight 120s CommandTimeout. Default
+	// 30 min — matches the agent-side hard cap in winget.RunInstall
+	// (Codex 019e6c0d iter-3 absorb).
+	InstallCommandTimeout time.Duration
 	// HTTPTimeout caps individual mTLS request time.
 	HTTPTimeout time.Duration
 
@@ -107,6 +113,7 @@ func Defaults() Config {
 		HeartbeatInterval:   60 * time.Second,
 		CommandPollInterval: 30 * time.Second,
 		CommandTimeout:      120 * time.Second,
+		InstallCommandTimeout: 30 * time.Minute,
 		HTTPTimeout:         30 * time.Second,
 		TokenRefreshWindow:  2 * time.Hour,
 		CertRenewalWindow:   7 * 24 * time.Hour,
@@ -514,7 +521,16 @@ func (r *Runner) pollAndExecute(ctx context.Context, persisted PersistedConfig) 
 		return err
 	}
 
-	commandCtx, cancel := context.WithTimeout(ctx, r.Config.CommandTimeout)
+	// AG-027 (Codex 019e6c0d iter-3 absorb): per-command-type timeout
+	// mirrored from internal/app/runner.go::RunOnce so the auto-enroll
+	// path honours the documented 30-min INSTALL_SOFTWARE hard cap
+	// instead of the lightweight 120s default that read-only commands
+	// inherit.
+	commandTimeout := r.Config.CommandTimeout
+	if command.Type == protocol.CommandInstallSoftware && r.Config.InstallCommandTimeout > 0 {
+		commandTimeout = r.Config.InstallCommandTimeout
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	result := r.Executor.Execute(commandCtx, command)
 	if err := r.wireClient.SubmitResult(ctx, persisted.ServiceToken, result); err != nil {

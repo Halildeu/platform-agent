@@ -219,6 +219,12 @@ func newAutoEnrollRunner(cfg config.Config, apiURLOverride string, logger *log.L
 	if cfg.CommandTimeout > 0 {
 		aeCfg.CommandTimeout = cfg.CommandTimeout
 	}
+	// AG-027 (Codex 019e6c0d iter-3 absorb): forward the per-command
+	// INSTALL_SOFTWARE timeout so the auto-enroll runner pollAndExecute
+	// honours the documented 30-min hard cap.
+	if cfg.InstallCommandTimeout > 0 {
+		aeCfg.InstallCommandTimeout = cfg.InstallCommandTimeout
+	}
 	aeCfg.CertFilter.SubjectSuffix = cfg.AutoEnrollCertSubjectSuffix
 	aeCfg.CertFilter.SANURIPrefix = cfg.AutoEnrollCertSANURIPrefix
 
