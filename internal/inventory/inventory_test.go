@@ -322,3 +322,132 @@ func TestRuntimeCapabilitiesInstallSoftwareAdvertisedOnWindowsOnly(t *testing.T)
 		t.Fatalf("AG-027: INSTALL_SOFTWARE must NOT be advertised on non-Windows (got %v)", caps)
 	}
 }
+
+// AG-035 — IncludeHardware wire-up tests.
+//
+// Codex 019e709c iter-1 acceptance criteria:
+//   - includeHardware=false (default) MUST NOT invoke CollectHardware;
+//     Snapshot.Hardware stays nil and the wire payload omits the field.
+//   - includeHardware=true MUST invoke CollectHardware exactly once
+//     and attach the result to Snapshot.Hardware.
+//
+// installHardwareCounter swaps the package-level
+// collectHardwareForSnapshot seam for a counting stub so the assertion
+// is "lightweight default does not call the probe" rather than "the
+// Hardware field happens to be nil on this build". The fixture lets
+// the true-path test assert the probe result is propagated unchanged.
+
+func installHardwareCounter(t *testing.T, fixture Hardware) *int32 {
+	t.Helper()
+	var calls int32
+	prev := collectHardwareForSnapshot
+	collectHardwareForSnapshot = func(now time.Time) Hardware {
+		atomic.AddInt32(&calls, 1)
+		return fixture
+	}
+	t.Cleanup(func() {
+		collectHardwareForSnapshot = prev
+	})
+	return &calls
+}
+
+func TestCollectWithOptionsIncludeHardwareFalseSkipsProbe(t *testing.T) {
+	installProbeCounters(t)
+	calls := installHardwareCounter(t, Hardware{
+		SchemaVersion: HardwareSchemaVersion,
+		Supported:     true,
+	})
+
+	snap := CollectWithOptions(
+		"test",
+		time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC),
+		CollectOptions{},
+	)
+
+	if snap.Hardware != nil {
+		t.Fatalf("AG-035: IncludeHardware=false must leave Snapshot.Hardware nil (got %+v)", snap.Hardware)
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("AG-035: IncludeHardware=false must not invoke CollectHardware (got %d calls)", got)
+	}
+
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	if strings.Contains(string(body), `"hardware":`) {
+		t.Fatalf("AG-035: lightweight payload must not carry hardware field: %s", body)
+	}
+}
+
+func TestCollectWithOptionsIncludeHardwareTrueRunsProbeExactlyOnce(t *testing.T) {
+	fixture := Hardware{
+		SchemaVersion:   HardwareSchemaVersion,
+		Supported:       true,
+		CPUModel:        "Intel(R) Core(TM) i7-12700H",
+		CPUCores:        14,
+		CPUFrequencyMHz: 2300,
+		RAMTotalBytes:   17179869184,
+		Manufacturer:    "ContosoCo",
+		SystemModel:     "AcmePro 9000",
+		DomainJoined:    true,
+		DomainName:      "corp.example.com",
+	}
+	installProbeCounters(t)
+	calls := installHardwareCounter(t, fixture)
+
+	snap := CollectWithOptions(
+		"test",
+		time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC),
+		CollectOptions{IncludeHardware: true},
+	)
+
+	if snap.Hardware == nil {
+		t.Fatalf("AG-035: IncludeHardware=true must attach Snapshot.Hardware")
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("AG-035: IncludeHardware=true must invoke CollectHardware exactly once (got %d)", got)
+	}
+	if snap.Hardware.CPUModel != fixture.CPUModel {
+		t.Fatalf("AG-035: CPUModel = %q, want %q", snap.Hardware.CPUModel, fixture.CPUModel)
+	}
+	if snap.Hardware.SchemaVersion != HardwareSchemaVersion {
+		t.Fatalf("AG-035: schemaVersion = %d, want %d", snap.Hardware.SchemaVersion, HardwareSchemaVersion)
+	}
+
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(body), `"hardware":`) {
+		t.Fatalf("AG-035: IncludeHardware=true wire payload must carry hardware field")
+	}
+	if !strings.Contains(string(body), `"schemaVersion":`+itoa(HardwareSchemaVersion)) {
+		t.Fatalf("AG-035: wire payload must carry pinned schemaVersion %d", HardwareSchemaVersion)
+	}
+}
+
+// itoa is a tiny helper to avoid pulling strconv into the test file
+// solely for an assertion against a small int constant.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	buf := [20]byte{}
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
