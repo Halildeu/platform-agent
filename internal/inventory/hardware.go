@@ -76,23 +76,37 @@ type HardwareDisk struct {
 }
 
 // HardwareNetworkIface mirrors the V13
-// endpoint_hardware_inventory_network_interfaces row. MAC is
-// emitted in lowercase canonical aa:bb:cc:dd:ee:ff form; the backend
-// also normalises but doing the conversion here keeps a malformed
-// driver report from tripping the backend regex CHECK before the
-// pre-persist normaliser runs. IPAddresses is a string list (jsonb on
-// the backend); we keep it bounded by emitting at most a small,
-// fixed-cap slice per interface so a runaway adapter does not
-// inflate the payload.
+// endpoint_hardware_inventory_network_interfaces row. The MAC field
+// is serialised under the JSON key `macAddress` (NOT `mac`) so the
+// backend EndpointHardwareInventoryService ingest hook can populate
+// the `mac_address` child column directly — emitting under `mac`
+// leaves the persisted column NULL even though the redacted payload
+// shows the value (Codex 019e709c post-impl iter-1 must-fix #1).
+//
+// MAC is emitted in lowercase canonical aa:bb:cc:dd:ee:ff form; the
+// backend also normalises but doing the conversion here keeps a
+// malformed driver report from tripping the backend regex CHECK
+// before the pre-persist normaliser runs. IPAddresses is bounded to
+// HardwareIPAddressCapPerIface per interface so a runaway adapter or
+// driver glitch cannot inflate the payload (Codex 019e709c post-impl
+// iter-1 non-blocking absorb).
 type HardwareNetworkIface struct {
 	Name        string   `json:"name,omitempty"`
-	MAC         string   `json:"mac,omitempty"`
+	MAC         string   `json:"macAddress,omitempty"`
 	IPAddresses []string `json:"ipAddresses,omitempty"`
 	// InterfaceType: ETHERNET / WIFI / LOOPBACK / VIRTUAL / UNKNOWN.
 	InterfaceType string `json:"interfaceType,omitempty"`
 	// LinkState: UP / DOWN / UNKNOWN.
 	LinkState string `json:"linkState,omitempty"`
 }
+
+// HardwareIPAddressCapPerIface bounds how many IP addresses the
+// agent emits per network interface. A 16-address cap (chosen to
+// cover dual-stack with several VLANs / loopback aliases) is well
+// above the 1-3 a typical device exposes and well below any wire-size
+// concern. Driver glitches that surface dozens or hundreds of
+// repeated entries are clipped to keep persist stable.
+const HardwareIPAddressCapPerIface = 16
 
 // HardwareProbeError mirrors the bounded shape the backend ingest
 // service accepts (code + summary <= 256 chars). The agent fills this

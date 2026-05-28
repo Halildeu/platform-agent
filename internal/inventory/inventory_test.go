@@ -427,6 +427,39 @@ func TestCollectWithOptionsIncludeHardwareTrueRunsProbeExactlyOnce(t *testing.T)
 	}
 }
 
+// AG-035 Codex 019e709c post-impl iter-1 must-fix #1 — wire-level
+// pin for the new `macAddress` JSON tag (legacy `mac` would leave the
+// backend child column NULL). Exercised at the Snapshot level (not
+// just HardwareNetworkIface) so the assertion covers the full
+// COLLECT_INVENTORY shape the agent submits.
+func TestCollectWithOptionsIncludeHardwareSerialisesMACAddress(t *testing.T) {
+	hwFixture := Hardware{
+		SchemaVersion: HardwareSchemaVersion,
+		Supported:     true,
+		NetworkInterfaces: []HardwareNetworkIface{
+			{Name: "Ethernet", MAC: "aa:bb:cc:dd:ee:ff", IPAddresses: []string{"10.0.0.5"}, InterfaceType: "ETHERNET", LinkState: "UP"},
+		},
+	}
+	installProbeCounters(t)
+	installHardwareCounter(t, hwFixture)
+
+	snap := CollectWithOptions("test",
+		time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC),
+		CollectOptions{IncludeHardware: true})
+
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	wire := string(body)
+	if !strings.Contains(wire, `"macAddress":"aa:bb:cc:dd:ee:ff"`) {
+		t.Fatalf("AG-035: wire payload must serialise MAC under macAddress key, got: %s", wire)
+	}
+	if strings.Contains(wire, `"mac":"aa:bb:cc:dd:ee:ff"`) {
+		t.Fatalf("AG-035: wire payload must not use legacy mac key: %s", wire)
+	}
+}
+
 // itoa is a tiny helper to avoid pulling strconv into the test file
 // solely for an assertion against a small int constant.
 func itoa(n int) string {

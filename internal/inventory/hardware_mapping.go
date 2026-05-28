@@ -156,10 +156,32 @@ func mapWMIPayload(hw *Hardware, p wmiPayload) {
 			if ip == "" {
 				continue
 			}
+			if len(nic.IPAddresses) >= HardwareIPAddressCapPerIface {
+				break
+			}
 			nic.IPAddresses = append(nic.IPAddresses, ip)
 		}
 		hw.NetworkInterfaces = append(hw.NetworkInterfaces, nic)
 	}
+}
+
+// payloadHasEvidence reports whether the decoded WMI document carries
+// any meaningful hardware fact. The PowerShell script's SafeCim helper
+// swallows per-class failures and returns $null, so a runtime where
+// every CIM class fails (e.g. WMI service disabled, security policy
+// block, severely corrupted driver state) still produces a successful
+// JSON parse with every field nil/empty. mapWMIPayload would happily
+// fold that into a Supported=true snapshot with zero CPU cores and
+// zero RAM — a kanıtsız "I succeeded" signal that contradicts the
+// AG-035 contract (Codex 019e709c post-impl iter-1 must-fix #2).
+//
+// Returning false here lets collectHardwareWindows downgrade the
+// snapshot to Supported=false with a CIM_NO_DATA probe error so the
+// backend / operator can distinguish "we asked but got nothing" from
+// "we actually observed an Intel/Contoso/...".
+func payloadHasEvidence(p wmiPayload) bool {
+	return p.CS != nil || p.OS != nil || p.CPU != nil || p.BIOS != nil ||
+		len(p.Disks) > 0 || len(p.NetworkInterfaces) > 0
 }
 
 // classifyProbeError converts an exec error into a structured code so

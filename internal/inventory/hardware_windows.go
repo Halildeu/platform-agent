@@ -185,6 +185,24 @@ func collectHardwareWindows(now time.Time) Hardware {
 		return hw
 	}
 
+	// Codex 019e709c post-impl iter-1 must-fix #2 — guard against an
+	// all-null WMI document. SafeCim in the PowerShell script swallows
+	// per-class failures and returns $null, so a degraded runtime
+	// (WMI service stopped, security policy blocks CIM, every class
+	// errored) still parses cleanly. We treat "no class produced
+	// evidence" as a CIM_NO_DATA failure rather than letting the
+	// snapshot ship Supported=true with zero CPU cores and zero RAM —
+	// a quietly false "I succeeded" signal that the backend has no
+	// principled way to distinguish from a real probe.
+	if !payloadHasEvidence(payload) {
+		hw.Supported = false
+		hw.ProbeErrors = append(hw.ProbeErrors, HardwareProbeError{
+			Code:    "CIM_NO_DATA",
+			Summary: "powershell hardware probe returned no evidence (every WMI class was null or empty)",
+		})
+		return hw
+	}
+
 	hw.Supported = true
 	mapWMIPayload(&hw, payload)
 	return hw

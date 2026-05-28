@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"runtime"
@@ -273,4 +274,119 @@ func TestMapWMIPayloadOSMemoryFallback(t *testing.T) {
 	if hw.RAMTotalBytes != int64(4194304)*1024 {
 		t.Fatalf("OS fallback RAM = %d, want %d", hw.RAMTotalBytes, int64(4194304)*1024)
 	}
+}
+
+// AG-035 Codex 019e709c post-impl iter-1 must-fix #1 — the network
+// interface JSON tag must serialise as "macAddress" so the backend
+// EndpointHardwareInventoryService can populate
+// endpoint_hardware_inventory_network_interfaces.mac_address. The
+// agent had previously emitted "mac" which left the child row's
+// mac_address NULL despite the redacted_payload carrying the value.
+// This test pins the wire contract directly so a future refactor
+// cannot silently regress.
+func TestHardwareNetworkIfaceSerialisesMACAsMacAddress(t *testing.T) {
+	hw := Hardware{
+		SchemaVersion: HardwareSchemaVersion,
+		Supported:     true,
+		NetworkInterfaces: []HardwareNetworkIface{
+			{
+				Name:          "Intel(R) Wi-Fi 6",
+				MAC:           "aa:bb:cc:dd:ee:ff",
+				IPAddresses:   []string{"10.0.0.5"},
+				InterfaceType: "WIFI",
+				LinkState:     "UP",
+			},
+		},
+	}
+	body, err := json.Marshal(hw)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	wire := string(body)
+	if !strings.Contains(wire, `"macAddress":"aa:bb:cc:dd:ee:ff"`) {
+		t.Fatalf("network interface must serialise MAC under \"macAddress\" key, got: %s", wire)
+	}
+	// Negative assertion: the legacy "mac": key (a quoted scalar
+	// rather than the substring "macAddress":") must NOT appear.
+	if strings.Contains(wire, `"mac":"aa:bb:cc:dd:ee:ff"`) {
+		t.Fatalf("network interface must not serialise MAC under legacy \"mac\" key: %s", wire)
+	}
+}
+
+// AG-035 Codex 019e709c post-impl iter-1 must-fix #2 — payloadHasEvidence
+// must return false when every CIM class came back null/empty.
+func TestPayloadHasEvidenceFalseOnAllNull(t *testing.T) {
+	if payloadHasEvidence(wmiPayload{}) {
+		t.Fatalf("empty WMI payload must not be treated as evidence")
+	}
+	if payloadHasEvidence(wmiPayload{Disks: []wmiDisk{}, NetworkInterfaces: []wmiNIC{}}) {
+		t.Fatalf("explicit-empty slices must not be treated as evidence")
+	}
+}
+
+func TestPayloadHasEvidenceTrueOnAnyClass(t *testing.T) {
+	cases := map[string]wmiPayload{
+		"cs only":   {CS: &wmiCS{Manufacturer: "Contoso"}},
+		"os only":   {OS: &wmiOS{Caption: "Windows"}},
+		"cpu only":  {CPU: &wmiCPU{Name: "Intel"}},
+		"bios only": {BIOS: &wmiBIOS{Manufacturer: "Acme BIOS"}},
+		"disk only": {Disks: []wmiDisk{{DevicePath: "C:"}}},
+		"nic only":  {NetworkInterfaces: []wmiNIC{{Description: "Ethernet"}}},
+	}
+	for name, p := range cases {
+		t.Run(name, func(t *testing.T) {
+			if !payloadHasEvidence(p) {
+				t.Fatalf("payloadHasEvidence(%s) = false, want true", name)
+			}
+		})
+	}
+}
+
+// AG-035 — IP address per-interface cap pins the wire bound declared
+// in HardwareIPAddressCapPerIface so a driver glitch or VLAN explosion
+// cannot inflate the persist payload. The mapper must silently truncate
+// past the cap (no error) so the rest of the snapshot stays intact.
+func TestMapWMIPayloadCapsIPAddressesPerInterface(t *testing.T) {
+	manyIPs := make([]string, HardwareIPAddressCapPerIface+5)
+	for i := range manyIPs {
+		manyIPs[i] = "10.0.0." + itoaSmall(i+1)
+	}
+	p := wmiPayload{
+		NetworkInterfaces: []wmiNIC{
+			{Description: "Ethernet", MAC: "aa:bb:cc:dd:ee:ff", IPAddresses: manyIPs},
+		},
+	}
+	hw := Hardware{SchemaVersion: HardwareSchemaVersion}
+	mapWMIPayload(&hw, p)
+	if len(hw.NetworkInterfaces) != 1 {
+		t.Fatalf("expected 1 interface, got %d", len(hw.NetworkInterfaces))
+	}
+	got := hw.NetworkInterfaces[0].IPAddresses
+	if len(got) != HardwareIPAddressCapPerIface {
+		t.Fatalf("IPAddresses len = %d, want cap %d", len(got), HardwareIPAddressCapPerIface)
+	}
+	// The truncation must preserve the order — the first N entries
+	// survive, anything past the cap is dropped.
+	if got[0] != "10.0.0.1" {
+		t.Fatalf("first IP changed during truncation: %q", got[0])
+	}
+	if got[HardwareIPAddressCapPerIface-1] != "10.0.0."+itoaSmall(HardwareIPAddressCapPerIface) {
+		t.Fatalf("last surviving IP unexpected: %q", got[HardwareIPAddressCapPerIface-1])
+	}
+}
+
+// itoaSmall is a tiny non-negative int formatter used by the IP cap
+// test so it does not pull strconv into hardware_test.go.
+func itoaSmall(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	buf := [12]byte{}
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }
