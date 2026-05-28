@@ -35,6 +35,16 @@ type Snapshot struct {
 	// lightweight default never pays the source-list + package-query +
 	// DNS/TCP/HTTPS probe cost.
 	WinGetEgress *winget.SourceEgressReadiness `json:"wingetEgress,omitempty"`
+	// Hardware is intentionally nil unless the caller opted into the
+	// AG-035 hardware probe via CollectOptions.IncludeHardware. The
+	// JSON tag omitempty hides the field from the heartbeat /
+	// auto-enroll wire payload and from COLLECT_INVENTORY runs that did
+	// not request the probe, so the lightweight default never pays the
+	// PowerShell + WMI/CIM cost. On non-Windows runtimes the probe
+	// returns Supported=false with the canonical OS metadata so the
+	// backend can persist evidence of "agent does not support hardware
+	// probe here" instead of treating the absence as a failed ingest.
+	Hardware *Hardware `json:"hardware,omitempty"`
 }
 
 // CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
@@ -74,6 +84,26 @@ type CollectOptions struct {
 	// winget package (fixed argv, hard-coded package id, hard-coded
 	// egress hosts).
 	IncludeWinGetEgress bool
+
+	// IncludeHardware gates the AG-035 hardware probe. When true,
+	// CollectWithOptions runs CollectHardware (PowerShell +
+	// Get-CimInstance on Windows; a Supported=false stub on every
+	// other platform) and attaches the result to Snapshot.Hardware.
+	// When false (the default), the probe is not invoked and the wire
+	// payload omits the field.
+	//
+	// The backend uses true via COLLECT_INVENTORY's includeHardware
+	// payload bit when a hardware snapshot is being requested (manual
+	// "Envanteri Şimdi Topla" UI action, scheduled hardware sweep,
+	// pre-install evidence collection). Heartbeat / auto-enroll /
+	// lightweight inventory never opt in.
+	//
+	// HARD BOUNDARY: the probe is read-only by construction — it
+	// invokes Get-CimInstance with -ErrorAction Continue and never
+	// mutates CIM state. There is no remediation surface and no
+	// administrator credential required beyond what the agent already
+	// runs under (LocalSystem on Windows).
+	IncludeHardware bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -113,6 +143,10 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		readiness := detectSourceEgress(now)
 		snapshot.WinGetEgress = &readiness
 	}
+	if opts.IncludeHardware {
+		hw := collectHardwareForSnapshot(now)
+		snapshot.Hardware = &hw
+	}
 	return snapshot
 }
 
@@ -134,15 +168,18 @@ func collectSoftwareSummary(now time.Time, includeApps bool) *software.Summary {
 	return &summary
 }
 
-// collectSoftware, detectWinget, and detectSourceEgress are package-level
-// function variables so tests can override them with t.Cleanup-restored
-// stubs (AG-025H + AG-026A test seam). Production code always wires
-// them to the real software.Collect / winget.Detect /
-// winget.DetectSourceEgress implementations.
+// collectSoftware, detectWinget, detectSourceEgress, and
+// collectHardwareForSnapshot are package-level function variables so
+// tests can override them with t.Cleanup-restored stubs (AG-025H +
+// AG-026A + AG-035 test seam). Production code always wires them to
+// the real software.Collect / winget.Detect /
+// winget.DetectSourceEgress / inventory.CollectHardware
+// implementations.
 var (
-	collectSoftware    = software.Collect
-	detectWinget       = winget.Detect
-	detectSourceEgress = winget.DetectSourceEgress
+	collectSoftware            = software.Collect
+	detectWinget               = winget.Detect
+	detectSourceEgress         = winget.DetectSourceEgress
+	collectHardwareForSnapshot = CollectHardware
 )
 
 func RuntimeCapabilityReport() protocol.CapabilityReport {

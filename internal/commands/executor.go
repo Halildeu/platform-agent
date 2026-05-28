@@ -70,6 +70,12 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 		snapshot := inventory.CollectWithOptions(e.AgentVersion, e.now(), inventory.CollectOptions{
 			IncludeSoftwareApps: boolPayload(command.Payload, "includeSoftware"),
 			IncludeWinGetEgress: boolPayload(command.Payload, "includeWinGetEgress"),
+			// AG-035 — opt-in hardware probe. Defaults to false so the
+			// AG-025H lightweight heartbeat / auto-enroll contract pays
+			// neither the PowerShell startup nor the WMI/CIM cost.
+			// Backend opts in explicitly via COLLECT_INVENTORY payload
+			// when a hardware snapshot is being requested.
+			IncludeHardware: boolPayload(command.Payload, "includeHardware"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"

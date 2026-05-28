@@ -209,6 +209,42 @@ func TestLocalExecutorBoolPayloadIncludeWinGetEgress(t *testing.T) {
 	}
 }
 
+// AG-035 — boolPayload mapping for the new includeHardware key.
+// Mirrors the includeSoftware / includeWinGetEgress matrix so the
+// "lightweight default is safe" contract is enforced uniformly for
+// every COLLECT_INVENTORY opt-in bit. A hardware probe accidentally
+// firing for every heartbeat would be the cost-default we are guarding
+// against, so the "missing key / non-boolean / unknown shape ⇒ false"
+// branch is the load-bearing one here.
+func TestLocalExecutorBoolPayloadIncludeHardware(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]interface{}
+		wantOn  bool
+	}{
+		{"nil-payload", nil, false},
+		{"missing-key", map[string]interface{}{"includeSoftware": true}, false},
+		{"bool-true", map[string]interface{}{"includeHardware": true}, true},
+		{"bool-false", map[string]interface{}{"includeHardware": false}, false},
+		{"string-true", map[string]interface{}{"includeHardware": "true"}, true},
+		{"string-1", map[string]interface{}{"includeHardware": "1"}, true},
+		{"string-True", map[string]interface{}{"includeHardware": "True"}, true},
+		{"string-false", map[string]interface{}{"includeHardware": "false"}, false},
+		{"string-0", map[string]interface{}{"includeHardware": "0"}, false},
+		{"int-1", map[string]interface{}{"includeHardware": 1}, true},
+		{"int-0", map[string]interface{}{"includeHardware": 0}, false},
+		{"float64-1", map[string]interface{}{"includeHardware": float64(1)}, true},
+		{"float64-0", map[string]interface{}{"includeHardware": float64(0)}, false},
+		{"unknown-type", map[string]interface{}{"includeHardware": []string{"yes"}}, false},
+	}
+	for _, tc := range cases {
+		got := boolPayload(tc.payload, "includeHardware")
+		if got != tc.wantOn {
+			t.Errorf("%s: boolPayload(includeHardware) = %v, want %v", tc.name, got, tc.wantOn)
+		}
+	}
+}
+
 func TestLocalExecutorListLocalUsersUnsupportedOutsideWindows(t *testing.T) {
 	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandListLocalUsers}, "test")
 	command := protocol.AgentCommand{

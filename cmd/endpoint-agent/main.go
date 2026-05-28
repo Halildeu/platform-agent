@@ -448,6 +448,29 @@ func handleDiagnoseCommand(args []string) {
 		if err := json.NewEncoder(os.Stdout).Encode(readiness); err != nil {
 			log.Fatalf("diagnose winget-egress encode failed: %v", err)
 		}
+	case "hardware":
+		// AG-035 — hardware probe (Codex 019e709c iter-1 must-fix:
+		// diagnose hardware sub-command for field smoke).
+		//
+		// Read-only: invokes PowerShell + Get-CimInstance on
+		// Windows (Win32_ComputerSystem, Win32_OperatingSystem,
+		// Win32_Processor, Win32_BIOS, Win32_LogicalDisk,
+		// Win32_NetworkAdapterConfiguration); returns
+		// Supported=false with the UNSUPPORTED_PLATFORM probe
+		// error on every other runtime. The output mirrors the
+		// COLLECT_INVENTORY payload exactly (canonical Hardware
+		// shape with the same schemaVersion the backend's
+		// HardwareInventoryPayloadPolicy validates), so operators
+		// can diff a live probe against a stored snapshot when
+		// triaging preflight BLOCKs.
+		//
+		// Exit code is 0 regardless of probe outcome — error
+		// isolation lives in the JSON payload (ProbeErrors[]
+		// {code, summary}), not the exit status.
+		snapshot := inventory.CollectHardware(time.Now())
+		if err := json.NewEncoder(os.Stdout).Encode(snapshot); err != nil {
+			log.Fatalf("diagnose hardware encode failed: %v", err)
+		}
 	default:
 		printDiagnoseUsage()
 		os.Exit(2)
@@ -455,5 +478,5 @@ func handleDiagnoseCommand(args []string) {
 }
 
 func printDiagnoseUsage() {
-	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users|software|winget|winget-egress>")
+	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users|software|winget|winget-egress|hardware>")
 }
