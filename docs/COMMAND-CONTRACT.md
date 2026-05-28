@@ -84,6 +84,7 @@ UPLOAD_ALLOWED_FILE
 COLLECT_EVENT_LOG_SUMMARY
 OSQUERY_QUERY
 RESTART_AGENT
+INSTALL_SOFTWARE       (AG-027 / Faz 22.5 — see Section 11)
 ```
 
 Yasak:
@@ -561,3 +562,160 @@ commandTimeoutSeconds: 120
 
 Agent ayni anda tek command calistirir. Command calisirken yeni command claim
 edilmez.
+
+-------------------------------------------------------------------------------
+## 11. AG-027 — INSTALL_SOFTWARE Command Contract (Faz 22.5)
+-------------------------------------------------------------------------------
+
+`INSTALL_SOFTWARE` is the canonical agent-side install execution command.
+The agent re-verifies the AG-026A WinGet source/egress readiness,
+pre-detects whether the catalog package is already present, runs
+`winget install` with a hard-coded argument vector, and post-verifies via
+the catalog's detection rule. v1 supports `WINGET_PACKAGE` detection
+rules only; any other detection rule type is rejected fail-closed
+BEFORE mutation.
+
+Codex 019e6bfa plan-time AGREE (iter-2) — schema locked.
+
+### 11.1 Wire-safe request payload
+
+```json
+{
+  "commandType": "INSTALL_SOFTWARE",
+  "commandResultId": "<uuid>",
+  "idempotencyKey": "<uuid>",
+  "catalogItemId": "<uuid>",
+  "catalogItemKey": "7zip.7zip",
+  "catalogRowVersion": 7,
+  "provider": "WINGET",
+  "packageId": "7zip.7zip",
+  "argsPolicyPreset": "DEFAULT",
+  "versionPredicate": {
+    "type": "LATEST" | "EXACT" | "MINIMUM" | "RANGE",
+    "spec": null | "24.07" | "[24.0,)"
+  },
+  "resolvedVersion": null,
+  "detectionRule": {
+    "type": "WINGET_PACKAGE",
+    "packageId": "7zip.7zip"
+  }
+}
+```
+
+`argsPolicyPreset` is an enum slot, NOT a free-text command-line
+string. v1 accepts exactly two values, each mapping to a hard-coded
+`[]string` arg slice in the agent (`install_winget.go::argsPresets`):
+
+- `DEFAULT` → `install --id <pkg> --exact --source winget --silent
+  --accept-package-agreements --accept-source-agreements
+  --disable-interactivity --no-upgrade`
+- `VENDOR_RECOMMENDED_WINGET_NO_UPGRADE` → same arg slice as DEFAULT
+  for v1, distinct name for audit-trail intent. Future widening may
+  add presets without renaming this constant.
+
+`resolvedVersion` is BE-022's responsibility: when `versionPolicy.type =
+EXACT`, BE-022 resolves the catalog spec to a concrete version string
+at command-issue time. When `type = LATEST`, `resolvedVersion = null`
+and the agent does not enforce a version constraint post-install.
+
+### 11.2 Wire-safe result payload
+
+```json
+{
+  "finalStatus": "SUCCEEDED" | "SUCCEEDED_NOOP" | "SUCCEEDED_REBOOT_REQUIRED"
+              | "FAILED_PREEXISTING_VERSION_CONFLICT"
+              | "FAILED_UNSUPPORTED_DETECTION_RULE"
+              | "FAILED_UNSUPPORTED_ARGS_POLICY"
+              | "FAILED_UNSUPPORTED_PLATFORM"
+              | "FAILED_EGRESS"
+              | "FAILED_INSTALL"
+              | "FAILED_VERIFICATION"
+              | "FAILED_TIMEOUT"
+              | "FAILED_INTERNAL",
+  "schemaVersion": 1,
+  "supported": true,
+  "failedReasonCode": null,
+  "exitCode": 0,
+  "durationMs": 18234,
+  "rebootRequired": false,
+  "killStrategy": null,
+  "preDetect":  { "satisfied": false, "matchedPackageId": null, "matchedVersion": null },
+  "postVerification": { "satisfied": true, "matchedPackageId": "7zip.7zip", "matchedVersion": "24.07", "ruleType": "WINGET_PACKAGE" },
+  "egress": { /* AG-026A SourceEgressReadiness shape */ },
+  "stdoutTail":  "...(last ~4 KiB)",
+  "stdoutTruncated":  true,
+  "stdoutTotalBytes": 18432,
+  "stderrTail":  "...(last ~4 KiB)",
+  "stderrTruncated": false,
+  "stderrTotalBytes": 312
+}
+```
+
+The result is shipped via `CommandResult.Details.install`. The
+top-level `CommandResult.Status` is derived from `finalStatus`:
+SUCCEEDED / SUCCEEDED_NOOP / SUCCEEDED_REBOOT_REQUIRED → `SUCCEEDED`;
+FAILED_UNSUPPORTED_* → `UNSUPPORTED`; everything else → `FAILED`. The
+fine-grained `finalStatus` stays in `Details.install.finalStatus` so
+audit / UI / compliance consumers can read the exact verdict.
+
+### 11.3 Decision pipeline
+
+```text
+1. validate detectionRule.type ∈ {WINGET_PACKAGE}
+   else FAILED_UNSUPPORTED_DETECTION_RULE (no mutation)
+
+2. validate argsPolicyPreset ∈ {DEFAULT, VENDOR_RECOMMENDED_WINGET_NO_UPGRADE}
+   else FAILED_UNSUPPORTED_ARGS_POLICY (no mutation)
+
+3. locator() locates winget.exe
+   else FAILED_UNSUPPORTED_PLATFORM (no mutation)
+
+4. egressVerify() re-runs AG-026A SourceEgressPreflight
+   if !ready → FAILED_EGRESS (no mutation)
+
+5. pre-detect via `winget list --id <pkg> --exact --source winget`
+   • present + versionPredicate satisfied → SUCCEEDED_NOOP
+   • present + versionPredicate fails    → FAILED_PREEXISTING_VERSION_CONFLICT
+                                            (no silent upgrade)
+   • not present                          → proceed
+
+6. run winget install (30-min hard cap; timeout → process-tree kill via
+   `taskkill /F /T /PID` fallback; killStrategy field carries audit
+   evidence)
+
+7. post-verify via `winget list ...`
+   • satisfied + versionPredicate ok  → SUCCEEDED (or SUCCEEDED_REBOOT_REQUIRED
+                                         when exit 3010 / reboot signal)
+   • satisfied but version mismatch    → FAILED_VERIFICATION
+   • not satisfied                     → FAILED_VERIFICATION
+```
+
+### 11.4 Security invariants
+
+- **No shell.** `os/exec.Cmd` argument vector only; no `fmt.Sprintf`,
+  no `--%-style` interpolation of payload fields, no shell escapes.
+  Payload-supplied package id reaches the arg slice via the hard-
+  coded `%PKG%` placeholder substitution in `ArgsForPreset`.
+- **No free-text args.** `argsPolicyPreset` is an enum; an unknown
+  preset is rejected fail-closed BEFORE locator + winget invocation.
+- **No mutation under unverifiable rules.** Detection rule type
+  `!= WINGET_PACKAGE` rejected BEFORE install.
+- **No silent upgrade.** Pre-detect that finds an installed-but-
+  wrong-version package raises FAILED_PREEXISTING_VERSION_CONFLICT
+  instead of dropping `--no-upgrade` or invoking `winget upgrade`.
+
+### 11.5 Known v1 limitations (deferred to follow-ups)
+
+- **Windows Job Object atomic process-tree kill** — v1 uses
+  `taskkill /F /T /PID` fallback after `Process.Kill()`; the narrow
+  race window between `cmd.Start()` and the kill request is
+  documented as `killStrategy = "taskkill_tree"` or `"process_kill_only"`
+  in the result. A Job Object implementation that pre-binds the
+  spawned tree is RT-AG-027-F1 (post-v1 hardening).
+- **Detection rules beyond `WINGET_PACKAGE`** (`REGISTRY_UNINSTALL`,
+  `FILE_EXISTS`, `FILE_SHA256`) — fail-closed in v1; widening planned
+  under AG-028.
+- **Server-side issuer** — BE-022 lands as the sibling backend PR
+  that publishes the dual-control `INSTALL_SOFTWARE` issuer, catalog
+  snapshot pinning, BE-021A install-preflight integration. AG-027
+  ships the canonical wire-shape so BE-022 can adopt it byte-for-byte.

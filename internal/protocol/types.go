@@ -26,6 +26,15 @@ const (
 	CommandCollectEventLogSummary CommandType = "COLLECT_EVENT_LOG_SUMMARY"
 	CommandOSQueryQuery           CommandType = "OSQUERY_QUERY"
 	CommandRestartAgent           CommandType = "RESTART_AGENT"
+	// AG-027 (Faz 22.5): agent-side install execution adapter. Server
+	// (future BE-022) issues a structured INSTALL_SOFTWARE command
+	// payload (catalog snapshot pinned, args policy preset, version
+	// predicate). Agent re-verifies egress, pre-detects, installs,
+	// post-verifies. v1 supports WINGET_PACKAGE detection rules only;
+	// other detection rule types are rejected fail-closed BEFORE
+	// mutation. See internal/winget/install_winget.go for the
+	// canonical wire-shape.
+	CommandInstallSoftware CommandType = "INSTALL_SOFTWARE"
 )
 
 type CommandStatus string

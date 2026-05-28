@@ -2,14 +2,24 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
 	"platform-agent/internal/users"
+	"platform-agent/internal/winget"
 )
+
+// installWinGetFn is the package-private dispatcher for the
+// `INSTALL_SOFTWARE` command. Production wires this through
+// winget.InstallWinGet (Windows runner / non-Windows stub via the
+// build-tagged installers). Tests override the seam to exercise the
+// executor path without spawning a real winget invocation.
+var installWinGetFn = winget.InstallWinGet
 
 type LocalExecutor struct {
 	Capabilities []protocol.CommandType
@@ -98,6 +108,25 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "User home paths resolved"
 		result.Details = map[string]interface{}{"paths": paths}
+	case protocol.CommandInstallSoftware:
+		// AG-027 (Faz 22.5) — install execution adapter.
+		//
+		// Payload is unmarshalled fail-closed via JSON round-trip
+		// so a malformed shape is rejected with a precise FAILED
+		// state rather than panicking on a missing-field assertion.
+		// The structured InstallResult is shipped via Details so
+		// the backend audit pipeline can store / query the
+		// canonical schema verbatim.
+		req, payloadErr := unmarshalInstallRequest(command.Payload)
+		if payloadErr != nil {
+			result.Status = protocol.CommandStatusFailed
+			result.Summary = payloadErr.Error()
+			break
+		}
+		installResult := installWinGetFn(ctx, req)
+		result.Status = mapInstallStatusToCommandStatus(installResult.FinalStatus)
+		result.Summary = fmt.Sprintf("INSTALL_SOFTWARE %s", installResult.FinalStatus)
+		result.Details = map[string]interface{}{"install": installResult}
 	default:
 		result.Status = protocol.CommandStatusUnsupported
 		result.Summary = "Command is not implemented by this agent build"
@@ -111,6 +140,56 @@ func (e *LocalExecutor) now() time.Time {
 		return time.Now()
 	}
 	return e.Now()
+}
+
+// unmarshalInstallRequest converts the wire-side payload map into a
+// canonical winget.InstallRequest. Validation is delegated to the
+// install pipeline (RunInstall) which fails-closed on unsupported
+// detection rules / args policy presets; this function only
+// guarantees that the shape JSON-decodes without panicking.
+func unmarshalInstallRequest(payload map[string]interface{}) (winget.InstallRequest, error) {
+	if payload == nil {
+		return winget.InstallRequest{}, errors.New("INSTALL_SOFTWARE payload is empty")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return winget.InstallRequest{}, fmt.Errorf("INSTALL_SOFTWARE payload re-marshal failed: %w", err)
+	}
+	var req winget.InstallRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return winget.InstallRequest{}, fmt.Errorf("INSTALL_SOFTWARE payload decode failed: %w", err)
+	}
+	if strings.TrimSpace(string(req.DetectionRule.Type)) == "" {
+		return winget.InstallRequest{}, errors.New("INSTALL_SOFTWARE payload missing detectionRule.type")
+	}
+	if strings.TrimSpace(req.PackageID) == "" {
+		return winget.InstallRequest{}, errors.New("INSTALL_SOFTWARE payload missing packageId")
+	}
+	if strings.TrimSpace(req.ArgsPolicyPreset) == "" {
+		return winget.InstallRequest{}, errors.New("INSTALL_SOFTWARE payload missing argsPolicyPreset")
+	}
+	return req, nil
+}
+
+// mapInstallStatusToCommandStatus converts the AG-027 fine-grained
+// install final status into the BE-014 command status surface so
+// the backend command-result endpoint can keep its existing
+// SUCCEEDED / FAILED / UNSUPPORTED dispatch unchanged. The
+// fine-grained AG-027 status remains visible in the result's
+// Details map for audit / UI consumers that need it.
+func mapInstallStatusToCommandStatus(finalStatus string) protocol.CommandStatus {
+	switch finalStatus {
+	case winget.FinalStatusSucceeded,
+		winget.FinalStatusSucceededNoop,
+		winget.FinalStatusSucceededRebootRequired:
+		return protocol.CommandStatusSucceeded
+	case winget.FinalStatusFailedUnsupportedPlatform,
+		winget.FinalStatusFailedUnsupportedDetectionRule,
+		winget.FinalStatusFailedUnsupportedArgsPolicy:
+		return protocol.CommandStatusUnsupported
+	default:
+		return protocol.CommandStatusFailed
+	}
 }
 
 // boolPayload reads an optional bool argument from a command payload.
