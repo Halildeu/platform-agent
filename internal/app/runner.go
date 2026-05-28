@@ -65,7 +65,16 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		return err
 	}
 
-	commandCtx, cancel := context.WithTimeout(ctx, r.Config.CommandTimeout)
+	// AG-027 (Codex 019e6c0d iter-2): per-command-type timeout.
+	// INSTALL_SOFTWARE needs a longer ceiling (30 min default) because
+	// WinGet installs can run 30s–5min and occasionally longer for
+	// vendor MSI bundles. Everything else stays on the lightweight
+	// CommandTimeout (120s default).
+	commandTimeout := r.Config.CommandTimeout
+	if command.Type == protocol.CommandInstallSoftware && r.Config.InstallCommandTimeout > 0 {
+		commandTimeout = r.Config.InstallCommandTimeout
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	result := r.Executor.Execute(commandCtx, command)
 	if err := r.Client.SubmitResult(ctx, result); err != nil {
