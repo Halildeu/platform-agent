@@ -704,6 +704,16 @@ audit / UI / compliance consumers can read the exact verdict.
   wrong-version package raises FAILED_PREEXISTING_VERSION_CONFLICT
   instead of dropping `--no-upgrade` or invoking `winget upgrade`.
 
+### 11.4.1 Effective install timeout
+
+`Runner.RunOnce` now dispatches per-command-type timeouts. For
+`INSTALL_SOFTWARE` it uses `Config.InstallCommandTimeout`
+(default 30 min, env var `ENDPOINT_AGENT_INSTALL_COMMAND_TIMEOUT`),
+not the lightweight `CommandTimeout` (default 120 s) that read-only
+commands inherit. The agent-side `RunInstall` derives its own
+30-min ceiling from this parent context, so the effective cap is
+`min(InstallCommandTimeout, 30min)`. Codex 019e6c0d iter-2 absorb.
+
 ### 11.5 Known v1 limitations (deferred to follow-ups)
 
 - **Windows Job Object atomic process-tree kill** — v1 uses
