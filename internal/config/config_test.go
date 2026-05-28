@@ -71,3 +71,24 @@ func TestLoadFromEnv_AutoEnrollDefaultsEmpty(t *testing.T) {
 		t.Fatalf("expected empty AutoEnrollAPIURL when env not set, got %q", cfg.AutoEnrollAPIURL)
 	}
 }
+
+// AG-027 (Codex 019e6c0d iter-2 absorb) — INSTALL_SOFTWARE needs a
+// longer effective timeout than the lightweight 120s default
+// CommandTimeout. Default ships at 30 min; the env override is
+// honoured.
+func TestDefault_InstallCommandTimeoutIs30Minutes(t *testing.T) {
+	cfg := Default()
+	want := 30 * time.Minute
+	if cfg.InstallCommandTimeout != want {
+		t.Fatalf("InstallCommandTimeout default = %s, want %s",
+			cfg.InstallCommandTimeout, want)
+	}
+}
+
+func TestLoadFromEnv_InstallCommandTimeoutEnvOverride(t *testing.T) {
+	t.Setenv("ENDPOINT_AGENT_INSTALL_COMMAND_TIMEOUT", "45m")
+	cfg := LoadFromEnv()
+	if cfg.InstallCommandTimeout != 45*time.Minute {
+		t.Fatalf("InstallCommandTimeout = %s, want 45m", cfg.InstallCommandTimeout)
+	}
+}

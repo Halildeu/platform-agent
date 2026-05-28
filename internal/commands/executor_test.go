@@ -7,7 +7,42 @@ import (
 
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
+	"platform-agent/internal/winget"
 )
+
+// installSoftwareTestPayload builds the canonical INSTALL_SOFTWARE
+// payload shape used by the AG-027 executor tests. Mirrors the
+// future BE-022 issuer wire so the executor unmarshalling path is
+// exercised end-to-end.
+func installSoftwareTestPayload() map[string]interface{} {
+	return map[string]interface{}{
+		"commandResultId":   "00000000-0000-0000-0000-000000000001",
+		"idempotencyKey":    "00000000-0000-0000-0000-000000000002",
+		"catalogItemId":     "00000000-0000-0000-0000-000000000003",
+		"catalogItemKey":    "7zip.7zip",
+		"catalogRowVersion": 1,
+		"provider":          "WINGET",
+		"packageId":         "7zip.7zip",
+		"argsPolicyPreset":  winget.ArgsPresetDefault,
+		"versionPredicate": map[string]interface{}{
+			"type": "LATEST",
+		},
+		"detectionRule": map[string]interface{}{
+			"type":      "WINGET_PACKAGE",
+			"packageId": "7zip.7zip",
+		},
+	}
+}
+
+// installSoftwareSeam overrides the package-private installWinGetFn
+// for the duration of a test and restores the production wire on
+// cleanup. Mirrors the AG-026A detectSourceEgress seam test pattern.
+func installSoftwareSeam(t *testing.T, stub func(ctx context.Context, req winget.InstallRequest) winget.InstallResult) {
+	t.Helper()
+	prev := installWinGetFn
+	installWinGetFn = stub
+	t.Cleanup(func() { installWinGetFn = prev })
+}
 
 // snapshotFromDetails extracts the inventory.Snapshot the executor
 // embedded in CommandResult.Details["inventory"]. The executor stores
@@ -188,5 +223,114 @@ func TestLocalExecutorListLocalUsersUnsupportedOutsideWindows(t *testing.T) {
 
 	if result.Status != protocol.CommandStatusUnsupported && result.Status != protocol.CommandStatusSucceeded {
 		t.Fatalf("status = %s, want %s or %s", result.Status, protocol.CommandStatusUnsupported, protocol.CommandStatusSucceeded)
+	}
+}
+
+// ────────────────────────────────────────────────────────────────
+// AG-027 — INSTALL_SOFTWARE executor specs
+
+func TestLocalExecutorInstallSoftwareHappyPathSucceeds(t *testing.T) {
+	installSoftwareSeam(t, func(_ context.Context, req winget.InstallRequest) winget.InstallResult {
+		if req.PackageID != "7zip.7zip" {
+			t.Fatalf("unexpected packageId %q", req.PackageID)
+		}
+		if req.ArgsPolicyPreset != winget.ArgsPresetDefault {
+			t.Fatalf("unexpected argsPolicyPreset %q", req.ArgsPolicyPreset)
+		}
+		return winget.InstallResult{
+			FinalStatus:      winget.FinalStatusSucceeded,
+			SchemaVersion:    winget.InstallSchemaVersion,
+			Supported:        true,
+			ExitCode:         0,
+			DurationMs:       1234,
+			PostVerification: winget.PostVerificationResult{Satisfied: true, MatchedPackageID: "7zip.7zip", MatchedVersion: "24.07", RuleType: winget.DetectionRuleTypeWingetPackage},
+		}
+	})
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandInstallSoftware}, "test")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-1",
+		ClaimID:        "claim-1",
+		AttemptNumber:  1,
+		Type:           protocol.CommandInstallSoftware,
+		Payload:        installSoftwareTestPayload(),
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+	result := executor.Execute(context.Background(), command)
+	if result.Status != protocol.CommandStatusSucceeded {
+		t.Fatalf("status = %s, want SUCCEEDED", result.Status)
+	}
+	install, ok := result.Details["install"].(winget.InstallResult)
+	if !ok {
+		t.Fatalf("install detail type = %T", result.Details["install"])
+	}
+	if install.FinalStatus != winget.FinalStatusSucceeded {
+		t.Fatalf("install.FinalStatus = %s", install.FinalStatus)
+	}
+}
+
+func TestLocalExecutorInstallSoftwareMissingPackageIDFails(t *testing.T) {
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandInstallSoftware}, "test")
+	payload := installSoftwareTestPayload()
+	delete(payload, "packageId")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-1",
+		ClaimID:        "claim-1",
+		AttemptNumber:  1,
+		Type:           protocol.CommandInstallSoftware,
+		Payload:        payload,
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+	result := executor.Execute(context.Background(), command)
+	if result.Status != protocol.CommandStatusFailed {
+		t.Fatalf("status = %s, want FAILED", result.Status)
+	}
+}
+
+func TestLocalExecutorInstallSoftwareUnsupportedFinalStatusMapsToUnsupported(t *testing.T) {
+	installSoftwareSeam(t, func(_ context.Context, _ winget.InstallRequest) winget.InstallResult {
+		return winget.InstallResult{
+			FinalStatus:      winget.FinalStatusFailedUnsupportedPlatform,
+			SchemaVersion:    winget.InstallSchemaVersion,
+			Supported:        false,
+			FailedReasonCode: "platform_not_windows",
+		}
+	})
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandInstallSoftware}, "test")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-1",
+		ClaimID:        "claim-1",
+		AttemptNumber:  1,
+		Type:           protocol.CommandInstallSoftware,
+		Payload:        installSoftwareTestPayload(),
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+	result := executor.Execute(context.Background(), command)
+	if result.Status != protocol.CommandStatusUnsupported {
+		t.Fatalf("status = %s, want UNSUPPORTED", result.Status)
+	}
+}
+
+func TestLocalExecutorInstallSoftwareInstallFailureMapsToFailed(t *testing.T) {
+	installSoftwareSeam(t, func(_ context.Context, _ winget.InstallRequest) winget.InstallResult {
+		return winget.InstallResult{
+			FinalStatus:      winget.FinalStatusFailedInstall,
+			SchemaVersion:    winget.InstallSchemaVersion,
+			Supported:        true,
+			FailedReasonCode: "winget_exit_1",
+			ExitCode:         1,
+		}
+	})
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandInstallSoftware}, "test")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-1",
+		ClaimID:        "claim-1",
+		AttemptNumber:  1,
+		Type:           protocol.CommandInstallSoftware,
+		Payload:        installSoftwareTestPayload(),
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+	result := executor.Execute(context.Background(), command)
+	if result.Status != protocol.CommandStatusFailed {
+		t.Fatalf("status = %s, want FAILED", result.Status)
 	}
 }

@@ -27,6 +27,15 @@ type Config struct {
 	InventoryInterval      time.Duration
 	JitterPercent          int
 	CommandTimeout         time.Duration
+	// InstallCommandTimeout overrides CommandTimeout specifically for
+	// the AG-027 INSTALL_SOFTWARE command type. The default 120s
+	// CommandTimeout was sized for quick read-only commands (inventory,
+	// user listing) and is too aggressive for WinGet installs that
+	// routinely take 30s–5min and occasionally longer for vendor MSI
+	// bundles. Codex 019e6c0d iter-2 P1 absorb: bound effective install
+	// timeout at the documented 30-min hard cap so the agent and the
+	// docs/COMMAND-CONTRACT.md §11.5 narrative agree.
+	InstallCommandTimeout  time.Duration
 	NonceSkewWindow        time.Duration
 	NonceReplayCacheWindow time.Duration
 
@@ -60,6 +69,7 @@ func Default() Config {
 		InventoryInterval:      60 * time.Minute,
 		JitterPercent:          20,
 		CommandTimeout:         120 * time.Second,
+		InstallCommandTimeout:  30 * time.Minute,
 		NonceSkewWindow:        5 * time.Minute,
 		NonceReplayCacheWindow: 10 * time.Minute,
 	}
@@ -81,6 +91,7 @@ func LoadFromEnv() Config {
 	cfg.CommandPollInterval = envDuration("ENDPOINT_AGENT_COMMAND_POLL_INTERVAL", cfg.CommandPollInterval)
 	cfg.InventoryInterval = envDuration("ENDPOINT_AGENT_INVENTORY_INTERVAL", cfg.InventoryInterval)
 	cfg.CommandTimeout = envDuration("ENDPOINT_AGENT_COMMAND_TIMEOUT", cfg.CommandTimeout)
+	cfg.InstallCommandTimeout = envDuration("ENDPOINT_AGENT_INSTALL_COMMAND_TIMEOUT", cfg.InstallCommandTimeout)
 	cfg.NonceSkewWindow = envDuration("ENDPOINT_AGENT_NONCE_SKEW_WINDOW", cfg.NonceSkewWindow)
 	cfg.NonceReplayCacheWindow = envDuration("ENDPOINT_AGENT_NONCE_REPLAY_CACHE_WINDOW", cfg.NonceReplayCacheWindow)
 	cfg.JitterPercent = envInt("ENDPOINT_AGENT_JITTER_PERCENT", cfg.JitterPercent)
