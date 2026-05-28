@@ -233,7 +233,7 @@ func happyRunner() InstallRunnerFn {
 func TestRunInstall_UnsupportedDetectionRuleFailsClosed(t *testing.T) {
 	req := baseRequest()
 	req.DetectionRule.Type = "REGISTRY_UNINSTALL"
-	res := RunInstall(req, baseOptions(nil, nil, okEgress()))
+	res := RunInstall(context.Background(), req, baseOptions(nil, nil, okEgress()))
 	if res.FinalStatus != FinalStatusFailedUnsupportedDetectionRule {
 		t.Fatalf("got %s want FAILED_UNSUPPORTED_DETECTION_RULE", res.FinalStatus)
 	}
@@ -245,7 +245,7 @@ func TestRunInstall_UnsupportedDetectionRuleFailsClosed(t *testing.T) {
 func TestRunInstall_UnsupportedArgsPolicyFailsClosed(t *testing.T) {
 	req := baseRequest()
 	req.ArgsPolicyPreset = "EVIL_PRESET"
-	res := RunInstall(req, baseOptions(nil, nil, okEgress()))
+	res := RunInstall(context.Background(), req, baseOptions(nil, nil, okEgress()))
 	if res.FinalStatus != FinalStatusFailedUnsupportedArgsPolicy {
 		t.Fatalf("got %s", res.FinalStatus)
 	}
@@ -255,7 +255,7 @@ func TestRunInstall_EgressNotReady(t *testing.T) {
 	req := baseRequest()
 	badEgress := SourceEgressReadiness{Supported: true, ProbeError: "dns failed"}
 	opts := baseOptions(nil, nil, badEgress)
-	res := RunInstall(req, opts)
+	res := RunInstall(context.Background(), req, opts)
 	if res.FinalStatus != FinalStatusFailedEgress {
 		t.Fatalf("got %s want FAILED_EGRESS", res.FinalStatus)
 	}
@@ -266,7 +266,7 @@ func TestRunInstall_PreDetectAlreadyInstalled_SatisfiesNoop(t *testing.T) {
 	probe := &stubProbe{
 		pre: PreDetectResult{Satisfied: true, MatchedPackageID: "7zip.7zip", MatchedVersion: "24.07"},
 	}
-	res := RunInstall(req, baseOptions(probe.probe, happyRunner(), okEgress()))
+	res := RunInstall(context.Background(), req, baseOptions(probe.probe, happyRunner(), okEgress()))
 	if res.FinalStatus != FinalStatusSucceededNoop {
 		t.Fatalf("got %s want SUCCEEDED_NOOP", res.FinalStatus)
 	}
@@ -281,7 +281,7 @@ func TestRunInstall_PreDetectVersionConflict(t *testing.T) {
 	probe := &stubProbe{
 		pre: PreDetectResult{Satisfied: true, MatchedPackageID: "7zip.7zip", MatchedVersion: "24.07"},
 	}
-	res := RunInstall(req, baseOptions(probe.probe, happyRunner(), okEgress()))
+	res := RunInstall(context.Background(), req, baseOptions(probe.probe, happyRunner(), okEgress()))
 	if res.FinalStatus != FinalStatusFailedPreexistingVersionConflict {
 		t.Fatalf("got %s want FAILED_PREEXISTING_VERSION_CONFLICT", res.FinalStatus)
 	}
@@ -293,7 +293,7 @@ func TestRunInstall_HappyPathSucceeds(t *testing.T) {
 	post := PreDetectResult{Satisfied: true, MatchedPackageID: "7zip.7zip", MatchedVersion: "24.07"}
 	callCounter := false
 	probe := &stubProbe{pre: pre, post: post, postCall: &callCounter}
-	res := RunInstall(req, baseOptions(probe.probe, happyRunner(), okEgress()))
+	res := RunInstall(context.Background(), req, baseOptions(probe.probe, happyRunner(), okEgress()))
 	if res.FinalStatus != FinalStatusSucceeded {
 		t.Fatalf("got %s want SUCCEEDED", res.FinalStatus)
 	}
@@ -314,7 +314,7 @@ func TestRunInstall_RebootRequiredViaExitCode(t *testing.T) {
 	runner := func(_ context.Context, _ string, _ []string) RunnerOutcome {
 		return RunnerOutcome{ExitCode: 3010, DurationMs: 500}
 	}
-	res := RunInstall(req, baseOptions(probe.probe, runner, okEgress()))
+	res := RunInstall(context.Background(), req, baseOptions(probe.probe, runner, okEgress()))
 	if res.FinalStatus != FinalStatusSucceededRebootRequired {
 		t.Fatalf("got %s want SUCCEEDED_REBOOT_REQUIRED", res.FinalStatus)
 	}
@@ -329,7 +329,7 @@ func TestRunInstall_InstallFailureExitCode(t *testing.T) {
 	runner := func(_ context.Context, _ string, _ []string) RunnerOutcome {
 		return RunnerOutcome{ExitCode: 1, DurationMs: 500, StderrTail: "MSI failure"}
 	}
-	res := RunInstall(req, baseOptions(probe.probe, runner, okEgress()))
+	res := RunInstall(context.Background(), req, baseOptions(probe.probe, runner, okEgress()))
 	if res.FinalStatus != FinalStatusFailedInstall {
 		t.Fatalf("got %s want FAILED_INSTALL", res.FinalStatus)
 	}
@@ -344,7 +344,7 @@ func TestRunInstall_PostVerifyMissingFailsVerification(t *testing.T) {
 	post := PreDetectResult{Satisfied: false}
 	callCounter := false
 	probe := &stubProbe{pre: pre, post: post, postCall: &callCounter}
-	res := RunInstall(req, baseOptions(probe.probe, happyRunner(), okEgress()))
+	res := RunInstall(context.Background(), req, baseOptions(probe.probe, happyRunner(), okEgress()))
 	if res.FinalStatus != FinalStatusFailedVerification {
 		t.Fatalf("got %s want FAILED_VERIFICATION", res.FinalStatus)
 	}
@@ -364,7 +364,7 @@ func TestRunInstall_TimeoutSurface(t *testing.T) {
 			KillStrategy: "taskkill_tree",
 		}
 	}
-	res := RunInstall(req, baseOptions(probe.probe, runner, okEgress()))
+	res := RunInstall(context.Background(), req, baseOptions(probe.probe, runner, okEgress()))
 	if res.FinalStatus != FinalStatusFailedTimeout {
 		t.Fatalf("got %s want FAILED_TIMEOUT", res.FinalStatus)
 	}
@@ -377,7 +377,7 @@ func TestRunInstall_LocatorMissingReportsUnsupportedPlatform(t *testing.T) {
 	req := baseRequest()
 	opts := baseOptions(nil, nil, okEgress())
 	opts.Locator = func() (string, error) { return "", errors.New("not on PATH") }
-	res := RunInstall(req, opts)
+	res := RunInstall(context.Background(), req, opts)
 	if res.FinalStatus != FinalStatusFailedUnsupportedPlatform {
 		t.Fatalf("got %s want FAILED_UNSUPPORTED_PLATFORM", res.FinalStatus)
 	}
@@ -392,7 +392,7 @@ func TestRunInstall_PostVerifyVersionPredicateFailsVerification(t *testing.T) {
 	post := PreDetectResult{Satisfied: true, MatchedPackageID: "7zip.7zip", MatchedVersion: "24.07"}
 	callCounter := false
 	probe := &stubProbe{pre: pre, post: post, postCall: &callCounter}
-	res := RunInstall(req, baseOptions(probe.probe, happyRunner(), okEgress()))
+	res := RunInstall(context.Background(), req, baseOptions(probe.probe, happyRunner(), okEgress()))
 	if res.FinalStatus != FinalStatusFailedVerification {
 		t.Fatalf("got %s want FAILED_VERIFICATION", res.FinalStatus)
 	}

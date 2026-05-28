@@ -164,6 +164,16 @@ func RuntimeCapabilities() []protocol.CommandType {
 		// Re-add when internal/users gains a Windows local-user disable/enable adapter.
 		capabilities = append(capabilities,
 			protocol.CommandListLocalUsers,
+			// AG-027 (Faz 22.5): Windows-only install execution
+			// adapter. Non-Windows agents return
+			// FAILED_UNSUPPORTED_PLATFORM via the executor stub;
+			// to keep the dispatcher tidy we only advertise this
+			// capability on the platform that can actually run it.
+			// Codex 019e6c0d iter-1 P0#1 absorb — without this the
+			// capability is missing from the heartbeat and
+			// Validate() rejects every INSTALL_SOFTWARE command
+			// before the executor branch can run.
+			protocol.CommandInstallSoftware,
 		)
 	}
 	return capabilities

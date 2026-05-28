@@ -2,11 +2,13 @@ package inventory
 
 import (
 	"encoding/json"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"platform-agent/internal/protocol"
 	"platform-agent/internal/software"
 	"platform-agent/internal/winget"
 )
@@ -293,5 +295,30 @@ func TestCollectWithOptionsIncludeWinGetEgressTrueRunsPreflightExactlyOnce(t *te
 	}
 	if !strings.Contains(string(body), `"packageId":"`+winget.FixedPackageQueryID+`"`) {
 		t.Fatalf("AG-026A: wire payload must carry pinned packageId %q", winget.FixedPackageQueryID)
+	}
+}
+
+// AG-027 (Faz 22.5) — INSTALL_SOFTWARE capability advertisement.
+// Codex 019e6c0d iter-1 P0#1 absorb: the runtime capabilities list
+// the heartbeat ships MUST include INSTALL_SOFTWARE on Windows so
+// the backend dispatcher will dispatch commands to the agent. On
+// non-Windows builds the capability MUST NOT appear (the executor
+// stub returns FAILED_UNSUPPORTED_PLATFORM but advertising the
+// capability would mislead the backend into thinking the agent can
+// execute the install).
+func TestRuntimeCapabilitiesInstallSoftwareAdvertisedOnWindowsOnly(t *testing.T) {
+	caps := RuntimeCapabilities()
+	found := false
+	for _, c := range caps {
+		if c == protocol.CommandInstallSoftware {
+			found = true
+			break
+		}
+	}
+	if runtime.GOOS == "windows" && !found {
+		t.Fatalf("AG-027: expected INSTALL_SOFTWARE in RuntimeCapabilities() on Windows; got %v", caps)
+	}
+	if runtime.GOOS != "windows" && found {
+		t.Fatalf("AG-027: INSTALL_SOFTWARE must NOT be advertised on non-Windows (got %v)", caps)
 	}
 }

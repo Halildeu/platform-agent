@@ -13,7 +13,8 @@ import "context"
 // FAILED_UNSUPPORTED_PLATFORM is distinct from FAILED_INTERNAL —
 // the audit chain shows the operator that the device simply does
 // not run Windows, not that a runtime bug occurred.
-func InstallWinGet(_ context.Context, req InstallRequest) InstallResult {
+func InstallWinGet(ctx context.Context, req InstallRequest) InstallResult {
+	_ = ctx
 	_ = req
 	return InstallResult{
 		FinalStatus:      FinalStatusFailedUnsupportedPlatform,

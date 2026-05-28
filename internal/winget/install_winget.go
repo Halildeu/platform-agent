@@ -45,10 +45,14 @@ import (
 //     positive verification; verification failure flips the result
 //     to FAILED_VERIFICATION even when winget reported exit 0.
 //
-//   - **30-minute hard cap with process-tree kill.** Windows Job
-//     Object owns the spawned winget tree so timeout terminates
-//     all descendants atomically; `taskkill /F /T /PID` is the
-//     fallback if Job Object creation fails.
+//   - **30-minute hard cap with process-tree kill.** v1 ships a
+//     `taskkill /F /T /PID` fallback after Start+Wait control of
+//     the spawned `winget.exe`. The kill is dispatched from the
+//     same goroutine that listens for `ctx.Done()`, so the parent
+//     process is still alive when taskkill walks the tree (Codex
+//     019e6c0d iter-1 P1#3 absorb). A Windows Job Object impl
+//     that pre-binds the spawned tree is RT-AG-027-F1 (post-v1
+//     hardening, documented in docs/COMMAND-CONTRACT.md §11.5).
 //
 // What this file deliberately does NOT do:
 //
@@ -357,12 +361,21 @@ type InstallOptions struct {
 // pure with respect to the supplied seams — no global state, no
 // network, no process spawn happens here. Every I/O boundary is
 // pluggable for testing.
-func RunInstall(req InstallRequest, opts InstallOptions) InstallResult {
+//
+// Codex 019e6c0d iter-1 P0#2 absorb: the function accepts a parent
+// context so the executor / agent shutdown signals propagate to the
+// install runner. The internal deadline (`opts.Timeout`, default
+// 30 min) is derived from the parent context, not a fresh
+// background context.
+func RunInstall(parentCtx context.Context, req InstallRequest, opts InstallOptions) InstallResult {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = DefaultInstallTimeout
+	}
+	if parentCtx == nil {
+		parentCtx = context.Background()
 	}
 
 	result := InstallResult{
@@ -379,6 +392,26 @@ func RunInstall(req InstallRequest, opts InstallOptions) InstallResult {
 	if strings.TrimSpace(req.DetectionRule.PackageID) == "" {
 		result.FinalStatus = FinalStatusFailedUnsupportedDetectionRule
 		result.FailedReasonCode = "detection_rule_package_id_missing"
+		return result
+	}
+
+	// 1.5 Payload integrity — Codex 019e6c0d iter-1 P1#4 absorb.
+	// `provider`, `packageId`, and `detectionRule.packageId` must
+	// reference the same target; otherwise a malformed payload could
+	// install package A and verify package B (false success). All
+	// three checks are case-insensitive and fail-closed BEFORE any
+	// mutation runs.
+	if !strings.EqualFold(strings.TrimSpace(req.Provider), "WINGET") {
+		result.FinalStatus = FinalStatusFailedUnsupportedArgsPolicy
+		result.FailedReasonCode = "provider_unsupported"
+		return result
+	}
+	if !strings.EqualFold(
+		strings.TrimSpace(req.PackageID),
+		strings.TrimSpace(req.DetectionRule.PackageID),
+	) {
+		result.FinalStatus = FinalStatusFailedUnsupportedDetectionRule
+		result.FailedReasonCode = "detection_rule_package_id_mismatch"
 		return result
 	}
 
@@ -414,7 +447,7 @@ func RunInstall(req InstallRequest, opts InstallOptions) InstallResult {
 	// 5. Re-verify AG-026A egress readiness before pulling the
 	// trigger. Hours can pass between command issue and execute.
 	startedAt := opts.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+	ctx, cancel := context.WithTimeout(parentCtx, opts.Timeout)
 	defer cancel()
 	if opts.EgressVerify != nil {
 		egressCtx, egressCancel := context.WithTimeout(ctx, PreVerifyEgressTimeout)

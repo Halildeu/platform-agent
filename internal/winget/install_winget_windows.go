@@ -17,7 +17,8 @@ import (
 // detection probe + egress verifier into the cross-platform
 // RunInstall decision pipeline. Public entry point invoked by the
 // executor when a Windows agent receives an INSTALL_SOFTWARE
-// command.
+// command. Accepts a parent context (Codex 019e6c0d iter-1 P0#2)
+// so agent shutdown / command-timeout signals propagate.
 func InstallWinGet(ctx context.Context, req InstallRequest) InstallResult {
 	opts := InstallOptions{
 		Locator: defaultLocator,
@@ -32,26 +33,27 @@ func InstallWinGet(ctx context.Context, req InstallRequest) InstallResult {
 		Timeout:       DefaultInstallTimeout,
 		Now:           time.Now,
 	}
-	return RunInstall(req, opts)
+	return RunInstall(ctx, req, opts)
 }
 
 // windowsInstallRunner spawns `winget.exe install ...` and reports
 // the structured outcome with bounded stdout / stderr capture.
 //
-// Timeout strategy (Codex 019e6bfa iter-2 AGREE):
+// Timeout strategy (Codex 019e6c0d iter-1 P1#3 absorb):
 //
-//   - exec.CommandContext(ctx, ...) bound to the parent decision
-//     context. On deadline expiry the stdlib calls Process.Kill()
-//     which on Windows maps to TerminateProcess against the top-
-//     level winget.exe handle. Child installers winget spawned can
-//     survive that call.
-//   - To make the kill atomic across the spawned tree we
-//     immediately follow up with `taskkill /F /T /PID <pid>`, which
-//     walks every descendant and forces termination. This is the
-//     documented v1 fallback (Codex iter-2 "fallback acceptable if
-//     documented + tested"). A Job Object implementation that
-//     avoids the brief Start()→Kill() race window is deferred to a
-//     v1.1 follow-up (RT-AG-027-F1 in this PR's body).
+//   - The runner uses `exec.Command` (NOT `exec.CommandContext`)
+//     + manual `Start()` + a goroutine that watches `cmd.Wait()`.
+//     A parent `ctx.Done()` triggers `killProcessTree(cmd)` while
+//     the parent process is still alive; only then do we drain
+//     `Wait()`. This is the documented anti-pattern for
+//     `exec.CommandContext` which would Process.Kill() the parent
+//     first and leave the spawned installer tree orphaned (Codex
+//     critical_finding).
+//   - `killProcessTree(cmd)` spawns `taskkill /F /T /PID <pid>`
+//     which walks every descendant and forces termination. v1
+//     fallback only — a Windows Job Object implementation that
+//     pre-binds the spawned tree (atomic kill on a single
+//     TerminateJobObject) is RT-AG-027-F1 (post-v1 hardening).
 //   - KillStrategy in the RunnerOutcome marks "taskkill_tree" on
 //     timeout-driven kills so post-mortem can prove the tree was
 //     terminated. The audit chain carries this verbatim.
@@ -62,7 +64,7 @@ func InstallWinGet(ctx context.Context, req InstallRequest) InstallResult {
 // blowing up agent memory.
 func windowsInstallRunner(ctx context.Context, wingetPath string, args []string) RunnerOutcome {
 	startedAt := time.Now()
-	cmd := exec.CommandContext(ctx, wingetPath, args...)
+	cmd := exec.Command(wingetPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		// CREATE_NEW_PROCESS_GROUP keeps winget in its own group so
 		// the OS bookkeeping understands the parent / child
@@ -75,23 +77,52 @@ func windowsInstallRunner(ctx context.Context, wingetPath string, args []string)
 	cmd.Stdout = stdoutCap
 	cmd.Stderr = stderrCap
 
-	runErr := cmd.Run()
-	durationMs := int(time.Since(startedAt) / time.Millisecond)
+	if startErr := cmd.Start(); startErr != nil {
+		return RunnerOutcome{
+			ExitCode:         -1,
+			DurationMs:       int(time.Since(startedAt) / time.Millisecond),
+			StartFailureCode: "start_failed",
+			StderrTail:       startErr.Error(),
+			StderrTotalBytes: len(startErr.Error()),
+		}
+	}
+
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
 
 	exitCode := -1
 	timedOut := false
 	killStrategy := ""
+	var waitErr error
 
-	if runErr != nil {
+	select {
+	case waitErr = <-waitCh:
+		// Process exited on its own.
+	case <-ctx.Done():
+		// Parent context cancelled or hit the deadline. Kill the
+		// process tree FIRST while the parent is still alive, then
+		// drain Wait. Codex 019e6c0d iter-1 P1#3 absorb.
+		timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+		killStrategy = killProcessTree(cmd)
+		// Bounded grace period so a hung process does not stall
+		// the executor indefinitely while taskkill walks the tree.
+		select {
+		case waitErr = <-waitCh:
+		case <-time.After(5 * time.Second):
+			// Final defence: orphan the goroutine; the OS will
+			// eventually reap the process. We've already done the
+			// taskkill so its descendants are gone.
+		}
+	}
+
+	durationMs := int(time.Since(startedAt) / time.Millisecond)
+
+	if waitErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
+		if errors.As(waitErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			timedOut = true
-			killStrategy = killProcessTree(cmd)
-		}
-	} else {
+	} else if !timedOut {
 		exitCode = 0
 	}
 
