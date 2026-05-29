@@ -690,6 +690,53 @@ audit / UI / compliance consumers can read the exact verdict.
    • not satisfied                     → FAILED_VERIFICATION
 ```
 
+### 11.3a Installer log redaction (AG-027L)
+
+The `stdoutTail` / `stderrTail` fields in the install result are
+routed through `security.RedactInstallerString` before they land on
+the wire. The function is layered:
+
+1. **AG-027L installer-specific patterns first** — applied to the raw
+   tail in this order so subsequent baseline patterns cannot eat the
+   structural anchors:
+   - `https://user:pass@host/...` → `https://[REDACTED]@host/...`
+     (URL userinfo segment, scheme + host preserved for operator
+     debuggability).
+   - `KEY=value` property/CLI assignment where KEY belongs to the
+     credential family — license/serial/activation keys, API / access /
+     refresh / OAuth / auth / ID tokens, client / secret key
+     variants. Covers bare (`LICENSEKEY`), snake_case
+     (`CLIENT_SECRET`), kebab-case (`client-secret`) and camelCase
+     (`clientSecret`) shapes. Case-insensitive, bare + quoted values,
+     KEY name preserved (`LICENSEKEY=[REDACTED]`). Allowlist tracked
+     in `internal/security/redact_installer.go` so silent widening
+     stays out of operator surprise.
+   - Token-bearing query parameters: same credential family as
+     above (`?token=`, `?client_secret=`, `?id_token=`, `?api-key=`,
+     etc.), first or follow-on (`&key=`) parameter position, value
+     masked up to next `&` / whitespace / end-of-string.
+2. **AG-025/AG-026 baseline (`security.RedactSoftwareString`) second**
+   — JWT (`eyJ…` shape), `password=` / `pwd=` / `pass=` assignments,
+   email/UPN, full domain SIDs, `C:\Users\<account>\` path segment,
+   product-key shape (five 5-char alphanumeric groups separated by
+   hyphens — Windows/Office style).
+
+What AG-027L deliberately does **not** scrub:
+
+- Public-by-design paths (`C:\ProgramData\<vendor>\`,
+  `C:\Program Files\<vendor>\`, temp dirs without user context).
+- Bare hostnames / computer names — operational identifiers, not
+  credentials.
+- Version strings, build numbers, package IDs.
+- Installer exit codes (numeric) — those are wire metadata, not log.
+
+The redaction layer is enforced inside `sanitizeForWire` in
+`internal/winget/install_winget.go`; no install command path can
+bypass it. Tests live in `internal/security/redact_installer_test.go`
+and lock both positive (each pattern redacts) and negative (look-
+alikes such as `LICENSES_VALIDATED=1` or `?version=1.2.3` survive)
+behavior.
+
 ### 11.4 Security invariants
 
 - **No shell.** `os/exec.Cmd` argument vector only; no `fmt.Sprintf`,

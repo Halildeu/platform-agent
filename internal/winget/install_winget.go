@@ -736,16 +736,22 @@ func elapsedMs(start time.Time, now func() time.Time) int {
 // sanitizeForWire strips terminal escape sequences / progress bars
 // from raw winget output before it lands on the wire. The capture
 // is already capped at CaptureLimitBytes per stream upstream; this
-// helper is best-effort cleanup. Free-form text is then routed
-// through security.RedactSoftwareString so any incidental token /
-// hostname is masked.
+// helper is best-effort cleanup.
+//
+// AG-027L (Faz 22.5.4): free-form text is routed through
+// security.RedactInstallerString — the AG-025/AG-026 baseline
+// (JWT / password=… / email / SID / user path / product key) PLUS
+// installer-specific shapes (URL userinfo, MSI/installer property
+// assignments with credential keys, token-bearing query parameters).
+// The combined redaction policy is documented in
+// docs/COMMAND-CONTRACT.md §11.3a.
 func sanitizeForWire(s string) string {
 	if s == "" {
 		return ""
 	}
 	cleaned := strings.ReplaceAll(s, "\r", "\n")
 	cleaned = strings.TrimSpace(cleaned)
-	return security.RedactSoftwareString(cleaned)
+	return security.RedactInstallerString(cleaned)
 }
 
 // CaptureTail captures the trailing N bytes of a stream output into
