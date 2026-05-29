@@ -2,6 +2,7 @@ package winget
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -547,4 +548,127 @@ func sampleSourceListOutput() string {
 		"--------------------------------------------------------------------------------------------------\n" +
 		"winget    https://cdn.winget.microsoft.com/cache            Microsoft.PreIndexed.Package      Trusted\n" +
 		"msstore   https://storeedgefd.dsx.mp.microsoft.com/v9.0     Microsoft.Rest                    Trusted\n"
+}
+
+// TestEgressSummaryWireShape — AG-026A follow-up regression guard.
+//
+// Backend WinGetEgressPayloadPolicy treats dns / tcp / https as
+// required arrays when supported=true. A nil slice that omits to JSON
+// silence trips a 400 ("wingetEgress.egress.dns is required (array)
+// when supported=true") at result-submit. This test asserts the
+// shape on the wire — that EgressSummary serialises empty slices as
+// `[]` and never as `null` or as a missing field.
+func TestEgressSummaryWireShape(t *testing.T) {
+	// Zero-value-with-empty-slice construction mirrors what
+	// runEgressWith returns when no probe target was reached.
+	summary := EgressSummary{
+		DNS:   []NetworkCheck{},
+		TCP:   []NetworkCheck{},
+		HTTPS: []NetworkCheck{},
+	}
+	body, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	wire := string(body)
+	for _, key := range []string{`"dns":`, `"tcp":`, `"https":`} {
+		if !strings.Contains(wire, key) {
+			t.Fatalf("egress summary wire payload missing %s: %s", key, wire)
+		}
+	}
+	// Backend explicitly rejects null. Empty array must serialise as `[]`.
+	for _, banned := range []string{`"dns":null`, `"tcp":null`, `"https":null`} {
+		if strings.Contains(wire, banned) {
+			t.Fatalf("egress summary must not emit %s: %s", banned, wire)
+		}
+	}
+	// Sanity — the empty-slice serialisation is `[]`.
+	if !strings.Contains(wire, `"dns":[]`) {
+		t.Fatalf("expected dns=[] in wire payload, got %s", wire)
+	}
+}
+
+// TestEmptyEgressSummaryHelper pins the helper contract — it must
+// produce non-nil empty slices so json.Marshal serialises them as `[]`.
+// Every code path that emits an EgressSummary MUST start from this
+// helper (Codex 019e7164 P0 absorb): nil-slice + dropped omitempty
+// would still serialise as `null`, which the backend rejects.
+func TestEmptyEgressSummaryHelper(t *testing.T) {
+	summary := emptyEgressSummary()
+	if summary.DNS == nil || summary.TCP == nil || summary.HTTPS == nil {
+		t.Fatalf("emptyEgressSummary must produce non-nil slices: %+v", summary)
+	}
+	body, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	wire := string(body)
+	for _, expected := range []string{`"dns":[]`, `"tcp":[]`, `"https":[]`} {
+		if !strings.Contains(wire, expected) {
+			t.Fatalf("emptyEgressSummary wire shape missing %s: %s", expected, wire)
+		}
+	}
+	for _, banned := range []string{`"dns":null`, `"tcp":null`, `"https":null`} {
+		if strings.Contains(wire, banned) {
+			t.Fatalf("emptyEgressSummary must not emit %s: %s", banned, wire)
+		}
+	}
+}
+
+// TestRunSourceEgressPreflightEarlyReturnsEmitEmptyArrays —
+// AG-026A iter-1 P0 regression guard (Codex 019e7164). Both early
+// returns (preflight options incomplete + locator error) MUST surface
+// `"dns":[]` / `"tcp":[]` / `"https":[]` on the wire and never `null`.
+// Before the iter-1 fix, those paths bypassed runEgressWith's slice
+// init and a nil-slice supported=true SourceEgressReadiness produced
+// `"egress":{"dns":null,...}` which the backend rejected with a 400
+// during HALILKOOLUB735 lab smoke.
+func TestRunSourceEgressPreflightEarlyReturnsEmitEmptyArrays(t *testing.T) {
+	now := func() time.Time { return time.Unix(0, 0) }
+
+	t.Run("preflight options incomplete", func(t *testing.T) {
+		// Missing both Locator and Execute triggers the
+		// "preflight options incomplete" early return.
+		readiness := RunSourceEgressPreflight(SourceEgressOptions{
+			Timeout: 30 * time.Second,
+			Now:     now,
+		})
+		assertEarlyReturnWireShape(t, readiness, "preflight options incomplete")
+	})
+
+	t.Run("locator error", func(t *testing.T) {
+		readiness := RunSourceEgressPreflight(SourceEgressOptions{
+			Locator: func() (string, error) {
+				return "", errors.New("winget binary not found")
+			},
+			Execute: func(ctx context.Context, path string, args ...string) ([]byte, error) {
+				return nil, nil
+			},
+			Timeout: 30 * time.Second,
+			Now:     now,
+		})
+		assertEarlyReturnWireShape(t, readiness, "locator error")
+	})
+}
+
+func assertEarlyReturnWireShape(t *testing.T, readiness SourceEgressReadiness, label string) {
+	t.Helper()
+	if !readiness.Supported {
+		t.Fatalf("%s: supported must remain true on Windows early-return paths, got %+v", label, readiness)
+	}
+	body, err := json.Marshal(readiness)
+	if err != nil {
+		t.Fatalf("%s: json.Marshal failed: %v", label, err)
+	}
+	wire := string(body)
+	for _, expected := range []string{`"dns":[]`, `"tcp":[]`, `"https":[]`} {
+		if !strings.Contains(wire, expected) {
+			t.Fatalf("%s: wire payload missing %s: %s", label, expected, wire)
+		}
+	}
+	for _, banned := range []string{`"dns":null`, `"tcp":null`, `"https":null`} {
+		if strings.Contains(wire, banned) {
+			t.Fatalf("%s: wire payload must not emit %s: %s", label, banned, wire)
+		}
+	}
 }

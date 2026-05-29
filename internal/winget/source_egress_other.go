@@ -25,5 +25,11 @@ func DetectSourceEgress(now time.Time) SourceEgressReadiness {
 		PackageQuery: PackageQueryResult{
 			PackageID: FixedPackageQueryID,
 		},
+		// AG-026A iter-1 (Codex 019e7164 P0): keep the wire shape
+		// uniform across platforms. Backend tolerates `null` for
+		// supported=false, but always emitting `[]` keeps the
+		// invariant easier to reason about and matches the
+		// Windows preflight constructor.
+		Egress: emptyEgressSummary(),
 	}
 }
