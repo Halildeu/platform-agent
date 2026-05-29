@@ -19,15 +19,15 @@ func TestRedactInstallerString_URLUserInfo(t *testing.T) {
 	}{
 		{
 			name:     "userinfo with password",
-			input:    "Downloading https://operator:s3cret@vendor.example.com/installer.msi",
+			input:    "Downloading https://operator:MASKME@vendor.example.com/installer.msi",
 			want:     "Downloading https://[REDACTED]@vendor.example.com/installer.msi",
-			mustHide: []string{"operator", "s3cret"},
+			mustHide: []string{"operator", "MASKME"},
 		},
 		{
 			name:     "bare userinfo (no password)",
-			input:    "GET https://apitoken@cdn.example.com/v1/pkg",
+			input:    "GET https://MASKME@cdn.example.com/v1/pkg",
 			want:     "GET https://[REDACTED]@cdn.example.com/v1/pkg",
-			mustHide: []string{"apitoken"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:  "no userinfo — URL untouched",
@@ -79,27 +79,27 @@ func TestRedactInstallerString_MSIProperty(t *testing.T) {
 	}{
 		{
 			name:     "LICENSEKEY assignment",
-			input:    `msiexec /i app.msi LICENSEKEY=XXXX-XXXX-XXXX-XXXX /qn`,
+			input:    `msiexec /i app.msi LICENSEKEY=MASKME /qn`,
 			want:     `msiexec /i app.msi LICENSEKEY=[REDACTED] /qn`,
-			mustHide: []string{"XXXX-XXXX-XXXX-XXXX"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "SERIAL assignment with quoted value",
-			input:    `setup.exe SERIAL="SN-XXXX-PLCHOLDR" /S`,
+			input:    `setup.exe SERIAL="MASKME" /S`,
 			want:     `setup.exe SERIAL=[REDACTED] /S`,
-			mustHide: []string{"SN-XXXX-PLCHOLDR"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "lowercase apikey assignment",
-			input:    `installer.exe apikey=FAKE-APIKEY-PLACEHOLDER /quiet`,
+			input:    `installer.exe apikey=MASKME /quiet`,
 			want:     `installer.exe apikey=[REDACTED] /quiet`,
-			mustHide: []string{"FAKE-APIKEY-PLACEHOLDER"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "ACTIVATION embedded in vendor template",
-			input:    `Starting install with ACTIVATION=FAKE-ACTIVATION-VALUE...`,
+			input:    `Starting install with ACTIVATION=MASKME...`,
 			want:     `Starting install with ACTIVATION=[REDACTED]`,
-			mustHide: []string{"FAKE-ACTIVATION-VALUE"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:  "LICENSES_VALIDATED=1 is NOT a credential — must NOT match",
@@ -115,63 +115,63 @@ func TestRedactInstallerString_MSIProperty(t *testing.T) {
 		// + camelCase OAuth/vendor property shapes.
 		{
 			name:     "CLIENT_SECRET snake_case",
-			input:    `setup.exe CLIENT_SECRET=op-secret-XYZ /qn`,
+			input:    `setup.exe CLIENT_SECRET=MASKME /qn`,
 			want:     `setup.exe CLIENT_SECRET=[REDACTED] /qn`,
-			mustHide: []string{"op-secret-XYZ"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "client-secret kebab-case",
-			input:    `provider config: client-secret=opaque.value-12`,
+			input:    `provider config: client-secret=MASKME`,
 			want:     `provider config: client-secret=[REDACTED]`,
-			mustHide: []string{"opaque.value-12"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "clientSecret camelCase (bare allowlist)",
-			input:    `init: clientSecret="alpha-beta-gamma"`,
+			input:    `init: clientSecret="MASKME"`,
 			want:     `init: clientSecret=[REDACTED]`,
-			mustHide: []string{"alpha-beta-gamma"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "ACCESS_TOKEN snake_case",
-			input:    `vendor.cli --ACCESS_TOKEN=at-1234-payload`,
+			input:    `vendor.cli --ACCESS_TOKEN=MASKME`,
 			want:     `vendor.cli --ACCESS_TOKEN=[REDACTED]`,
-			mustHide: []string{"at-1234-payload"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "REFRESH_TOKEN snake_case",
-			input:    `cfg: REFRESH_TOKEN=rt-abcdef-0123`,
+			input:    `cfg: REFRESH_TOKEN=MASKME`,
 			want:     `cfg: REFRESH_TOKEN=[REDACTED]`,
-			mustHide: []string{"rt-abcdef-0123"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "OAUTH_TOKEN snake_case",
-			input:    `OAUTH_TOKEN=oauth-payload-xyz`,
+			input:    `OAUTH_TOKEN=MASKME`,
 			want:     `OAUTH_TOKEN=[REDACTED]`,
-			mustHide: []string{"oauth-payload-xyz"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "ID_TOKEN snake_case",
-			input:    `Issuing ID_TOKEN=jwt-style-id-token`,
+			input:    `Issuing ID_TOKEN=MASKME`,
 			want:     `Issuing ID_TOKEN=[REDACTED]`,
-			mustHide: []string{"jwt-style-id-token"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "API_KEY snake_case",
-			input:    `cfg API_KEY=FAKE-APIKEY-PLACEHOLDER`,
+			input:    `cfg API_KEY=MASKME`,
 			want:     `cfg API_KEY=[REDACTED]`,
-			mustHide: []string{"FAKE-APIKEY-PLACEHOLDER"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "SECRET_KEY snake_case",
-			input:    `setup SECRET_KEY=very-private-key-bytes`,
+			input:    `setup SECRET_KEY=MASKME`,
 			want:     `setup SECRET_KEY=[REDACTED]`,
-			mustHide: []string{"very-private-key-bytes"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "AUTH_TOKEN snake_case",
-			input:    `req AUTH_TOKEN=bearer-shaped-opaque`,
+			input:    `req AUTH_TOKEN=MASKME`,
 			want:     `req AUTH_TOKEN=[REDACTED]`,
-			mustHide: []string{"bearer-shaped-opaque"},
+			mustHide: []string{"MASKME"},
 		},
 	}
 	for _, tc := range cases {
@@ -198,27 +198,27 @@ func TestRedactInstallerString_QueryStringToken(t *testing.T) {
 	}{
 		{
 			name:     "token=… as first param",
-			input:    `GET /api?token=secret-value HTTP/1.1`,
+			input:    `GET /api?token=MASKME HTTP/1.1`,
 			want:     `GET /api?token=[REDACTED] HTTP/1.1`,
-			mustHide: []string{"secret-value"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "access_token=… second param",
-			input:    `https://api.example.com/v1?org=acme&access_token=ABCXYZ123`,
+			input:    `https://api.example.com/v1?org=acme&access_token=MASKME`,
 			want:     `https://api.example.com/v1?org=acme&access_token=[REDACTED]`,
-			mustHide: []string{"ABCXYZ123"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "api-key with dash variant",
-			input:    `https://cdn.example.com/d?api-key=Krn7ax`,
+			input:    `https://cdn.example.com/d?api-key=MASKME`,
 			want:     `https://cdn.example.com/d?api-key=[REDACTED]`,
-			mustHide: []string{"Krn7ax"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "refresh_token at end of string",
-			input:    `redirect=oauth/cb?refresh_token=rfk-token-payload`,
+			input:    `redirect=oauth/cb?refresh_token=MASKME`,
 			want:     `redirect=oauth/cb?refresh_token=[REDACTED]`,
-			mustHide: []string{"rfk-token-payload"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:  "?version=1.2.3 is NOT a token — must NOT match",
@@ -229,45 +229,45 @@ func TestRedactInstallerString_QueryStringToken(t *testing.T) {
 		// shapes (snake_case + kebab-case + bare).
 		{
 			name:     "client_secret query param",
-			input:    `https://idp.example.com/oauth/token?client_secret=cs-very-private-bytes`,
+			input:    `https://idp.example.com/oauth/token?client_secret=MASKME`,
 			want:     `https://idp.example.com/oauth/token?client_secret=[REDACTED]`,
-			mustHide: []string{"cs-very-private-bytes"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "client-secret kebab-case query param",
-			input:    `cb=oauth?client-secret=opaque-1234`,
+			input:    `cb=oauth?client-secret=MASKME`,
 			want:     `cb=oauth?client-secret=[REDACTED]`,
-			mustHide: []string{"opaque-1234"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "id_token snake_case query param",
-			input:    `redirect?id_token=jwt-style-id-token`,
+			input:    `redirect?id_token=MASKME`,
 			want:     `redirect?id_token=[REDACTED]`,
-			mustHide: []string{"jwt-style-id-token"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "oauth_token snake_case query param",
-			input:    `cb?oauth_token=ot-payload-ABC`,
+			input:    `cb?oauth_token=MASKME`,
 			want:     `cb?oauth_token=[REDACTED]`,
-			mustHide: []string{"ot-payload-ABC"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "auth_token snake_case query param",
-			input:    `link/cb?auth_token=at-opaque-001`,
+			input:    `link/cb?auth_token=MASKME`,
 			want:     `link/cb?auth_token=[REDACTED]`,
-			mustHide: []string{"at-opaque-001"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "secret_key snake_case query param",
-			input:    `vendor?secret_key=sk-XYZ-0001`,
+			input:    `vendor?secret_key=MASKME`,
 			want:     `vendor?secret_key=[REDACTED]`,
-			mustHide: []string{"sk-XYZ-0001"},
+			mustHide: []string{"MASKME"},
 		},
 		{
 			name:     "follow-on &client_secret position",
-			input:    `https://idp.example.com/oauth?org=acme&client_secret=cs-private-2`,
+			input:    `https://idp.example.com/oauth?org=acme&client_secret=MASKME`,
 			want:     `https://idp.example.com/oauth?org=acme&client_secret=[REDACTED]`,
-			mustHide: []string{"cs-private-2"},
+			mustHide: []string{"MASKME"},
 		},
 	}
 	for _, tc := range cases {
@@ -293,8 +293,8 @@ func TestRedactInstallerString_LayersWithSoftwareString(t *testing.T) {
 	// corrected to match implementation.)
 
 	input := `User=alice@example.com installed pkg from ` +
-		`https://operator:apitoken@cdn.example.com/?token=secret123 ` +
-		`with LICENSEKEY=KEY-XXXX-PLCHOLDR into C:\Users\alice\AppData\Local\Temp`
+		`https://operator:MASKME@cdn.example.com/?token=secret123 ` +
+		`with LICENSEKEY=MASKME into C:\Users\alice\AppData\Local\Temp`
 
 	out := RedactInstallerString(input)
 
@@ -307,13 +307,13 @@ func TestRedactInstallerString_LayersWithSoftwareString(t *testing.T) {
 	}
 
 	// AG-027L additions:
-	if strings.Contains(out, "operator:apitoken") {
+	if strings.Contains(out, "operator:MASKME") {
 		t.Errorf("URL userinfo should be redacted: %q", out)
 	}
 	if strings.Contains(out, "secret123") {
 		t.Errorf("query string token should be redacted: %q", out)
 	}
-	if strings.Contains(out, "KEY-XXXX-PLCHOLDR") {
+	if strings.Contains(out, "MASKME") {
 		t.Errorf("LICENSEKEY value should be redacted: %q", out)
 	}
 

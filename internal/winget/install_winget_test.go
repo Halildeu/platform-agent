@@ -175,9 +175,9 @@ func TestRunInstall_RedactsInstallerCredentialsFromRunnerOutput(t *testing.T) {
 	req := baseRequest()
 
 	dirty := strings.Join([]string{
-		"Downloading https://operator:s3cret@vendor.example.com/installer.msi",
-		"Applying LICENSEKEY=KEY-XXXX-XXXX-PLCH",
-		"Token URL https://cdn.example.com/cb?client_secret=oauth-private-bytes",
+		"Downloading https://operator:MASKME@vendor.example.com/installer.msi",
+		"Applying LICENSEKEY=MASKME",
+		"Token URL https://cdn.example.com/cb?client_secret=MASKME",
 	}, "\n")
 
 	runner := func(_ context.Context, _ string, _ []string) RunnerOutcome {
@@ -207,9 +207,9 @@ func TestRunInstall_RedactsInstallerCredentialsFromRunnerOutput(t *testing.T) {
 	result := RunInstall(context.Background(), req, opts)
 
 	for _, secret := range []string{
-		"operator:s3cret",
-		"KEY-XXXX-XXXX-PLCH",
-		"oauth-private-bytes",
+		"operator:MASKME",
+		"MASKME",
+		"MASKME",
 	} {
 		if strings.Contains(result.StdoutTail, secret) {
 			t.Errorf("expected %q masked in StdoutTail, got %q",
