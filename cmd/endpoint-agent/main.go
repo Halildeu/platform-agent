@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -43,9 +44,27 @@ func main() {
 	autoEnrollFlag := flag.Bool("auto-enroll", false, "run in mTLS auto-enroll mode (ADR-0029 Faz 22.3 Katman 3); requires Windows")
 	autoEnrollAPIURL := flag.String("api-url", "", "auto-enroll API base URL override (full canonical path, e.g. https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin)")
 	dryRun := flag.Bool("dry-run", false, "auto-enroll only: load cert + build TLS config + validate persisted config without making HTTP calls")
+	// AG-026B: operator escape hatch for the HMAC enrollment token.
+	// The PRODUCTION install path (install.ps1, AG-026C) writes the
+	// token into the service-specific Environment regkey and the
+	// runner reads it via ENDPOINT_AGENT_ENROLLMENT_TOKEN; the AG-026D
+	// DPAPI store keeps the issued credential across service
+	// restarts so the env token is normally only consumed once and
+	// then cleared. This flag lets a debugging operator pass a token
+	// directly without rewriting the regkey — useful when the
+	// service is being run in the foreground for diagnostics. It is
+	// HMAC-only (rejected in --auto-enroll mode below) and takes
+	// PRECEDENCE over the env value when non-empty. The argv leak
+	// surface is acknowledged: the installer DOES NOT use this flag;
+	// it is only ever set by a human at an interactive elevated
+	// prompt.
+	enrollmentToken := flag.String("enrollment-token", "", "HMAC enrollment token (operator escape hatch; takes precedence over ENDPOINT_AGENT_ENROLLMENT_TOKEN; mutually exclusive with --auto-enroll)")
 	flag.Parse()
 
 	cfg := config.LoadFromEnv()
+	if strings.TrimSpace(*enrollmentToken) != "" {
+		cfg.EnrollmentToken = strings.TrimSpace(*enrollmentToken)
+	}
 	if *version {
 		fmt.Printf("%s %s\n", cfg.AgentName, cfg.AgentVersion)
 		return
@@ -77,6 +96,15 @@ func main() {
 
 	mode := resolveMode(*autoEnrollFlag, *dryRun)
 	logger.Printf("agent mode=%s", mode)
+
+	// AG-026B: fail-closed if the operator combines --enrollment-token
+	// with --auto-enroll. The auto-enroll path uses an mTLS cert as
+	// the identity bootstrapper (no HMAC token consumed), so a token
+	// supplied here would never be redeemed and would silently
+	// linger in the process env / argv. Codex 019e7314 must_fix #6.
+	if strings.TrimSpace(*enrollmentToken) != "" && mode == modeAutoEnroll {
+		logger.Fatalf("--enrollment-token is HMAC-only; combining it with --auto-enroll is rejected (Codex 019e7314 must_fix #6)")
+	}
 
 	if mode == modeAutoEnroll {
 		if *dryRun {
