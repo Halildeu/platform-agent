@@ -158,6 +158,82 @@ func TestSanitizeForWire_StripsCarriageReturns(t *testing.T) {
 	}
 }
 
+// AG-027L Codex 019e73de iter-1 should_fix: integration assertion
+// that the install pipeline wires runner stdout/stderr through
+// sanitizeForWire (which now layers RedactInstallerString on top of
+// the baseline). The runner returns crafted output containing every
+// AG-027L pattern class; the test asserts the InstallResult tails
+// have the credentials masked but keep the structural anchors.
+func TestRunInstall_RedactsInstallerCredentialsFromRunnerOutput(t *testing.T) {
+	postCallSeen := false
+	probe := &stubProbe{
+		pre:      PreDetectResult{Satisfied: false},
+		post:     PreDetectResult{Satisfied: true, MatchedPackageID: "7zip.7zip", MatchedVersion: "24.07"},
+		postCall: &postCallSeen,
+	}
+
+	req := baseRequest()
+
+	dirty := strings.Join([]string{
+		"Downloading https://operator:s3cret@vendor.example.com/installer.msi",
+		"Applying LICENSEKEY=KEY-AAAA-BBBB-CCCC",
+		"Token URL https://cdn.example.com/cb?client_secret=oauth-private-bytes",
+	}, "\n")
+
+	runner := func(_ context.Context, _ string, _ []string) RunnerOutcome {
+		return RunnerOutcome{
+			ExitCode:         0,
+			DurationMs:       100,
+			StdoutTail:       dirty,
+			StdoutTotalBytes: len(dirty),
+			StderrTail:       dirty,
+			StderrTotalBytes: len(dirty),
+		}
+	}
+
+	opts := InstallOptions{
+		Locator: func() (string, error) { return "winget", nil },
+		EgressVerify: func(context.Context) SourceEgressReadiness {
+			return SourceEgressReadiness{
+				Supported:    true,
+				PackageQuery: PackageQueryResult{Found: true},
+			}
+		},
+		DetectionProbe: probe.probe,
+		InstallRunner:  runner,
+		Now:            time.Now,
+	}
+
+	result := RunInstall(context.Background(), req, opts)
+
+	for _, secret := range []string{
+		"operator:s3cret",
+		"KEY-AAAA-BBBB-CCCC",
+		"oauth-private-bytes",
+	} {
+		if strings.Contains(result.StdoutTail, secret) {
+			t.Errorf("expected %q masked in StdoutTail, got %q",
+				secret, result.StdoutTail)
+		}
+		if strings.Contains(result.StderrTail, secret) {
+			t.Errorf("expected %q masked in StderrTail, got %q",
+				secret, result.StderrTail)
+		}
+	}
+
+	for _, keep := range []string{
+		"[REDACTED]",
+		"vendor.example.com",
+		"LICENSEKEY=",
+		"client_secret=",
+	} {
+		if !strings.Contains(result.StdoutTail, keep) {
+			t.Errorf("expected non-credential marker %q to survive in StdoutTail, got %q",
+				keep, result.StdoutTail)
+		}
+	}
+}
+
 // ────────────────────────────────────────────────────────────────
 // Decision pipeline — table-driven
 

@@ -39,6 +39,21 @@ func TestRedactInstallerString_URLUserInfo(t *testing.T) {
 			input: "see https://cdn.example.com/path/with@symbol",
 			want:  "see https://cdn.example.com/path/with@symbol",
 		},
+		{
+			// Codex 019e73de iter-1 must_fix #1: `?` delimiter must
+			// end authority parsing so query values containing `@`
+			// (e.g. `?email=user@example.com`) do not get scrubbed
+			// as if they were userinfo.
+			name:  "query value contains @ — pattern must not match",
+			input: "GET https://cdn.example.com?email=user@example.com",
+			want:  "GET https://cdn.example.com?email=[REDACTED]",
+		},
+		{
+			// Same guard for `#` fragment delimiter.
+			name:  "fragment contains @ — pattern must not match",
+			input: "see https://docs.example.com/api#section@detail",
+			want:  "see https://docs.example.com/api#section@detail",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,6 +111,68 @@ func TestRedactInstallerString_MSIProperty(t *testing.T) {
 			input: `setup.exe INSTALLDIR="C:\Program Files\App" /S`,
 			want:  `setup.exe INSTALLDIR="C:\Program Files\App" /S`,
 		},
+		// Codex 019e73de iter-1 must_fix #2: snake_case + kebab-case
+		// + camelCase OAuth/vendor property shapes.
+		{
+			name:     "CLIENT_SECRET snake_case",
+			input:    `setup.exe CLIENT_SECRET=op-secret-XYZ /qn`,
+			want:     `setup.exe CLIENT_SECRET=[REDACTED] /qn`,
+			mustHide: []string{"op-secret-XYZ"},
+		},
+		{
+			name:     "client-secret kebab-case",
+			input:    `provider config: client-secret=opaque.value-12`,
+			want:     `provider config: client-secret=[REDACTED]`,
+			mustHide: []string{"opaque.value-12"},
+		},
+		{
+			name:     "clientSecret camelCase (bare allowlist)",
+			input:    `init: clientSecret="alpha-beta-gamma"`,
+			want:     `init: clientSecret=[REDACTED]`,
+			mustHide: []string{"alpha-beta-gamma"},
+		},
+		{
+			name:     "ACCESS_TOKEN snake_case",
+			input:    `vendor.cli --ACCESS_TOKEN=at-1234-payload`,
+			want:     `vendor.cli --ACCESS_TOKEN=[REDACTED]`,
+			mustHide: []string{"at-1234-payload"},
+		},
+		{
+			name:     "REFRESH_TOKEN snake_case",
+			input:    `cfg: REFRESH_TOKEN=rt-abcdef-0123`,
+			want:     `cfg: REFRESH_TOKEN=[REDACTED]`,
+			mustHide: []string{"rt-abcdef-0123"},
+		},
+		{
+			name:     "OAUTH_TOKEN snake_case",
+			input:    `OAUTH_TOKEN=oauth-payload-xyz`,
+			want:     `OAUTH_TOKEN=[REDACTED]`,
+			mustHide: []string{"oauth-payload-xyz"},
+		},
+		{
+			name:     "ID_TOKEN snake_case",
+			input:    `Issuing ID_TOKEN=jwt-style-id-token`,
+			want:     `Issuing ID_TOKEN=[REDACTED]`,
+			mustHide: []string{"jwt-style-id-token"},
+		},
+		{
+			name:     "API_KEY snake_case",
+			input:    `cfg API_KEY=sk_test_KEY01`,
+			want:     `cfg API_KEY=[REDACTED]`,
+			mustHide: []string{"sk_test_KEY01"},
+		},
+		{
+			name:     "SECRET_KEY snake_case",
+			input:    `setup SECRET_KEY=very-private-key-bytes`,
+			want:     `setup SECRET_KEY=[REDACTED]`,
+			mustHide: []string{"very-private-key-bytes"},
+		},
+		{
+			name:     "AUTH_TOKEN snake_case",
+			input:    `req AUTH_TOKEN=bearer-shaped-opaque`,
+			want:     `req AUTH_TOKEN=[REDACTED]`,
+			mustHide: []string{"bearer-shaped-opaque"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -148,6 +225,50 @@ func TestRedactInstallerString_QueryStringToken(t *testing.T) {
 			input: `GET /api?version=1.2.3`,
 			want:  `GET /api?version=1.2.3`,
 		},
+		// Codex 019e73de iter-1 must_fix #3: OAuth/vendor query param
+		// shapes (snake_case + kebab-case + bare).
+		{
+			name:     "client_secret query param",
+			input:    `https://idp.example.com/oauth/token?client_secret=cs-very-private-bytes`,
+			want:     `https://idp.example.com/oauth/token?client_secret=[REDACTED]`,
+			mustHide: []string{"cs-very-private-bytes"},
+		},
+		{
+			name:     "client-secret kebab-case query param",
+			input:    `cb=oauth?client-secret=opaque-1234`,
+			want:     `cb=oauth?client-secret=[REDACTED]`,
+			mustHide: []string{"opaque-1234"},
+		},
+		{
+			name:     "id_token snake_case query param",
+			input:    `redirect?id_token=jwt-style-id-token`,
+			want:     `redirect?id_token=[REDACTED]`,
+			mustHide: []string{"jwt-style-id-token"},
+		},
+		{
+			name:     "oauth_token snake_case query param",
+			input:    `cb?oauth_token=ot-payload-ABC`,
+			want:     `cb?oauth_token=[REDACTED]`,
+			mustHide: []string{"ot-payload-ABC"},
+		},
+		{
+			name:     "auth_token snake_case query param",
+			input:    `link/cb?auth_token=at-opaque-001`,
+			want:     `link/cb?auth_token=[REDACTED]`,
+			mustHide: []string{"at-opaque-001"},
+		},
+		{
+			name:     "secret_key snake_case query param",
+			input:    `vendor?secret_key=sk-XYZ-0001`,
+			want:     `vendor?secret_key=[REDACTED]`,
+			mustHide: []string{"sk-XYZ-0001"},
+		},
+		{
+			name:     "follow-on &client_secret position",
+			input:    `https://idp.example.com/oauth?org=acme&client_secret=cs-private-2`,
+			want:     `https://idp.example.com/oauth?org=acme&client_secret=[REDACTED]`,
+			mustHide: []string{"cs-private-2"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,9 +286,11 @@ func TestRedactInstallerString_QueryStringToken(t *testing.T) {
 }
 
 func TestRedactInstallerString_LayersWithSoftwareString(t *testing.T) {
-	// AG-027L composes RedactSoftwareString first, then installer
-	// patterns. The combined call must scrub both the AG-025/AG-026
-	// baseline shapes AND the AG-027L-specific shapes.
+	// AG-027L composes installer patterns first, then the
+	// RedactSoftwareString baseline. The combined call must scrub
+	// both the AG-025/AG-026 baseline shapes AND the AG-027L-specific
+	// shapes. (Codex 019e73de iter-1 should_fix: comment order
+	// corrected to match implementation.)
 
 	input := `User=alice@example.com installed pkg from ` +
 		`https://operator:apitoken@cdn.example.com/?token=secret123 ` +

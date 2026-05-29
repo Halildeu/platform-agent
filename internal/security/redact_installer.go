@@ -59,19 +59,33 @@ const InstallerRedactedValue = "[REDACTED]"
 
 var installerPatterns = []*regexp.Regexp{
 	// URL userinfo. The userinfo segment is whatever sits between
-	// `://` and the next `@`, but it must NOT span a `/` because that
-	// would let the pattern eat half of a normal URL path.
-	regexp.MustCompile(`(?i)(https?://)[^/@\s]+@`),
+	// `://` and the next `@`, but it must NOT span a `/`, `?`, or
+	// `#` — those delimiters end the authority component, so any `@`
+	// after them is part of a query value or fragment (e.g.
+	// `https://cdn.example.com?email=user@example.com`). Without the
+	// `?` and `#` guards the pattern would eagerly redact the
+	// hostname AND the value before the `@`, breaking the
+	// "scheme + host preserved" invariant documented in
+	// COMMAND-CONTRACT.md §11.3a. Codex 019e73de iter-1 must_fix #1.
+	regexp.MustCompile(`(?i)(https?://)[^/@\s?#]+@`),
 
 	// MSI / installer property assignments with credential-shaped
-	// names. The KEY allowlist is the union of common WinGet, MSI
-	// (Wix / InstallShield) and vendor-specific property names.
-	regexp.MustCompile(`(?i)\b(LICENSE(?:KEY)?|SERIAL|ACTIVATION(?:KEY)?|APIKEY|APIKEYS|ACCESSTOKEN|REFRESHTOKEN|BEARER|OAUTHTOKEN)\s*=\s*("[^"]*"|'[^']*'|[^\s&;"]+)`),
+	// names. The KEY allowlist covers the common WinGet, MSI
+	// (Wix / InstallShield), OAuth and vendor-specific property
+	// shapes — bare (LICENSE), snake_case (CLIENT_SECRET), kebab-case
+	// (client-secret) and camelCase (clientSecret) variants. KEY
+	// allowlist tracks new vendor shapes via PR — silent widening is
+	// not safe (false positives on non-credential property names with
+	// "SECRET" or "KEY" substrings). Codex 019e73de iter-1 must_fix #2.
+	regexp.MustCompile(`(?i)\b(LICENSE(?:KEY)?|SERIAL|ACTIVATION(?:KEY)?|APIKEY|API[_-]?KEY|APIKEYS|ACCESSTOKEN|ACCESS[_-]?TOKEN|REFRESHTOKEN|REFRESH[_-]?TOKEN|BEARER|OAUTHTOKEN|OAUTH[_-]?TOKEN|AUTHTOKEN|AUTH[_-]?TOKEN|CLIENTSECRET|CLIENT[_-]?SECRET|SECRETKEY|SECRET[_-]?KEY|IDTOKEN|ID[_-]?TOKEN)\s*=\s*("[^"]*"|'[^']*'|[^\s&;"]+)`),
 
 	// Token-bearing query parameters. Matches both first and follow-on
 	// positions (`?key=` / `&key=`) and consumes the value up to the
-	// next `&`, whitespace, or end of string.
-	regexp.MustCompile(`(?i)([?&])(token|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|bearer)=([^&\s]+)`),
+	// next `&`, whitespace, or end of string. KEY allowlist mirrors
+	// the property-assignment list above (same credential class, same
+	// snake/kebab/bare variants), plus the historical short forms
+	// (`token`, `secret`, `bearer`). Codex 019e73de iter-1 must_fix #3.
+	regexp.MustCompile(`(?i)([?&])(token|secret|bearer|api[_-]?key|access[_-]?token|refresh[_-]?token|oauth[_-]?token|auth[_-]?token|client[_-]?secret|secret[_-]?key|id[_-]?token)=([^&\s]+)`),
 }
 
 var installerReplacements = []string{

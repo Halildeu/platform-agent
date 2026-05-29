@@ -714,7 +714,8 @@ the wire. The function is layered:
 2. **AG-025/AG-026 baseline (`security.RedactSoftwareString`) second**
    — JWT (`eyJ…` shape), `password=` / `pwd=` / `pass=` assignments,
    email/UPN, full domain SIDs, `C:\Users\<account>\` path segment,
-   product-key shape (5×5 hex groups).
+   product-key shape (five 5-char alphanumeric groups separated by
+   hyphens — Windows/Office style).
 
 What AG-027L deliberately does **not** scrub:
 
