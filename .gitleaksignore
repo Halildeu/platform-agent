@@ -1,36 +1,43 @@
 # gitleaks ignore list (AG-027L PR #31 absorb chain).
 #
-# Format: <commit>:<file>:<rule>:<line>
+# Format: <full-commit-sha>:<file>:<rule>:<line>
 #
 # Each entry pairs with a comment explaining the false positive.
-# Avoid blanket entries; prefer rewriting the source line in a
-# follow-up commit and removing the ignore once the fingerprint is
-# unreachable.
 
 # AG-027L PR #31 (Faz 22.5.4 installer log redaction layer) —
-# initial commits 81c47fb (iter-0) + e051c39 (iter-1) included
-# regression test fixtures with deliberately credential-shaped
-# strings to exercise the redaction patterns (`LICENSEKEY=ABC-DEF-...`,
-# `SERIAL=SN-12345-...`, `sk_live_abc123`, `01234567890abc`,
-# `KEY-AAA-BBB`, `KEY-AAAA-BBBB-CCCC`). These are test-only literals
-# that are themselves what the redaction logic SCRUBS — the test
-# proves they get masked to `[REDACTED]`. The follow-up commit
-# e72a4ec replaced every fixture with low-entropy placeholders
-# (`XXXX-XXXX-...`, `FAKE-APIKEY-...`) and the test now demonstrates
-# the same redaction class without tripping gitleaks generic-api-key
-# entropy or stripe-access-token prefix rules. The two historical
-# commits remain in the PR branch history; gitleaks scans every
-# commit so the ignore fingerprints below cover only those two
-# commits and become unreachable after squash-merge.
-81c47fbd5d530c1cfb9d096b275cc01ae426699e:internal/security/redact_installer_test.go:generic-api-key:67
+# test fixtures with credential-shaped strings are the input that
+# the redaction logic SCRUBS to `[REDACTED]`. Iter-4 commit 7d78eaf
+# replaced everything with the literal "MASKME" so HEAD does not
+# trip the rules, but gitleaks scans every commit on the PR branch
+# in full history mode, and the historical commits 81c47fb / e051c39
+# / e72a4ec / 4919b9f still carry the credential-shaped fixtures.
+# Both findings are tests of the redaction itself; no real secret
+# was ever committed. Fingerprints below were captured from the
+# actual gitleaks run output and become unreachable after squash-
+# merge collapses the PR branch history.
+
+# Iter-0 (original commit) generic-api-key findings on
+# `LICENSEKEY=ABC-DEF-123-XYZ` / `SERIAL=SN-12345-XYZ` /
+# `apikey=sk_live_abc123` / `ACTIVATION=01234567890abc` lines.
+81c47fbd5d530c1cfb9d096b275cc01ae426699e:internal/security/redact_installer_test.go:generic-api-key:79
 81c47fbd5d530c1cfb9d096b275cc01ae426699e:internal/security/redact_installer_test.go:generic-api-key:74
-81c47fbd5d530c1cfb9d096b275cc01ae426699e:internal/security/redact_installer_test.go:generic-api-key:81
 81c47fbd5d530c1cfb9d096b275cc01ae426699e:internal/security/redact_installer_test.go:generic-api-key:88
-e051c39c7b0c8b2c5e2e8a3e6e8f7e7c8b9e0a1b:internal/security/redact_installer_test.go:generic-api-key:67
-e051c39c7b0c8b2c5e2e8a3e6e8f7e7c8b9e0a1b:internal/security/redact_installer_test.go:generic-api-key:74
-e051c39c7b0c8b2c5e2e8a3e6e8f7e7c8b9e0a1b:internal/security/redact_installer_test.go:generic-api-key:81
-e051c39c7b0c8b2c5e2e8a3e6e8f7e7c8b9e0a1b:internal/security/redact_installer_test.go:generic-api-key:88
+81c47fbd5d530c1cfb9d096b275cc01ae426699e:internal/security/redact_installer_test.go:generic-api-key:67
+
+# Iter-1 widened MSI key allowlist + same fixture pattern.
+e051c39626160628f9187c24b72f6526503a5b36:internal/security/redact_installer_test.go:generic-api-key:142
+e051c39626160628f9187c24b72f6526503a5b36:internal/security/redact_installer_test.go:generic-api-key:79
+e051c39626160628f9187c24b72f6526503a5b36:internal/security/redact_installer_test.go:generic-api-key:74
+e051c39626160628f9187c24b72f6526503a5b36:internal/security/redact_installer_test.go:generic-api-key:88
+
+# Iter-2 stripe-access-token rule tripped on `sk_test_placeholder`
+# prefix. Fixed in iter-3 (replaced prefix) and iter-4 (MASKME).
 e72a4ec5f0b8dd7155257b48048b7b058ab618b5:internal/security/redact_installer_test.go:stripe-access-token:94
 e72a4ec5f0b8dd7155257b48048b7b058ab618b5:internal/security/redact_installer_test.go:stripe-access-token:96
 e72a4ec5f0b8dd7155257b48048b7b058ab618b5:internal/security/redact_installer_test.go:stripe-access-token:160
 e72a4ec5f0b8dd7155257b48048b7b058ab618b5:internal/security/redact_installer_test.go:stripe-access-token:162
+
+# Iter-3 replaced sk_test_ prefix with FAKE-APIKEY-PLACEHOLDER but
+# generic-api-key still tripped on the remaining test fixtures.
+4919b9fc9a37a574d44ede538c767489fb6fc933:internal/security/redact_installer_test.go:generic-api-key:79
+4919b9fc9a37a574d44ede538c767489fb6fc933:internal/security/redact_installer_test.go:generic-api-key:142
