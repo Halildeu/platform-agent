@@ -776,3 +776,111 @@ commands inherit. The agent-side `RunInstall` derives its own
   that publishes the dual-control `INSTALL_SOFTWARE` issuer, catalog
   snapshot pinning, BE-021A install-preflight integration. AG-027
   ships the canonical wire-shape so BE-022 can adopt it byte-for-byte.
+
+-------------------------------------------------------------------------------
+## 12. AG-030 — Pending Reboot Detection (Faz 22.5.2 posture quartet)
+-------------------------------------------------------------------------------
+
+### 12.1 Scope
+
+Read-only registry probe that answers a single question: "would a
+reboot now clear pending OS-level state?". The probe never triggers
+a reboot, never asks the user, never mutates state. AG-030 is one of
+the four Sprint B P1 posture quartet items (AG-030 + AG-031 + AG-032
++ AG-033) and is the first to land.
+
+### 12.2 Opt-in payload bit
+
+Default `COLLECT_INVENTORY` does NOT invoke the probe. AG-025H
+lightweight guard pattern: the heartbeat / auto-enroll loop never
+opts in. Backend opts in explicitly via:
+
+```json
+{
+  "type": "COLLECT_INVENTORY",
+  "payload": {
+    "includePendingReboot": true
+  }
+}
+```
+
+When omitted or false, `inventory.PendingReboot` is `nil` and the
+wire payload omits the field entirely.
+
+### 12.3 Wire-safe result payload
+
+```json
+{
+  "schemaVersion": 1,
+  "supported": true,
+  "pendingReboot": true,
+  "probeComplete": true,
+  "signals": {
+    "cbsRebootPending": true,
+    "windowsUpdateRebootRequired": false,
+    "pendingFileRenameOperations": false,
+    "computerNameChangePending": false,
+    "updateExeVolatile": true,
+    "netlogonJoinPending": false
+  },
+  "sources": [
+    "CBS_REBOOT_PENDING",
+    "UPDATE_EXE_VOLATILE"
+  ],
+  "probeErrors": [],
+  "probeDurationMs": 12
+}
+```
+
+Boolean precedence (Codex 019e749c iter-1 absorb):
+
+- `pendingReboot` is the OR of all populated `signals` booleans.
+- `probeComplete` is `true` if and only if `probeErrors` is empty.
+  A single read failure flips it to `false` — the caller MUST treat
+  `probeComplete=false` as "evidence incomplete", not "no reboot
+  needed".
+- `supported=false` on non-Windows runtimes carries the
+  `UNSUPPORTED_PLATFORM` error code; `pendingReboot` stays false
+  because there is no positive evidence, but consumers cannot infer
+  "no reboot needed" without `supported=true` AND
+  `probeComplete=true`.
+
+### 12.4 Sources probed (v1)
+
+| Source enum | Registry / file marker |
+|---|---|
+| `CBS_REBOOT_PENDING` | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending` subkey exists (WOW64_64KEY view) |
+| `WINDOWS_UPDATE_REBOOT_REQUIRED` | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired` subkey exists (WOW64_64KEY view) |
+| `PENDING_FILE_RENAME_OPERATIONS` | `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager` `PendingFileRenameOperations` REG_MULTI_SZ present AND non-empty |
+| `COMPUTER_NAME_CHANGE_PENDING` | `HKLM\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName` != `\ComputerName` (case-insensitive + trim-normalized; raw names do NOT leak) |
+| `UPDATE_EXE_VOLATILE` | `HKLM\SOFTWARE\Microsoft\Updates\UpdateExeVolatile` `Flags` REG_DWORD value: missing key/value = false, Flags=0 = false, Flags!=0 = true, non-DWORD = probe error (Codex 019e749c iter-1 P0#4 absorb) |
+| `NETLOGON_JOIN_PENDING` | `HKLM\SYSTEM\CurrentControlSet\Services\Netlogon` `JoinDomain` OR `AvoidSpnSet` value exists |
+
+### 12.5 Security invariants
+
+- **Registry reads only.** No `SetValue`, no `CreateKey`, no
+  `DeleteKey`. Subkey existence checks open with `QUERY_VALUE`
+  permission only.
+- **Raw value contents NEVER leak.** PendingFileRenameOperations
+  entries, ComputerName strings, Netlogon value contents stay on
+  the host. Only the derived bool reaches the wire.
+- **No remediation surface.** The agent reports posture only; the
+  backend / operator decides what to do with `pendingReboot=true`.
+  AG-030 does not expose a "reboot now" command.
+- **64-bit registry view.** `SOFTWARE\...` markers use
+  `WOW64_64KEY` so a 32-bit agent binary still reads the 64-bit
+  hive view. `SYSTEM\...` markers are not subject to redirection.
+
+### 12.6 Known v1 exclusions (planned for future PRs or out of scope)
+
+- **SCCM `CCM_ClientUtilities.DetermineIfRebootPending()`** — out of
+  scope for the agent-only AG-030 v1; depends on SCCM client
+  presence and adds COM/WMI cost.
+- **Office RestartManager / .NET runtime restart / third-party AV
+  reboot markers** — vendor-specific, noisy, LocalSystem-context
+  fragile. Not covered.
+- **`PendingFileRenameOperations2`** — additional MULTI_SZ marker;
+  cheap follow-up candidate but excluded from v1 surface to keep
+  the contract narrow.
+- **`PostRebootReporting`** — same: candidate for v2 widening once
+  v1 telemetry confirms false-positive rate is low.
