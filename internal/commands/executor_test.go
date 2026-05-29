@@ -340,6 +340,35 @@ func TestLocalExecutorBoolPayloadIncludeLocalAdminGroup(t *testing.T) {
 	}
 }
 
+func TestLocalExecutorBoolPayloadIncludeDeviceHealth(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]interface{}
+		wantOn  bool
+	}{
+		{"nil-payload", nil, false},
+		{"missing-key", map[string]interface{}{"includeSoftware": true}, false},
+		{"bool-true", map[string]interface{}{"includeDeviceHealth": true}, true},
+		{"bool-false", map[string]interface{}{"includeDeviceHealth": false}, false},
+		{"string-true", map[string]interface{}{"includeDeviceHealth": "true"}, true},
+		{"string-1", map[string]interface{}{"includeDeviceHealth": "1"}, true},
+		{"string-True", map[string]interface{}{"includeDeviceHealth": "True"}, true},
+		{"string-false", map[string]interface{}{"includeDeviceHealth": "false"}, false},
+		{"string-0", map[string]interface{}{"includeDeviceHealth": "0"}, false},
+		{"int-1", map[string]interface{}{"includeDeviceHealth": 1}, true},
+		{"int-0", map[string]interface{}{"includeDeviceHealth": 0}, false},
+		{"float64-1", map[string]interface{}{"includeDeviceHealth": float64(1)}, true},
+		{"float64-0", map[string]interface{}{"includeDeviceHealth": float64(0)}, false},
+		{"unknown-type", map[string]interface{}{"includeDeviceHealth": []string{"yes"}}, false},
+	}
+	for _, tc := range cases {
+		got := boolPayload(tc.payload, "includeDeviceHealth")
+		if got != tc.wantOn {
+			t.Errorf("%s: boolPayload(includeDeviceHealth) = %v, want %v", tc.name, got, tc.wantOn)
+		}
+	}
+}
+
 func TestLocalExecutorListLocalUsersUnsupportedOutsideWindows(t *testing.T) {
 	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandListLocalUsers}, "test")
 	command := protocol.AgentCommand{

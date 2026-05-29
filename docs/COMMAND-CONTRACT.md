@@ -1298,3 +1298,159 @@ terminal/incomplete-evidence failures only, not telemetry.
   if NetAPI + PowerShell both fail, `sourceUsed=none`. A real
   WMI runner can land without schema change.
 - **BitLocker / Defender / Firewall**: those are AG-031 scope.
+
+---
+
+## 15. AG-033 — Device Health Snapshot (Faz 22.5.2 posture quartet, final item)
+
+The device health probe answers "is this endpoint healthy enough to
+receive a software deployment right now?" — fixed-disk free %,
+physical memory utilization %, system uptime + last boot, and a
+commit/page-file summary. Read-only point-in-time Win32 syscalls; no
+PowerShell, no WMI, no performance-counter sampling.
+
+### 15.1 Relationship to AG-035
+
+- **AG-035** = raw hardware INVENTORY snapshot (static facts:
+  total RAM, disk free bytes, last boot timestamp).
+- **AG-033** = deployment-readiness health DERIVATION snapshot
+  (percentages, warning booleans, uptime duration).
+
+AG-033 has **no runtime dependency** on AG-035: the backend can
+request `includeDeviceHealth=true` with `includeHardware=false`.
+
+### 15.2 Opt-in payload bit
+
+```json
+{ "type": "COLLECT_INVENTORY", "payload": { "includeDeviceHealth": true } }
+```
+
+Default = `false`. Heartbeat / auto-enroll never opt in.
+
+### 15.3 Wire-safe result payload
+
+```json
+{
+  "deviceHealth": {
+    "schemaVersion": 1,
+    "supported": true,
+    "probeComplete": true,
+    "fixedDisks": [
+      {"driveLetter":"C:","totalBytes":511000000000,"freeBytes":256000000000,"freePercent":50,"lowDiskWarning":false}
+    ],
+    "fixedDiskCount": 1,
+    "fixedDisksTruncated": false,
+    "maxFixedDisks": 64,
+    "memory": {
+      "totalPhysicalBytes": 17179869184,
+      "availableBytes": 8589934592,
+      "usedPercent": 50,
+      "highPressureWarning": false,
+      "commitLimitBytes": 34359738368,
+      "commitUsedBytes": 12884901888
+    },
+    "uptime": {
+      "lastBootEpochSec": 1717000000,
+      "uptimeSeconds": 259200,
+      "uptimeDays": 3,
+      "longUptimeWarning": false
+    },
+    "anyLowDisk": false,
+    "sourceUsed": "win32",
+    "probeDurationMs": 4
+  }
+}
+```
+
+- `fixedDisks` ALWAYS serializes as `[]` (never null). `fixedDiskCount`
+  is the pre-truncation observed count; `anyLowDisk` is OR'd over the
+  full pre-truncation enumeration; `fixedDisksTruncated` + `maxFixedDisks`
+  (64) bound the slice.
+- `freeBytes` is `freeBytesAvailableToCaller` (what the agent's
+  LocalSystem context can actually write — the right denominator for
+  a "can this install succeed?" gate).
+- `lastBootEpochSec` is unix seconds (NOT a local-time string) to
+  avoid leaking timezone/locale.
+- `commitLimitBytes` / `commitUsedBytes` are a MEMORYSTATUSEX
+  approximation (ullTotalPageFile / ullAvailPageFile), NOT exact
+  per-pagefile or per-process accounting.
+
+### 15.4 Sources + thresholds
+
+| Source | Syscall | Surfaces |
+|--------|---------|----------|
+| Disk | `GetLogicalDrives` + `GetDriveType` (filter `DRIVE_FIXED`) + `GetDiskFreeSpaceEx` | per-volume drive letter + total + freeToCaller + free% |
+| Memory | `GlobalMemoryStatusEx` (dwLength set) | total/avail phys + dwMemoryLoad (usedPercent) + commit limit/used |
+| Uptime | `DurationSinceBoot` (`GetTickCount64`, uint64 — no 49.7-day rollover) | uptimeSeconds + derived lastBootEpoch + uptimeDays |
+
+Thresholds (const, **not** payload-configurable):
+
+| Constant | Value | Effect |
+|----------|-------|--------|
+| `LowDiskPercentThreshold` | 10 | `freePercent < 10` → `lowDiskWarning` |
+| `LowDiskBytesThreshold` | 2 GiB | `freeBytes < 2GiB` → `lowDiskWarning` |
+| `HighMemoryUsedPercentThreshold` | 90 | `usedPercent > 90` → `highPressureWarning` |
+| `LongUptimeDaysThreshold` | 30 | `uptimeDays > 30` → `longUptimeWarning` |
+
+The backend receives the raw bytes/days too, so it can re-derive
+different thresholds without an agent change.
+
+### 15.5 Failure-mode contract
+
+- **Per-volume failure**: `GetDiskFreeSpaceEx` failure for a volume →
+  `DISK_ENUM_FAILED` probe error + the volume is skipped (NOT emitted
+  as a zero-byte "healthy" row).
+- **Memory failure / zero total**: `GlobalMemoryStatusEx` failure OR
+  `ullTotalPhys==0` → `MEMORY_QUERY_FAILED` + `probeComplete=false`;
+  memory struct stays zero (not emitted as healthy).
+- **Uptime failure / clock skew**: non-positive duration →
+  `UPTIME_QUERY_FAILED`; implausible derived boot epoch (future or
+  ≤0) → `BOOT_TIME_FAILED`; either flips `probeComplete=false`.
+- **No-evidence sentinel**: the aggregate `NO_EVIDENCE` +
+  `sourceUsed=none` fires ONLY when ALL THREE sources came back
+  empty together (`fixedDiskCount == 0` AND
+  `memory.totalPhysicalBytes == 0` AND `uptime.uptimeSeconds == 0`).
+  A host with zero fixed disks but valid memory + uptime does NOT
+  trip the aggregate sentinel; instead the **backend deployment
+  gate** must treat `fixedDiskCount == 0` as not-install-ready on
+  its own (see §15.7 / the deployment-gate guidance), since the
+  agent cannot prove install-target free space without at least one
+  fixed volume. (Codex 019e7500 post-impl clarification: the agent
+  emits the all-empty aggregate sentinel; the zero-disk-only gate
+  is a backend-side policy, not an agent `NO_EVIDENCE`.)
+- `probeComplete` is `true` iff `probeErrors` is empty. A
+  `supported=true` + `probeComplete=false` result MUST NOT be read
+  as deployment-ready. Likewise a `probeComplete=true` result with
+  `fixedDiskCount == 0` MUST NOT be read as install-ready by the
+  backend gate.
+
+### 15.6 Security invariants
+
+- **Read-only point-in-time syscalls**: no `Get-Counter`, no
+  continuous sampling, no per-process enumeration, no WMI
+  perfcounter polling ("no performance-counter spam" boundary).
+- **Identifier suppression**: only the drive letter (validated
+  `^[A-Z]:$` uppercase) reaches the wire. Volume labels, serial
+  numbers, file-system types, mount paths, volume GUIDs, and full
+  paths are NEVER surfaced. The `X:\` form is used only as the
+  syscall argument, never emitted.
+- **No payload-configurable policy**: the payload carries only the
+  `includeDeviceHealth` opt-in bit; thresholds and source selection
+  are not payload-controllable.
+- **Bounded summaries**: error summaries are static phrases (200
+  char cap conceptually; no raw syscall errno dump, no long path).
+- **Overflow-guarded casts**: byte counts are clamped on the
+  uint64→int64 conversion so a pathological value never wraps
+  negative.
+
+### 15.7 Known v1 exclusions
+
+- **CPU utilization / load**: deliberately out of scope (that is
+  the performance-counter territory the plan forbids).
+- **Per-process memory / disk**: out of scope.
+- **Removable / network / RAM-disk volumes**: only `DRIVE_FIXED`
+  is enumerated.
+- **SMART / disk-hardware health**: out of scope (AG-033 is
+  free-space + utilization, not drive-failure prediction).
+- **Per-pagefile breakdown**: only the MEMORYSTATUSEX commit
+  summary is surfaced, not per-pagefile detail.

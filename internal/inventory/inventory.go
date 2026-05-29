@@ -80,6 +80,18 @@ type Snapshot struct {
 	// probe returns Supported=false + ProbeComplete=false +
 	// UNSUPPORTED_PLATFORM. See COMMAND-CONTRACT.md §14.
 	LocalAdminGroup *LocalAdminGroupResult `json:"localAdminGroup,omitempty"`
+
+	// DeviceHealth is intentionally nil unless the caller opted into
+	// the AG-033 device health snapshot via
+	// CollectOptions.IncludeDeviceHealth. The probe reads via direct
+	// Win32 syscalls (GetLogicalDrives + GetDiskFreeSpaceEx +
+	// GlobalMemoryStatusEx + DurationSinceBoot) — no PowerShell, no
+	// WMI, no performance-counter sampling. It surfaces fixed-disk
+	// free %, memory utilization %, uptime/last-boot, and warning
+	// booleans for a pre-deployment health gate. On non-Windows
+	// runtimes the probe returns Supported=false + ProbeComplete=false
+	// + UNSUPPORTED_PLATFORM. See COMMAND-CONTRACT.md §15.
+	DeviceHealth *DeviceHealthResult `json:"deviceHealth,omitempty"`
 }
 
 // CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
@@ -201,6 +213,27 @@ type CollectOptions struct {
 	// bool scope/risk flags + count totals + bounded Members
 	// slice (cap=256, MembersTruncated when exceeded).
 	IncludeLocalAdminGroup bool
+
+	// IncludeDeviceHealth gates the AG-033 device health snapshot.
+	// When true, CollectWithOptions invokes ProbeDeviceHealth
+	// (direct Win32 syscalls on Windows; a Supported=false stub on
+	// every other platform) and attaches the result to
+	// Snapshot.DeviceHealth. When false (the default), the probe is
+	// not invoked and the wire payload omits the field.
+	//
+	// The backend uses true via COLLECT_INVENTORY's
+	// includeDeviceHealth payload bit when a pre-deployment health
+	// gate is being evaluated. Heartbeat / auto-enroll /
+	// lightweight inventory never opt in.
+	//
+	// HARD BOUNDARY: read-only point-in-time syscalls. No
+	// performance-counter sampling, no per-process enumeration, no
+	// continuous polling. Volume labels / serial numbers /
+	// file-system types / mount paths / volume GUIDs are NEVER
+	// surfaced — only the drive letter + byte totals + derived
+	// percent/warning. Health thresholds are const, not
+	// payload-configurable.
+	IncludeDeviceHealth bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -256,7 +289,22 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		lag := collectLocalAdminGroupForSnapshot(now)
 		snapshot.LocalAdminGroup = &lag
 	}
+	if opts.IncludeDeviceHealth {
+		dh := collectDeviceHealthForSnapshot(now)
+		snapshot.DeviceHealth = &dh
+	}
 	return snapshot
+}
+
+// collectDeviceHealthForSnapshot is the test seam for the AG-033
+// device health probe. Production wires the real ProbeDeviceHealth
+// with time.Now (NOT the snapshot's frozen CollectedAt) so
+// ProbeDurationMs measures real elapsed wall-clock and the uptime
+// last-boot epoch derivation uses the real wall-clock. Tests
+// override it to assert default-omit / opt-in / non-Windows stub
+// behavior without invoking real syscalls.
+var collectDeviceHealthForSnapshot = func(_ time.Time) DeviceHealthResult {
+	return ProbeDeviceHealth(context.Background(), time.Now)
 }
 
 // collectLocalAdminGroupForSnapshot is the test seam for the
