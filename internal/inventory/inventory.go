@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -45,6 +46,17 @@ type Snapshot struct {
 	// backend can persist evidence of "agent does not support hardware
 	// probe here" instead of treating the absence as a failed ingest.
 	Hardware *Hardware `json:"hardware,omitempty"`
+
+	// PendingReboot is intentionally nil unless the caller opted into
+	// the AG-030 pending-reboot probe via
+	// CollectOptions.IncludePendingReboot. The probe is registry-only
+	// and cheap, but the AG-025H lightweight contract still applies —
+	// heartbeat / auto-enroll never opt in. On non-Windows runtimes
+	// the probe returns Supported=false + ProbeComplete=false + a
+	// single UNSUPPORTED_PLATFORM error entry (the structured "no
+	// positive evidence + evidence incomplete" pair); callers MUST
+	// NOT infer "no reboot needed" from a non-Windows result.
+	PendingReboot *PendingRebootResult `json:"pendingReboot,omitempty"`
 }
 
 // CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
@@ -104,6 +116,27 @@ type CollectOptions struct {
 	// administrator credential required beyond what the agent already
 	// runs under (LocalSystem on Windows).
 	IncludeHardware bool
+
+	// IncludePendingReboot gates the AG-030 pending-reboot probe.
+	// When true, CollectWithOptions invokes ProbePendingReboot and
+	// attaches the result to Snapshot.PendingReboot. When false (the
+	// default), the probe is not invoked and the wire payload omits
+	// the field.
+	//
+	// The backend uses true via COLLECT_INVENTORY's
+	// includePendingReboot payload bit when a posture refresh is
+	// requested (Sprint B P1 visibility expansion, pre-install
+	// evidence collection, scheduled posture sweep). Heartbeat /
+	// auto-enroll / lightweight inventory never opt in.
+	//
+	// HARD BOUNDARY: the probe is read-only by construction. It
+	// opens registry handles with QUERY_VALUE | WOW64_64KEY and
+	// never sets, creates, or deletes a key. Raw value contents
+	// (PendingFileRenameOperations entries, computer-name strings)
+	// are NEVER surfaced to the wire — only the derived signal
+	// booleans. There is no remediation surface and no reboot
+	// trigger; the agent only reports posture.
+	IncludePendingReboot bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -147,7 +180,20 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		hw := collectHardwareForSnapshot(now)
 		snapshot.Hardware = &hw
 	}
+	if opts.IncludePendingReboot {
+		pr := collectPendingRebootForSnapshot(now)
+		snapshot.PendingReboot = &pr
+	}
 	return snapshot
+}
+
+// collectPendingRebootForSnapshot is the test seam for the AG-030
+// pending-reboot probe. Production wires the real
+// ProbePendingReboot (Windows registry reads + cross-platform
+// stub); tests override it to assert default-omit / opt-in /
+// unsupported-stub behavior without touching the host registry.
+var collectPendingRebootForSnapshot = func(now time.Time) PendingRebootResult {
+	return ProbePendingReboot(context.Background(), func() time.Time { return now })
 }
 
 // collectSoftwareSummary runs the software inventory + winget readiness

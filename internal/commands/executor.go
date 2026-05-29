@@ -76,6 +76,13 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// Backend opts in explicitly via COLLECT_INVENTORY payload
 			// when a hardware snapshot is being requested.
 			IncludeHardware: boolPayload(command.Payload, "includeHardware"),
+			// AG-030 — opt-in pending-reboot probe. Defaults to false
+			// so the AG-025H lightweight heartbeat / auto-enroll
+			// contract pays neither the registry read nor the
+			// computer-name comparison cost. Backend opts in
+			// explicitly via COLLECT_INVENTORY's includePendingReboot
+			// payload bit when a posture refresh is requested.
+			IncludePendingReboot: boolPayload(command.Payload, "includePendingReboot"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"
