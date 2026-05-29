@@ -209,6 +209,215 @@ func TestRunnerEnrollPersistsCredential(t *testing.T) {
 	}
 }
 
+// TestRunnerReEnrollOn401ExactlyOnce verifies the AG-026D Codex 019e7314
+// iter-1 must_fix #3 acceptance: when a persisted credential triggers a
+// 401 on heartbeat, the runner runs exactly one re-enrollment, the new
+// credential is persisted, the second heartbeat returns 2xx, and the
+// store is never auto-Invalidated.
+func TestRunnerReEnrollOn401ExactlyOnce(t *testing.T) {
+	store := &fakeCredStore{
+		stored: hmacstore.Credential{
+			DeviceID:        "device-srb",
+			CredentialKeyID: "edc_old",
+			Secret:          "secret-old",
+			Issued:          time.Now(),
+		},
+		hasStored: true,
+	}
+
+	var heartbeats, enrolls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/enrollments/consume"):
+			atomic.AddInt32(&enrolls, 1)
+			json.NewEncoder(w).Encode(protocol.EnrollResponse{
+				DeviceID:        "device-srb",
+				CredentialKeyID: "edc_new",
+				Secret:          "secret-new",
+				ServerTime:      time.Now().UTC(),
+			})
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			n := atomic.AddInt32(&heartbeats, 1)
+			if n == 1 {
+				http.Error(w, `{"error":"Invalid credential"}`, http.StatusUnauthorized)
+				return
+			}
+			json.NewEncoder(w).Encode(protocol.HeartbeatResponse{
+				Accepted: true,
+				DeviceID: "device-srb",
+				Status:   "ENROLLED",
+			})
+		case strings.HasSuffix(r.URL.Path, "/commands/next"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.APIURL = srv.URL + "/api/v1/endpoint-agent"
+	cfg.EnrollmentToken = "fresh-token"
+	client, err := protocol.NewClient(cfg.APIURL, "", nil)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	r := NewRunner(cfg, client, nil)
+	r.CredStore = store
+
+	if err := r.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&enrolls); got != 1 {
+		t.Errorf("enroll calls = %d, want exactly 1", got)
+	}
+	if got := atomic.LoadInt32(&heartbeats); got != 2 {
+		t.Errorf("heartbeat calls = %d, want exactly 2 (401 + 2xx)", got)
+	}
+	if atomic.LoadInt32(&store.invalidates) != 0 {
+		t.Error("401 re-enroll path must NOT Invalidate the store (Codex constraint #4)")
+	}
+	if !store.hasStored || store.stored.CredentialKeyID != "edc_new" {
+		t.Errorf("store must hold the new credential, got %+v", store.stored)
+	}
+	if client.CredentialID() != "edc_new" {
+		t.Errorf("client credentialID = %q, want edc_new", client.CredentialID())
+	}
+}
+
+// TestRunnerNoReEnrollWithoutToken verifies the AG-026D Codex 019e7314
+// iter-1 must_fix #3: a 401 with NO enrollment token in env must
+// surface the original 401 fail-closed and not delete the persisted
+// blob.
+func TestRunnerNoReEnrollWithoutToken(t *testing.T) {
+	store := &fakeCredStore{
+		stored: hmacstore.Credential{
+			DeviceID:        "device-srb",
+			CredentialKeyID: "edc_old",
+			Secret:          "secret-old",
+			Issued:          time.Now(),
+		},
+		hasStored: true,
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/heartbeat") {
+			http.Error(w, `{"error":"Invalid credential"}`, http.StatusUnauthorized)
+			return
+		}
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.APIURL = srv.URL + "/api/v1/endpoint-agent"
+	// No EnrollmentToken: re-enroll path is blocked, original 401 must surface.
+	client, err := protocol.NewClient(cfg.APIURL, "", nil)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	r := NewRunner(cfg, client, nil)
+	r.CredStore = store
+
+	if err := r.RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce must surface the 401 when no token is available for re-enroll")
+	} else if !protocol.IsUnauthorized(err) {
+		t.Errorf("error must remain 401-typed (got %v)", err)
+	}
+	if atomic.LoadInt32(&store.invalidates) != 0 {
+		t.Error("401 with no token must NOT Invalidate the store")
+	}
+}
+
+// TestRunnerHeartbeatAcceptedFalseFailClosed verifies the AG-026D Codex
+// 019e7314 iter-1 must_fix #2: accepted=false MUST fail-closed and
+// prevent command poll.
+func TestRunnerHeartbeatAcceptedFalseFailClosed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/enrollments/consume"):
+			json.NewEncoder(w).Encode(protocol.EnrollResponse{
+				DeviceID:        "device-srb",
+				CredentialKeyID: "edc_abc",
+				Secret:          "secret-srb",
+				ServerTime:      time.Now().UTC(),
+			})
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			json.NewEncoder(w).Encode(protocol.HeartbeatResponse{
+				Accepted: false,
+				DeviceID: "device-srb",
+				Status:   "REJECTED",
+			})
+		case strings.HasSuffix(r.URL.Path, "/commands/next"):
+			t.Fatal("command poll must NOT run when heartbeat accepted=false")
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.APIURL = srv.URL + "/api/v1/endpoint-agent"
+	cfg.EnrollmentToken = "fresh-token"
+	client, err := protocol.NewClient(cfg.APIURL, "", nil)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	r := NewRunner(cfg, client, nil)
+	r.CredStore = &fakeCredStore{}
+
+	if err := r.RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce must fail-closed on accepted=false")
+	} else if !strings.Contains(err.Error(), "accepted=false") {
+		t.Errorf("error must mention accepted=false, got %v", err)
+	}
+}
+
+// TestRunnerHeartbeatDeviceMismatchFailClosed verifies the AG-026D
+// Codex 019e7314 iter-1 must_fix #2: response.DeviceID different from
+// r.Config.DeviceID MUST fail-closed.
+func TestRunnerHeartbeatDeviceMismatchFailClosed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/enrollments/consume"):
+			json.NewEncoder(w).Encode(protocol.EnrollResponse{
+				DeviceID:        "device-srb",
+				CredentialKeyID: "edc_abc",
+				Secret:          "secret-srb",
+				ServerTime:      time.Now().UTC(),
+			})
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			json.NewEncoder(w).Encode(protocol.HeartbeatResponse{
+				Accepted: true,
+				DeviceID: "device-other",
+				Status:   "ENROLLED",
+			})
+		case strings.HasSuffix(r.URL.Path, "/commands/next"):
+			t.Fatal("command poll must NOT run on device mismatch")
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.APIURL = srv.URL + "/api/v1/endpoint-agent"
+	cfg.EnrollmentToken = "fresh-token"
+	client, err := protocol.NewClient(cfg.APIURL, "", nil)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	r := NewRunner(cfg, client, nil)
+	r.CredStore = &fakeCredStore{}
+
+	if err := r.RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce must fail-closed on device mismatch")
+	} else if !strings.Contains(err.Error(), "device_id mismatch") {
+		t.Errorf("error must mention device_id mismatch, got %v", err)
+	}
+}
+
 // TestRunnerEnrollSurvivesPersistFailure ensures Codex 019e7314 constraint:
 // when the credential store write fails (ErrUnsupportedOS, ACL error,
 // disk full), the runner still completes the enroll path with in-memory

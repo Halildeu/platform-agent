@@ -33,11 +33,22 @@ type Runner struct {
 	StateTracker *state.Tracker
 	Logger       *log.Logger
 	// CredStore persists the HMAC device credential across service
-	// restarts (AG-026D). When nil, the runner falls back to the
-	// in-memory-only model: every cold start needs a fresh enrollment
-	// token. Production Windows wiring populates this with
-	// *hmacstore.Store; non-Windows tests and CI builds leave it nil.
+	// restarts (AG-026D). On non-Windows builds the store returns
+	// hmacstore.ErrUnsupportedOS for Read/Write; the runner treats
+	// that as "persistence disabled — env-token enroll on every cold
+	// start". Production Windows wiring populates this with
+	// *hmacstore.Store.
 	CredStore CredentialStore
+	// credentialPersisted records whether the credential currently
+	// held by Client was successfully written to the on-disk store
+	// during the most recent enroll() call in THIS process lifetime.
+	// Codex 019e7314 iter-1 must_fix #1: the "hmac credential
+	// confirmed" sentinel the AG-026C installer gate keys on MUST
+	// reflect "persisted AND heartbeat-accepted", not heartbeat
+	// success alone. When false (hydrate-from-store cold start or
+	// persist-failed enroll), heartbeat emits a degraded "credential
+	// accepted (not persisted)" sentinel that the installer ignores.
+	credentialPersisted bool
 }
 
 func NewRunner(cfg config.Config, client *protocol.Client, logger *log.Logger) *Runner {
@@ -179,6 +190,11 @@ func (r *Runner) hydrateFromStore(ctx context.Context) {
 	r.Config.CredentialID = cred.CredentialKeyID
 	r.Config.Secret = cred.Secret
 	r.Config.DeviceID = cred.DeviceID
+	// Hydrate-from-store does NOT count as "persisted in this process":
+	// the store wrote the blob in a previous process. credentialPersisted
+	// stays false so the heartbeat sentinel does not double-confirm a
+	// blob we did not produce. Codex 019e7314 iter-1 must_fix #1.
+	r.credentialPersisted = false
 	r.logf("hmac credential loaded from store device=%s credential=%s", cred.DeviceID, cred.CredentialKeyID)
 }
 
@@ -200,17 +216,20 @@ func (r *Runner) enroll(ctx context.Context) error {
 	r.Config.CredentialID = response.CredentialKeyID
 	r.Config.Secret = response.Secret
 	r.Config.DeviceID = response.DeviceID
+	// Reset before attempting persist — a previous successful enroll in
+	// the same process must not leak its persisted state into the new
+	// credential's sentinel.
+	r.credentialPersisted = false
 	r.logf("agent enrolled: device=%s credential=%s", response.DeviceID, response.CredentialKeyID)
 
-	// AG-026D: persist before returning so the first heartbeat already
-	// runs against the on-disk record. A persistence failure is NOT
-	// fatal — in-memory credentials still work for the current process
-	// lifetime; the operator sees a sentinel log and can re-run
-	// installation. Codex 019e7314 constraint #5: the "credential
-	// confirmed" signal the AG-026C installer waits on is the
-	// `hmac credential confirmed` line below, emitted only after both
-	// persistence and the first signed heartbeat in this iteration
-	// succeed.
+	// AG-026D Codex 019e7314 constraint #5 (iter-1 must_fix #1
+	// tightened): persist before returning so the first heartbeat
+	// already runs against the on-disk record. A persistence failure is
+	// NOT fatal — in-memory credentials still work for the current
+	// process lifetime — but it MUST NOT promote to the "hmac
+	// credential confirmed" sentinel that the AG-026C installer keys
+	// the token-cleanup gate on; r.credentialPersisted stays false so
+	// heartbeat falls back to the degraded sentinel below.
 	if r.CredStore != nil {
 		cred := hmacstore.Credential{
 			DeviceID:        response.DeviceID,
@@ -225,6 +244,8 @@ func (r *Runner) enroll(ctx context.Context) error {
 			} else {
 				r.logf("hmac credential persist failed (in-memory only — next restart will need fresh token): %v", err)
 			}
+		} else {
+			r.credentialPersisted = true
 		}
 	}
 	return nil
@@ -246,19 +267,30 @@ func (r *Runner) heartbeat(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// AG-026D Codex 019e7314 constraint #5: "credential confirmed"
-	// requires DPAPI write + signed heartbeat HTTP 2xx + accepted=true +
-	// (when present) deviceId match. The persist log above runs after
-	// enroll succeeds; this log only emits after the FIRST signed
-	// heartbeat acknowledges the credential. The AG-026C installer
-	// validation gate keys on this stable, non-secret sentinel line.
-	if response.Accepted {
-		if response.DeviceID == "" || response.DeviceID == r.Config.DeviceID {
-			r.logf("hmac credential confirmed device=%s credential=%s", r.Config.DeviceID, r.Config.CredentialID)
-		} else {
-			r.logf("heartbeat accepted but device_id mismatch local=%s backend=%s — investigation required",
-				r.Config.DeviceID, response.DeviceID)
-		}
+	// AG-026D Codex 019e7314 constraint #5 + iter-1 must_fix #2:
+	// "credential confirmed" requires DPAPI write success in THIS
+	// process + signed heartbeat HTTP 2xx + accepted=true +
+	// (when present) deviceId match. Accept=false and device mismatch
+	// are FAIL-CLOSED — the runner must NOT continue into command
+	// poll when the backend has explicitly disowned this credential.
+	// Aligned with the auto-enroll heartbeat contract.
+	if !response.Accepted {
+		return fmt.Errorf("backend rejected heartbeat: accepted=false (credential likely revoked)")
+	}
+	if response.DeviceID != "" && response.DeviceID != r.Config.DeviceID {
+		return fmt.Errorf("backend heartbeat device_id mismatch local=%s backend=%s",
+			r.Config.DeviceID, response.DeviceID)
+	}
+	if r.credentialPersisted {
+		r.logf("hmac credential confirmed device=%s credential=%s", r.Config.DeviceID, r.Config.CredentialID)
+	} else {
+		// Hydrate-from-store path or persist-failed enroll. The
+		// credential is valid in-memory but the AG-026C installer
+		// token-cleanup gate keys on the "confirmed" sentinel above,
+		// which we deliberately withhold here to avoid premature
+		// cleanup based on an unpersisted credential.
+		r.logf("hmac credential accepted (not persisted in this process) device=%s credential=%s",
+			r.Config.DeviceID, r.Config.CredentialID)
 	}
 	return nil
 }
