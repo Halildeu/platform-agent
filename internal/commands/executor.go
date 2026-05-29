@@ -83,6 +83,15 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// explicitly via COLLECT_INVENTORY's includePendingReboot
 			// payload bit when a posture refresh is requested.
 			IncludePendingReboot: boolPayload(command.Payload, "includePendingReboot"),
+			// AG-031 — opt-in endpoint security posture probe.
+			// Defaults to false so the AG-025H lightweight heartbeat /
+			// auto-enroll contract pays neither the PowerShell startup
+			// nor the Get-MpComputerStatus / Get-NetFirewallProfile /
+			// Get-BitLockerVolume / Get-CimInstance cost. Backend opts
+			// in explicitly via COLLECT_INVENTORY's
+			// includeSecurityPosture payload bit when a Sprint B
+			// posture refresh is requested.
+			IncludeSecurityPosture: boolPayload(command.Payload, "includeSecurityPosture"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"

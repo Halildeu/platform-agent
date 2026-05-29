@@ -884,3 +884,211 @@ Boolean precedence (Codex 019e749c iter-1 absorb):
   the contract narrow.
 - **`PostRebootReporting`** — same: candidate for v2 widening once
   v1 telemetry confirms false-positive rate is low.
+
+---
+
+## 13. AG-031 — Endpoint Security Posture (Faz 22.5.2 posture quartet)
+
+The endpoint security posture probe answers the question "what
+state are the host's security controls in right now?" — without
+ever touching them. It runs once per opt-in COLLECT_INVENTORY and
+returns a wire-safe roll-up covering antivirus, host-based firewall
+and drive encryption.
+
+### 13.1 Scope
+
+The probe is strictly **read-only**:
+
+- It NEVER enables or disables a control (no Set-MpPreference, no
+  Enable-NetFirewallProfile, no Manage-bde, no policy push).
+- It NEVER runs a sample scan, decrypts a volume, or exports a
+  recovery key.
+- It NEVER surfaces vendor product names, drive identifiers
+  (letters, mountpoints, volume GUIDs), recovery passwords or key
+  protector contents on the wire.
+
+It answers the posture question: "is Defender on / off / unknown,
+is the firewall on per-profile with block-by-default, is the system
+drive encrypted, how many data drives are encrypted out of how
+many."
+
+### 13.2 Opt-in payload bit
+
+`COLLECT_INVENTORY` accepts an opt-in bit:
+
+```json
+{
+  "type": "COLLECT_INVENTORY",
+  "payload": { "includeSecurityPosture": true }
+}
+```
+
+Default = `false`. Heartbeat / auto-enroll never opt in; the
+AG-025H lightweight contract stays cheap.
+
+### 13.3 Wire-safe result payload
+
+`Snapshot.securityPosture` is omitted unless the caller opted in.
+When present:
+
+```json
+{
+  "securityPosture": {
+    "schemaVersion": 1,
+    "supported": true,
+    "probeComplete": true,
+    "antivirus": {
+      "microsoftDefender": {
+        "present": true,
+        "antivirusEnabled": true,
+        "realTimeProtectionEnabled": true,
+        "signatureAgeDays": 0,
+        "engineVersionPresent": true,
+        "tamperProtected": true
+      },
+      "nonMicrosoftAvPresent": false,
+      "avProductCount": 1
+    },
+    "firewall": {
+      "domain":  { "enabled": true, "defaultInboundAction": "BLOCK" },
+      "private": { "enabled": true, "defaultInboundAction": "BLOCK" },
+      "public":  { "enabled": true, "defaultInboundAction": "BLOCK" }
+    },
+    "bitlocker": {
+      "systemDrivePresent": true,
+      "systemDriveEncrypted": true,
+      "systemDriveProtected": true,
+      "systemDriveEncryptionActive": false,
+      "dataDriveCount": 0,
+      "encryptedDataDriveCount": 0,
+      "protectedDataDriveCount": 0,
+      "suspendedDriveCount": 0
+    },
+    "probeDurationMs": 1234
+  }
+}
+```
+
+Tri-state semantics (Codex 019e74c3 iter-2 + iter-3 absorb — doc
+distinguishes "successful zero readout" from "source unavailable"
+without overclaiming per-field null-to-probeComplete mapping):
+
+- `antivirusEnabled`, `realTimeProtectionEnabled`, `tamperProtected`,
+  `nonMicrosoftAvPresent` are **nullable booleans**.
+  - `null` means **the source did not return a usable value for
+    this field**. Possible causes: the source-level cmdlet
+    succeeded but the property was missing on the returned object
+    (PSObject property guard); the source-level cmdlet failed
+    (surfaced via a typed `probeErrors[]` entry — `ACCESS_DENIED`,
+    `CMDLET_UNAVAILABLE`, `POWERSHELL_FAILED`); or the cmdlet was
+    not present on the host. **Note**: a per-field `null` does NOT
+    by itself guarantee an entry in `probeErrors[]`. Source-level
+    read failures (catch-block paths like SecurityCenter2 failure,
+    the `NO_EVIDENCE` fail-closed guard) always append a structured
+    error and flip `probeComplete=false`, but a single missing
+    Defender property does not.
+  - `false` means **the source ran successfully and the control is
+    off / not present**. Canonical examples:
+    - `nonMicrosoftAvPresent=false` + `avProductCount=0` =
+      SecurityCenter2 cmdlet succeeded with zero AV products
+      registered (distinguished from cmdlet failure, which is
+      `null/null` + a `probeErrors[]` entry).
+    - `antivirusEnabled=false` = Defender installed but disabled.
+  - Operators MUST NOT collapse `null` to `false` — they carry
+    different semantics. Backend consumers should treat per-field
+    `null` as "unknown for this signal" rather than negative
+    posture, and rely on `probeComplete` only for **source-level**
+    read completeness.
+- `signatureAgeDays`, `avProductCount` are nullable integers with
+  the same semantics: `null` = unavailable / no usable value;
+  numeric value (including `0`) = successful readout. The same
+  source-level vs per-field caveat applies — a `null` integer here
+  does not by itself guarantee `probeComplete=false`.
+- `probeComplete` is **source-level read completeness**: `true` iff
+  `probeErrors` is empty. Source-level failures (a sub-source try
+  block falling through to its catch, the `NO_EVIDENCE`
+  fail-closed guard) always append a structured error and flip
+  `probeComplete=false`. Per-field nulls that did not trigger a
+  source-level failure leave `probeComplete=true` intact;
+  consumers MUST treat such fields as "unknown" rather than infer
+  posture from the absence of a value.
+
+### 13.4 Sources probed (v1)
+
+| Source         | Cmdlet                                                   | Surfaces                                                                                                       |
+| -------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Defender       | `Get-MpComputerStatus`                                   | `present`, `antivirusEnabled`, `realTimeProtectionEnabled`, `signatureAgeDays`, `engineVersionPresent`, `tamperProtected` |
+| SecurityCenter | `Get-CimInstance -Namespace root\SecurityCenter2 AntiVirusProduct` | `nonMicrosoftAvPresent`, `avProductCount` (count only — never `displayName`)                          |
+| Firewall       | `Get-NetFirewallProfile`                                 | per-profile `enabled` + `defaultInboundAction` ∈ {`ALLOW`, `BLOCK`, `UNKNOWN`}                                 |
+| BitLocker      | `Get-BitLockerVolume`                                    | system-drive booleans + data-drive counts (`dataDriveCount`, `encryptedDataDriveCount`, `protectedDataDriveCount`, `suspendedDriveCount`) |
+
+All four sources run inside a single PowerShell process under
+`-NoProfile -NonInteractive` with a pinned script and a 30-second
+deadline. The script is reviewed once and embedded in the build;
+no payload-supplied substitution, no `Invoke-Expression`, no
+shell. `netsh` is intentionally NOT used (AG-035 PowerShell-only
+pattern; Codex 019e74b5 iter-0 must-fix #7).
+
+### 13.5 Failure-mode contract (Codex 019e74c3 iter-1 absorb)
+
+- **No-evidence fail-closed guard.** A `null` / `{}` PowerShell
+  payload now triggers a `NO_EVIDENCE` probe error before
+  `probeComplete` is derived; backend never sees "ran but probed
+  nothing" as `probeComplete=true` (MF-2).
+- **Source enum allowlist.** PowerShell error sources are mapped
+  through `normalizeSecuritySource` — only `defender`,
+  `securityCenter`, `firewall`, `bitlocker`, `powershell` are
+  honoured. Unknown / blank / lower-cased `securitycenter` collapse
+  to the `powershell` catch-all so the typed enum surface is never
+  violated (MF-1).
+- **SecurityCenter2 explicit failure detection.** The
+  `Get-CimInstance root\SecurityCenter2 AntiVirusProduct` call uses
+  `-ErrorAction Stop` so namespace-missing / access-denied / CIM
+  failure paths throw to the catch block and emit
+  `ACCESS_DENIED` / `CMDLET_UNAVAILABLE` / `POWERSHELL_FAILED` —
+  distinct from "cmdlet succeeded with zero products"
+  (`nonMicrosoftAvPresent=false`, `avProductCount=0`) (MF-3).
+- **Summary control-char normalization.** `boundSummary` strips
+  NUL / BEL / ESC / DEL etc. and folds CR/LF/TAB to single spaces
+  (in addition to the 200-char cap) so downstream consumers
+  (audit log, UI, alerting) cannot be tripped by stray control
+  bytes in error summaries.
+
+### 13.6 Security invariants
+
+- **Read-only argv pin.** Pinned argv:
+  `powershell.exe -NoProfile -NonInteractive -Command <pinned script>`.
+  Payload bits cannot reach the PowerShell invocation; they only
+  flip the opt-in.
+- **No identifier leak.** The PowerShell script's `ConvertTo-Json`
+  output is an allowlist `PSCustomObject` — drive letters,
+  mountpoints, volume GUIDs, key protectors, recovery passwords,
+  AV vendor display names, AV install paths, and firewall rule
+  names are NEVER built into the output. The Go-side normalizer
+  only consumes the allowlisted fields and drops anything else.
+- **Bounded summaries.** Source error summaries are capped at 200
+  characters; raw exception dumps and registry / CIM values never
+  reach `probeErrors[*].summary`.
+- **Tri-state honored.** A failed cmdlet leaves the matching
+  nullable field at `null` and appends a typed `probeErrors[*]`
+  entry. The agent never fabricates a `false` value to fill the
+  shape.
+- **Posture, never remediation.** There is no remediation surface
+  in AG-031. The backend / operator decides what to do with the
+  posture readout.
+
+### 13.7 Known v1 exclusions (planned for future PRs or out of scope)
+
+- **EDR / MDE telemetry posture.** Microsoft Defender for Endpoint
+  onboarding state, sensor health, organization id — deferred to
+  a dedicated AG-039 EDR posture probe (Sprint C scope).
+- **Application Control / WDAC / AppLocker policy state.** Deferred
+  to AG-040 (Sprint C).
+- **Credential Guard / HVCI / VBS attestation.** Deferred to
+  AG-041 (Sprint D).
+- **Drive identifier surfacing.** Out of scope — drive letters,
+  GUIDs, recovery passwords are a HARD BOUNDARY.
+- **Third-party AV vendor enumeration.** SecurityCenter2 returns a
+  count + presence boolean only; the `displayName` field is read
+  to derive `nonMicrosoftAvPresent` but is NEVER passed to the
+  wire payload.

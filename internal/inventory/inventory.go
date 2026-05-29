@@ -57,6 +57,18 @@ type Snapshot struct {
 	// positive evidence + evidence incomplete" pair); callers MUST
 	// NOT infer "no reboot needed" from a non-Windows result.
 	PendingReboot *PendingRebootResult `json:"pendingReboot,omitempty"`
+
+	// SecurityPosture is intentionally nil unless the caller opted into
+	// the AG-031 endpoint security posture probe via
+	// CollectOptions.IncludeSecurityPosture. The probe shells out to
+	// powershell.exe (Get-MpComputerStatus + Get-CimInstance
+	// SecurityCenter2 + Get-NetFirewallProfile + Get-BitLockerVolume)
+	// once, with a 30-second deadline, and emits a wire-safe roll-up
+	// covering antivirus, host firewall and drive encryption. On
+	// non-Windows runtimes the probe returns Supported=false +
+	// ProbeComplete=false + UNSUPPORTED_PLATFORM error; callers MUST
+	// NOT infer "host is unprotected" from a non-Windows result.
+	SecurityPosture *SecurityPostureResult `json:"securityPosture,omitempty"`
 }
 
 // CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
@@ -137,6 +149,30 @@ type CollectOptions struct {
 	// booleans. There is no remediation surface and no reboot
 	// trigger; the agent only reports posture.
 	IncludePendingReboot bool
+
+	// IncludeSecurityPosture gates the AG-031 endpoint security
+	// posture probe. When true, CollectWithOptions invokes
+	// ProbeSecurityPosture and attaches the result to
+	// Snapshot.SecurityPosture. When false (the default), the probe
+	// is not invoked and the wire payload omits the field.
+	//
+	// The backend uses true via COLLECT_INVENTORY's
+	// includeSecurityPosture payload bit when a posture refresh is
+	// requested (Sprint B P1 visibility expansion AG-031, pre-install
+	// evidence collection, scheduled posture sweep). Heartbeat /
+	// auto-enroll / lightweight inventory never opt in.
+	//
+	// HARD BOUNDARY: the probe is read-only by construction. It runs
+	// one PowerShell process with `-NoProfile -NonInteractive`, a
+	// pinned script, and no payload-supplied substitution. The script
+	// only calls reader cmdlets (Get-MpComputerStatus,
+	// Get-CimInstance root\SecurityCenter2, Get-NetFirewallProfile,
+	// Get-BitLockerVolume); no Set-/Disable-/Enable-/Add-/Remove-
+	// cmdlet appears in the source. Drive letters, mountpoints,
+	// volume GUIDs, recovery passwords, key protectors, and
+	// third-party AV product names are NEVER surfaced to the wire —
+	// only counts, booleans and bounded enum values.
+	IncludeSecurityPosture bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -184,7 +220,26 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		pr := collectPendingRebootForSnapshot(now)
 		snapshot.PendingReboot = &pr
 	}
+	if opts.IncludeSecurityPosture {
+		sp := collectSecurityPostureForSnapshot(now)
+		snapshot.SecurityPosture = &sp
+	}
 	return snapshot
+}
+
+// collectSecurityPostureForSnapshot is the test seam for the AG-031
+// security posture probe. Production wires the real
+// ProbeSecurityPosture (PowerShell on Windows + cross-platform
+// stub); tests override it to assert default-omit / opt-in /
+// unsupported-stub behavior without spawning a PowerShell process.
+//
+// As with collectPendingRebootForSnapshot, production must NOT pin
+// the probe clock to the snapshot's `CollectedAt` value, otherwise
+// the probe's start and end measurements both read the same
+// constant and probeDurationMs is always 0. Wire the real time.Now
+// into the probe so the duration ms is meaningful elapsed wall-clock.
+var collectSecurityPostureForSnapshot = func(_ time.Time) SecurityPostureResult {
+	return ProbeSecurityPosture(context.Background(), time.Now)
 }
 
 // collectPendingRebootForSnapshot is the test seam for the AG-030
