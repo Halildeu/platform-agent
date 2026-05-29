@@ -306,6 +306,13 @@ func resolveMachineDomainSid() (*windows.SID, error) {
 	return domainSid, nil
 }
 
+// lookupSidAccount wraps (*windows.SID).LookupAccount(""). Exposed
+// as a package-level variable so unit tests can stub it
+// deterministically. Production wires the real syscall.
+var lookupSidAccount = func(sid *windows.SID) (string, string, uint32, error) {
+	return sid.LookupAccount("")
+}
+
 // classifiedSID couples the wire-visible LocalAdminMember with a
 // process-internal `isBuiltinAdministratorAccount` flag (true iff
 // the SID is the local well-known Administrator account S-1-5-21-
@@ -430,7 +437,10 @@ func classifySID(sid *windows.SID, machineDomainSid *windows.SID) LocalAdminMemb
 		// Try to resolve SID_NAME_USE; failure degrades to unknown
 		// while preserving the scope booleans (scope is provable
 		// from SID prefix family alone once machine SID is known).
-		_, _, sidUse, lookupErr := sid.LookupAccount("")
+		// The lookup is exposed as a package-level variable so
+		// tests can stub it deterministically without needing a
+		// real OS-side principal for the synthetic SID under test.
+		_, _, sidUse, lookupErr := lookupSidAccount(sid)
 		resolved := lookupErr == nil
 
 		if isLocal {

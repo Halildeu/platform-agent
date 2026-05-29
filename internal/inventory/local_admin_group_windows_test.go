@@ -33,6 +33,20 @@ func stubLocalAdminPowerShellProbe(t *testing.T, raw []byte, runErr error) {
 	t.Cleanup(func() { runLocalAdminPowerShellProbe = prev })
 }
 
+// stubSidLookup installs a deterministic SID lookup so tests can
+// exercise classifySID's S-1-5-21 branch without depending on
+// real LSA/AD principals. The provided `use` is returned as the
+// SID_NAME_USE for every SID; pass `0` (or any value) and `err`
+// non-nil to simulate lookup failure.
+func stubSidLookup(t *testing.T, use uint32, err error) {
+	t.Helper()
+	prev := lookupSidAccount
+	lookupSidAccount = func(sid *windows.SID) (string, string, uint32, error) {
+		return "", "", use, err
+	}
+	t.Cleanup(func() { lookupSidAccount = prev })
+}
+
 // ────────────────────────────────────────────────────────────────
 // PowerShell fallback parser — MF-3 NO_EVIDENCE absorb
 
@@ -162,8 +176,12 @@ func TestClassifySID_MachineSIDNil_DomainFamilyDegradesToUnknown(t *testing.T) {
 // IsBuiltinAdministratorAccount=true; HasNonBuiltinLocalUser must
 // not flip.
 func TestClassifySIDWithBuiltinFlag_BuiltinAdministratorRID500(t *testing.T) {
-	// Build machine domain SID and a member SID with RID 500
-	// sharing the prefix.
+	// Stub LookupAccount to return SidTypeUser deterministically
+	// (synthetic SIDs do not exist on the CI runner; the real
+	// LookupAccount would fail and the classifier would degrade
+	// to Kind=unknown).
+	stubSidLookup(t, windows.SidTypeUser, nil)
+
 	machine := makeSID(t, "S-1-5-21-1111-2222-3333")
 	member := makeSID(t, "S-1-5-21-1111-2222-3333-500")
 	got := classifySIDWithBuiltinFlag(member, machine)
@@ -176,6 +194,8 @@ func TestClassifySIDWithBuiltinFlag_BuiltinAdministratorRID500(t *testing.T) {
 }
 
 func TestClassifySIDWithBuiltinFlag_NonBuiltinLocalUser(t *testing.T) {
+	stubSidLookup(t, windows.SidTypeUser, nil)
+
 	machine := makeSID(t, "S-1-5-21-1111-2222-3333")
 	member := makeSID(t, "S-1-5-21-1111-2222-3333-1001")
 	got := classifySIDWithBuiltinFlag(member, machine)
@@ -287,6 +307,8 @@ func TestClassifySID_AuthenticatedUsers_S_1_5_11_IsBroadWellKnown(t *testing.T) 
 // assignMembersAndCounts — RID 500 built-in admin exclusion
 
 func TestAssignMembersAndCounts_BuiltinAdminAloneDoesNotFlipNonBuiltinFlag(t *testing.T) {
+	stubSidLookup(t, windows.SidTypeUser, nil)
+
 	machine := makeSID(t, "S-1-5-21-1111-2222-3333")
 	builtinAdmin := makeSID(t, "S-1-5-21-1111-2222-3333-500")
 	classified := []classifiedSID{
@@ -303,6 +325,8 @@ func TestAssignMembersAndCounts_BuiltinAdminAloneDoesNotFlipNonBuiltinFlag(t *te
 }
 
 func TestAssignMembersAndCounts_NonBuiltinLocalUser_FlipsFlag(t *testing.T) {
+	stubSidLookup(t, windows.SidTypeUser, nil)
+
 	machine := makeSID(t, "S-1-5-21-1111-2222-3333")
 	regularUser := makeSID(t, "S-1-5-21-1111-2222-3333-1001")
 	classified := []classifiedSID{
@@ -316,6 +340,8 @@ func TestAssignMembersAndCounts_NonBuiltinLocalUser_FlipsFlag(t *testing.T) {
 }
 
 func TestAssignMembersAndCounts_MembersCapAndTruncation(t *testing.T) {
+	stubSidLookup(t, windows.SidTypeUser, nil)
+
 	machine := makeSID(t, "S-1-5-21-1111-2222-3333")
 	// Generate 300 distinct local-user SIDs (RID 1000 to 1299) so
 	// we exceed the 256 cap. HasNonBuiltinLocalUser must be true.
