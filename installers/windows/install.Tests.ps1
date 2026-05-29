@@ -11,13 +11,12 @@
 #
 # CI matches the same invocation; failures fail the Windows job.
 
-. (Join-Path $PSScriptRoot "install.ps1") -BinaryPath "C:\\dummy.exe" -ErrorAction SilentlyContinue 2>$null
-# Note: the dot-source above will fail at Assert-Administrator under a
-# non-admin runner. We only need the function definitions, so we
-# explicitly redefine the helpers below from the same source file by
-# reading + executing the function bodies. This keeps the tests
-# self-contained without depending on the install script's runtime
-# guards.
+# Codex 019e7314 iter-2 P2: do NOT dot-source install.ps1. The script
+# entry-point runs Assert-Administrator and Resolve-Path side-effects
+# unconditionally — under a non-admin Pester runner those terminating
+# throws break test discovery even with `-ErrorAction SilentlyContinue`.
+# We only need the helper function definitions; read the source and
+# extract them by regex.
 
 $installSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot "install.ps1") -Raw
 

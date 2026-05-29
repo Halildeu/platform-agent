@@ -339,22 +339,27 @@ $installedService = $false
 $resolvedMaintenanceTokenHash = Resolve-MaintenanceTokenHash -Token $MaintenanceToken -Hash $MaintenanceTokenHash
 
 try {
-    # AG-026C: defuse the regkey override mechanism BEFORE any service
-    # work happens. A previous incomplete install or a parallel script
-    # may have written `HKLM\...\Services\$ServiceName\Environment`
-    # with a stale token; if we leave it in place even a fresh service
-    # install would inherit it. Clearing first guarantees the
-    # service env regkey below is the SOLE source of agent config.
-    if (Test-ServiceExists -Name $ServiceName) {
-        Write-Step "clearing stale service env regkey: $ServiceName\\Environment"
-        Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" -Name 'Environment' -ErrorAction SilentlyContinue
-    }
-
+    # Codex 019e7314 iter-2 P1: non-destructive existence check FIRST.
+    # An accidental install run without -Force on an existing service
+    # MUST NOT touch the service-specific Environment regkey, because
+    # the running service is consuming that config and any silent
+    # cleanup would leave it credential-less on the next restart.
     if ((Test-ServiceExists -Name $ServiceName) -and -not $Force) {
         throw "Service '$ServiceName' already exists. Use -Force to replace it."
     }
 
+    # AG-026C: defuse the regkey override mechanism BEFORE the
+    # uninstall + reinstall pair runs. A previous incomplete install
+    # or a parallel script may have written
+    # `HKLM\...\Services\$ServiceName\Environment` with a stale
+    # token; clearing first guarantees the post-install
+    # Set-ServiceEnvironmentRegkey write is the SOLE source of
+    # agent config for the new install. Only runs in the -Force
+    # path now — fresh installs do not need it (no prior service)
+    # and the no-Force-on-existing path already threw above.
     if ((Test-ServiceExists -Name $ServiceName) -and $Force) {
+        Write-Step "clearing stale service env regkey: $ServiceName\\Environment"
+        Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" -Name 'Environment' -ErrorAction SilentlyContinue
         Write-Step "existing service found; uninstalling $ServiceName"
         $uninstallScript = Join-Path $PSScriptRoot "uninstall.ps1"
         if (Test-Path -LiteralPath $uninstallScript) {
