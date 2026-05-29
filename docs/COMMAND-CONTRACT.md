@@ -969,34 +969,49 @@ When present:
 }
 ```
 
-Tri-state semantics (Codex 019e74c3 iter-2 absorb — doc updated to
-match the post-MF-3 implementation that distinguishes "successful
-zero readout" from "source unavailable"):
+Tri-state semantics (Codex 019e74c3 iter-2 + iter-3 absorb — doc
+distinguishes "successful zero readout" from "source unavailable"
+without overclaiming per-field null-to-probeComplete mapping):
 
 - `antivirusEnabled`, `realTimeProtectionEnabled`, `tamperProtected`,
   `nonMicrosoftAvPresent` are **nullable booleans**.
-  - `null` means **source unavailable / cmdlet failed / no value
-    returned**: the cmdlet was missing on the host, threw an
-    exception that the catch block surfaced as a typed
-    `probeErrors[]` entry (e.g. `ACCESS_DENIED`,
-    `CMDLET_UNAVAILABLE`, `POWERSHELL_FAILED`), or returned a
-    structure that did not include the field at all. When any
-    nullable field is `null`, `probeComplete` is also `false`
-    because the matching source's error entry is appended.
+  - `null` means **the source did not return a usable value for
+    this field**. Possible causes: the source-level cmdlet
+    succeeded but the property was missing on the returned object
+    (PSObject property guard); the source-level cmdlet failed
+    (surfaced via a typed `probeErrors[]` entry — `ACCESS_DENIED`,
+    `CMDLET_UNAVAILABLE`, `POWERSHELL_FAILED`); or the cmdlet was
+    not present on the host. **Note**: a per-field `null` does NOT
+    by itself guarantee an entry in `probeErrors[]`. Source-level
+    read failures (catch-block paths like SecurityCenter2 failure,
+    the `NO_EVIDENCE` fail-closed guard) always append a structured
+    error and flip `probeComplete=false`, but a single missing
+    Defender property does not.
   - `false` means **the source ran successfully and the control is
-    off / not present**. For example, `nonMicrosoftAvPresent=false`
-    + `avProductCount=0` is the canonical "SecurityCenter2 query
-    succeeded and no AV products are registered" readout.
-    `antivirusEnabled=false` means Defender is installed but
-    disabled.
+    off / not present**. Canonical examples:
+    - `nonMicrosoftAvPresent=false` + `avProductCount=0` =
+      SecurityCenter2 cmdlet succeeded with zero AV products
+      registered (distinguished from cmdlet failure, which is
+      `null/null` + a `probeErrors[]` entry).
+    - `antivirusEnabled=false` = Defender installed but disabled.
   - Operators MUST NOT collapse `null` to `false` — they carry
-    different semantics and `probeComplete` distinguishes them.
+    different semantics. Backend consumers should treat per-field
+    `null` as "unknown for this signal" rather than negative
+    posture, and rely on `probeComplete` only for **source-level**
+    read completeness.
 - `signatureAgeDays`, `avProductCount` are nullable integers with
-  the same semantics: `null` = unavailable / failure; numeric value
-  (including `0`) = successful readout.
-- `probeComplete` is `true` iff `probeErrors` is empty. Any
-  source-level read failure (including a `NO_EVIDENCE` fail-closed
-  guard fire) flips it to `false`.
+  the same semantics: `null` = unavailable / no usable value;
+  numeric value (including `0`) = successful readout. The same
+  source-level vs per-field caveat applies — a `null` integer here
+  does not by itself guarantee `probeComplete=false`.
+- `probeComplete` is **source-level read completeness**: `true` iff
+  `probeErrors` is empty. Source-level failures (a sub-source try
+  block falling through to its catch, the `NO_EVIDENCE`
+  fail-closed guard) always append a structured error and flip
+  `probeComplete=false`. Per-field nulls that did not trigger a
+  source-level failure leave `probeComplete=true` intact;
+  consumers MUST treat such fields as "unknown" rather than infer
+  posture from the absence of a value.
 
 ### 13.4 Sources probed (v1)
 
