@@ -92,6 +92,16 @@ type Snapshot struct {
 	// runtimes the probe returns Supported=false + ProbeComplete=false
 	// + UNSUPPORTED_PLATFORM. See COMMAND-CONTRACT.md §15.
 	DeviceHealth *DeviceHealthResult `json:"deviceHealth,omitempty"`
+	// OutdatedSoftware is intentionally nil unless the caller opted into
+	// the AG-036 outdated-software probe via
+	// CollectOptions.IncludeOutdatedSoftware. The JSON tag omitempty
+	// hides the field from the heartbeat / auto-enroll wire payload
+	// and from COLLECT_INVENTORY runs that did not request the probe.
+	// On non-Windows runtimes the probe returns Supported=false with
+	// the canonical OS metadata so the backend can persist evidence of
+	// "agent does not support outdated-software probe here" instead
+	// of treating the absence as a failed ingest.
+	OutdatedSoftware *OutdatedSoftwareResult `json:"outdatedSoftware,omitempty"`
 }
 
 // CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
@@ -234,6 +244,25 @@ type CollectOptions struct {
 	// percent/warning. Health thresholds are const, not
 	// payload-configurable.
 	IncludeDeviceHealth bool
+
+	// IncludeOutdatedSoftware gates the AG-036 outdated-software probe.
+	// When true, CollectWithOptions invokes ProbeOutdatedSoftware
+	// (winget --include-returning-apps on Windows; a Supported=false
+	// stub on every other platform) and attaches the result to
+	// Snapshot.OutdatedSoftware. When false (the default), the probe
+	// is not invoked and the wire payload omits the field.
+	//
+	// The backend uses true via COLLECT_INVENTORY's
+	// includeOutdatedSoftware payload bit when an upgrade eligibility
+	// scan is being evaluated. Heartbeat / auto-enroll /
+	// lightweight inventory never opt in.
+	//
+	// HARD BOUNDARY: read-only. `winget upgrade --include-returning-apps`
+	// never mutates any package state. PackageId (not name, publisher,
+	// install location, license, or download URL) is the only
+	// package-level wire field — narrowing the PII surface per the
+	// AG-036 spec.
+	IncludeOutdatedSoftware bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -293,6 +322,10 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		dh := collectDeviceHealthForSnapshot(now)
 		snapshot.DeviceHealth = &dh
 	}
+	if opts.IncludeOutdatedSoftware {
+		os := collectOutdatedSoftwareForSnapshot(now)
+		snapshot.OutdatedSoftware = &os
+	}
 	return snapshot
 }
 
@@ -305,6 +338,10 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 // behavior without invoking real syscalls.
 var collectDeviceHealthForSnapshot = func(_ time.Time) DeviceHealthResult {
 	return ProbeDeviceHealth(context.Background(), time.Now)
+}
+
+var collectOutdatedSoftwareForSnapshot = func(_ time.Time) OutdatedSoftwareResult {
+	return ProbeOutdatedSoftware(context.Background(), time.Now)
 }
 
 // collectLocalAdminGroupForSnapshot is the test seam for the
