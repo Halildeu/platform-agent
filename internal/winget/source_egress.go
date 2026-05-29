@@ -275,6 +275,17 @@ func RunSourceEgressPreflight(opts SourceEgressOptions) (readiness SourceEgressR
 		PackageQuery: PackageQueryResult{
 			PackageID: FixedPackageQueryID,
 		},
+		// AG-026A iter-1 (Codex 019e7164 P0): early-return paths
+		// (options incomplete, locator error) MUST still emit a
+		// non-nil empty Egress so json.Marshal produces
+		// `"dns":[]` / `"tcp":[]` / `"https":[]`. Previously the
+		// nil-slice zero value combined with the omitempty drop
+		// emitted `"dns":null`, which the backend
+		// WinGetEgressPayloadPolicy fails-closed on
+		// (`"dns must be an array"`). The helper keeps this
+		// initialiser, the runEgressWith path, and the non-Windows
+		// stub uniform.
+		Egress: emptyEgressSummary(),
 	}
 
 	startedAt := opts.Now()
@@ -589,17 +600,23 @@ func runPackageQuery(parent context.Context, opts SourceEgressOptions, wingetPat
 // Each sub-probe uses its own context derived from the parent root
 // context so the overall preflight deadline always clamps the total
 // wall-clock even if the per-probe slice is larger.
-func runEgressWith(parent context.Context, opts SourceEgressOptions, targets []EgressTarget, perProbe time.Duration) EgressSummary {
-	// AG-026A follow-up: initialise the three probe slices to non-nil
-	// empty slices so json.Marshal emits `[]` instead of `null` when
-	// no targets are reached (Windows without winget, all probes
-	// failed before any append). Backend WinGetEgressPayloadPolicy
-	// requires the arrays to be present whenever supported=true.
-	summary := EgressSummary{
+// emptyEgressSummary returns an EgressSummary with non-nil empty
+// DNS / TCP / HTTPS slices. Every code path that emits an
+// EgressSummary (RunSourceEgressPreflight early returns, runEgressWith
+// no-target / all-fail paths, the non-Windows stub) MUST start from
+// this value so json.Marshal serialises the three keys as `[]` rather
+// than `null`. Backend WinGetEgressPayloadPolicy fail-closed-rejects
+// `null` for supported=true payloads (Codex 019e7164 P0).
+func emptyEgressSummary() EgressSummary {
+	return EgressSummary{
 		DNS:   []NetworkCheck{},
 		TCP:   []NetworkCheck{},
 		HTTPS: []NetworkCheck{},
 	}
+}
+
+func runEgressWith(parent context.Context, opts SourceEgressOptions, targets []EgressTarget, perProbe time.Duration) EgressSummary {
+	summary := emptyEgressSummary()
 	resolve := opts.Resolve
 	if resolve == nil {
 		resolve = defaultResolver
