@@ -42,6 +42,19 @@ type ProbeOptions struct {
 // AvailableInCurrentContext=false rather than as a fatal error.
 var ErrWinGetNotFound = errors.New("winget.exe not found")
 
+// DesktopAppInstallerGlob is the arch-agnostic AppX package-folder
+// glob the Windows locator uses under %ProgramFiles%\WindowsApps.
+// The folder format is
+// Microsoft.DesktopAppInstaller_<version>_<arch>__8wekyb3d8bbwe
+// (8wekyb3d8bbwe is the Microsoft Store publisher hash). The `*`
+// spans the version+arch segment so the locator matches x64, arm64,
+// arm and x86 identically. Prior to AG-026A's arch fix this glob
+// hard-coded `_x64__`, so winget was never located under
+// LocalSystem on ARM64 Windows (Windows-on-ARM / Apple-Silicon
+// Parallels lab VMs), which made AG-026A report wingetReady=false
+// and BE-021A preflight BLOCK every install on those endpoints.
+const DesktopAppInstallerGlob = "Microsoft.DesktopAppInstaller_*__8wekyb3d8bbwe"
+
 // versionPattern matches the dotted-numeric Version line from
 // `winget --version` (which is typically prefixed with "v"). Anything
 // before/after the matched group is ignored so we tolerate the various
