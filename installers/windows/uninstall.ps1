@@ -140,6 +140,14 @@ $expectedMaintenanceTokenHash = Resolve-ExpectedMaintenanceTokenHash -HashOverri
 Assert-MaintenanceToken -Token $MaintenanceToken -ExpectedHash $expectedMaintenanceTokenHash
 
 if (Test-ServiceExists -Name $ServiceName) {
+    # AG-026C: nuke the service-specific Environment regkey BEFORE the
+    # service uninstall so any residual token or non-secret config is
+    # gone even if the service-delete path runs the best-effort
+    # sc.exe fallback. This keeps the next install/upgrade from
+    # inheriting stale state through `HKLM\...\Services\<name>\Environment`.
+    Write-Step "clearing service env regkey: $ServiceName\\Environment"
+    Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" -Name 'Environment' -ErrorAction SilentlyContinue
+
     Write-Step "uninstalling service: $ServiceName"
     if (Test-Path -LiteralPath $targetBinary) {
         $arguments = @("service", "uninstall", "--name", $ServiceName)
@@ -170,6 +178,15 @@ if ($RemoveConfig) {
     foreach ($key in $configKeys) {
         [Environment]::SetEnvironmentVariable($key, $null, "Machine")
         Write-Step "removed $key"
+    }
+    # AG-026D: also remove the persisted HMAC credential so a future
+    # install does not silently inherit a credential bound to a
+    # different deployment / tenant. Maintenance-token gate above
+    # already authorised the destructive action.
+    $hmacCredPath = Join-Path $env:ProgramData "EndpointAgent\config\hmac-credential.dpapi"
+    if (Test-Path -LiteralPath $hmacCredPath) {
+        Write-Step "removing hmac credential blob: $hmacCredPath"
+        Remove-Item -LiteralPath $hmacCredPath -Force -ErrorAction SilentlyContinue
     }
 }
 
