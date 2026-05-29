@@ -45,7 +45,7 @@ func (s *Store) Read(ctx context.Context) (autoenroll.PersistedConfig, error) {
 	if len(raw) == 0 {
 		return autoenroll.PersistedConfig{}, autoenroll.ErrEmptyStore
 	}
-	plain, err := unprotect(raw, s.Entropy)
+	plain, err := Unprotect(raw, s.Entropy)
 	if err != nil {
 		return autoenroll.PersistedConfig{}, fmt.Errorf("dpapi unprotect: %w", err)
 	}
@@ -62,7 +62,7 @@ func (s *Store) Write(ctx context.Context, cfg autoenroll.PersistedConfig) error
 	if err != nil {
 		return err
 	}
-	cipher, err := protect(plain, s.Entropy)
+	cipher, err := Protect(plain, s.Entropy)
 	if err != nil {
 		return fmt.Errorf("dpapi protect: %w", err)
 	}
@@ -71,7 +71,7 @@ func (s *Store) Write(ctx context.Context, cfg autoenroll.PersistedConfig) error
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
-	if err := setHardenedACL(dir); err != nil {
+	if err := SetHardenedACL(dir); err != nil {
 		return fmt.Errorf("harden dir acl: %w", err)
 	}
 
@@ -97,7 +97,7 @@ func (s *Store) Write(ctx context.Context, cfg autoenroll.PersistedConfig) error
 		cleanup()
 		return fmt.Errorf("close temp %s: %w", tmp, err)
 	}
-	if err := setHardenedACL(tmp); err != nil {
+	if err := SetHardenedACL(tmp); err != nil {
 		cleanup()
 		return fmt.Errorf("harden temp acl: %w", err)
 	}
@@ -106,7 +106,7 @@ func (s *Store) Write(ctx context.Context, cfg autoenroll.PersistedConfig) error
 		return fmt.Errorf("rename %s -> %s: %w", tmp, s.Path, err)
 	}
 	// Re-apply DACL on the final path in case rename did not carry it.
-	if err := setHardenedACL(s.Path); err != nil {
+	if err := SetHardenedACL(s.Path); err != nil {
 		return fmt.Errorf("harden final acl: %w", err)
 	}
 	return nil
@@ -117,7 +117,7 @@ func (s *Store) Write(ctx context.Context, cfg autoenroll.PersistedConfig) error
 // member of Administrators on this machine can decrypt — but no
 // other machine can. Entropy, when non-empty, binds the blob to this
 // application.
-func protect(plain, entropy []byte) ([]byte, error) {
+func Protect(plain, entropy []byte) ([]byte, error) {
 	if len(plain) == 0 {
 		return nil, errors.New("dpapi: empty plaintext")
 	}
@@ -145,7 +145,7 @@ func protect(plain, entropy []byte) ([]byte, error) {
 // unprotect side it is rejected as ERROR_INVALID_PARAMETER on some
 // Windows builds. We pass CRYPTPROTECT_UI_FORBIDDEN to make sure no UI
 // prompt can ever appear from a SYSTEM service context.
-func unprotect(cipher, entropy []byte) ([]byte, error) {
+func Unprotect(cipher, entropy []byte) ([]byte, error) {
 	if len(cipher) == 0 {
 		return nil, errors.New("dpapi: empty ciphertext")
 	}
@@ -170,7 +170,7 @@ func unprotect(cipher, entropy []byte) ([]byte, error) {
 // setHardenedACL applies hardenedSDDL to path using
 // SetNamedSecurityInfo. The DACL replaces any existing one; ownership is
 // forced to SYSTEM so a tampered owner cannot regrant access to itself.
-func setHardenedACL(path string) error {
+func SetHardenedACL(path string) error {
 	sd, err := windows.SecurityDescriptorFromString(hardenedSDDL)
 	if err != nil {
 		return fmt.Errorf("parse sddl: %w", err)

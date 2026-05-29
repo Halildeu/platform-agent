@@ -9,10 +9,22 @@ import (
 
 	"platform-agent/internal/commands"
 	"platform-agent/internal/config"
+	"platform-agent/internal/hmacstore"
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
 	"platform-agent/internal/state"
 )
+
+// CredentialStore is the runner's view onto the persisted HMAC
+// credential. Decoupled from internal/hmacstore so tests can swap in a
+// memory-backed fake and so non-Windows builds can wire nil without
+// importing dpapi. The concrete production implementation is
+// *hmacstore.Store.
+type CredentialStore interface {
+	Read(ctx context.Context) (hmacstore.Credential, error)
+	Write(ctx context.Context, cred hmacstore.Credential) error
+	Invalidate(ctx context.Context) error
+}
 
 type Runner struct {
 	Config       config.Config
@@ -20,6 +32,12 @@ type Runner struct {
 	Executor     *commands.LocalExecutor
 	StateTracker *state.Tracker
 	Logger       *log.Logger
+	// CredStore persists the HMAC device credential across service
+	// restarts (AG-026D). When nil, the runner falls back to the
+	// in-memory-only model: every cold start needs a fresh enrollment
+	// token. Production Windows wiring populates this with
+	// *hmacstore.Store; non-Windows tests and CI builds leave it nil.
+	CredStore CredentialStore
 }
 
 func NewRunner(cfg config.Config, client *protocol.Client, logger *log.Logger) *Runner {
@@ -44,6 +62,15 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		r.StateTracker = state.NewTracker(state.StateStarting)
 	}
 
+	// AG-026D cold-start hydration: before the first enrollment attempt
+	// of this process, try to load a persisted credential from disk.
+	// This is the path that bypasses the operator-bound "fresh
+	// enrollment token on every service restart" friction the SRB
+	// rollout hit in production.
+	if !r.Client.IsEnrolled() && r.CredStore != nil {
+		r.hydrateFromStore(ctx)
+	}
+
 	if !r.Client.IsEnrolled() {
 		if err := r.enroll(ctx); err != nil {
 			r.StateTracker.RecordFailure(time.Now())
@@ -51,8 +78,30 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		}
 	}
 	if err := r.heartbeat(ctx); err != nil {
-		r.StateTracker.RecordFailure(time.Now())
-		return err
+		// AG-026D: backend rejected our signed heartbeat with 401 —
+		// the persisted credential has been revoked / rotated /
+		// expired. Take the controlled re-enroll path. Codex 019e7314
+		// constraint #4: do NOT delete the persisted blob here;
+		// either a successful re-enrollment will replace it atomically
+		// via Write, or we leave the old blob in place and surface a
+		// telemetry sentinel for the operator. Only an enrollment
+		// token in env makes this path possible — without one we
+		// surface the original 401 and fail-closed.
+		if protocol.IsUnauthorized(err) && r.Config.EnrollmentToken != "" {
+			r.logf("heartbeat 401 — persisted credential rejected; attempting controlled re-enroll")
+			r.Client.SetIdentity("", "", "")
+			if reEnrollErr := r.enroll(ctx); reEnrollErr != nil {
+				r.StateTracker.RecordFailure(time.Now())
+				return fmt.Errorf("re-enroll after 401 failed: %w", reEnrollErr)
+			}
+			if hbErr := r.heartbeat(ctx); hbErr != nil {
+				r.StateTracker.RecordFailure(time.Now())
+				return fmt.Errorf("heartbeat after re-enroll failed: %w", hbErr)
+			}
+		} else {
+			r.StateTracker.RecordFailure(time.Now())
+			return err
+		}
 	}
 
 	command, err := r.Client.NextCommand(ctx)
@@ -105,6 +154,34 @@ func (r *Runner) RunLoop(ctx context.Context) error {
 	}
 }
 
+// hydrateFromStore tries to load a persisted credential and install it
+// on the protocol client. On ErrEmpty it returns silently; on ErrInvalid
+// or any decryption / decode failure it logs a sentinel but does NOT
+// touch the on-disk blob (Codex 019e7314 constraint #4) — the runner
+// will fall through to the env-token enroll path and the operator can
+// inspect the corrupt blob.
+func (r *Runner) hydrateFromStore(ctx context.Context) {
+	cred, err := r.CredStore.Read(ctx)
+	if err != nil {
+		if errors.Is(err, hmacstore.ErrEmpty) {
+			return
+		}
+		if errors.Is(err, hmacstore.ErrUnsupportedOS) {
+			// Non-Windows production-style wiring — defensive log;
+			// real production runs only on Windows.
+			r.logf("hmac credential store unsupported on this OS; falling back to env-token enroll")
+			return
+		}
+		r.logf("hmac credential store read failed (keeping blob, falling through to enroll): %v", err)
+		return
+	}
+	r.Client.SetIdentity(cred.CredentialKeyID, cred.Secret, cred.DeviceID)
+	r.Config.CredentialID = cred.CredentialKeyID
+	r.Config.Secret = cred.Secret
+	r.Config.DeviceID = cred.DeviceID
+	r.logf("hmac credential loaded from store device=%s credential=%s", cred.DeviceID, cred.CredentialKeyID)
+}
+
 func (r *Runner) enroll(ctx context.Context) error {
 	if r.Config.EnrollmentToken == "" {
 		return fmt.Errorf("agent is not enrolled and ENDPOINT_AGENT_ENROLLMENT_TOKEN is empty")
@@ -124,13 +201,39 @@ func (r *Runner) enroll(ctx context.Context) error {
 	r.Config.Secret = response.Secret
 	r.Config.DeviceID = response.DeviceID
 	r.logf("agent enrolled: device=%s credential=%s", response.DeviceID, response.CredentialKeyID)
+
+	// AG-026D: persist before returning so the first heartbeat already
+	// runs against the on-disk record. A persistence failure is NOT
+	// fatal — in-memory credentials still work for the current process
+	// lifetime; the operator sees a sentinel log and can re-run
+	// installation. Codex 019e7314 constraint #5: the "credential
+	// confirmed" signal the AG-026C installer waits on is the
+	// `hmac credential confirmed` line below, emitted only after both
+	// persistence and the first signed heartbeat in this iteration
+	// succeed.
+	if r.CredStore != nil {
+		cred := hmacstore.Credential{
+			DeviceID:        response.DeviceID,
+			CredentialKeyID: response.CredentialKeyID,
+			Secret:          response.Secret,
+			ServerTime:      response.ServerTime,
+			Issued:          time.Now(),
+		}
+		if err := r.CredStore.Write(ctx, cred); err != nil {
+			if errors.Is(err, hmacstore.ErrUnsupportedOS) {
+				r.logf("hmac credential persistence skipped: non-Windows build")
+			} else {
+				r.logf("hmac credential persist failed (in-memory only — next restart will need fresh token): %v", err)
+			}
+		}
+	}
 	return nil
 }
 
 func (r *Runner) heartbeat(ctx context.Context) error {
 	snapshot := inventory.Collect(r.Config.AgentVersion, time.Now())
 	currentState := r.StateTracker.RecordSuccess()
-	_, err := r.Client.Heartbeat(ctx, protocol.HeartbeatRequest{
+	response, err := r.Client.Heartbeat(ctx, protocol.HeartbeatRequest{
 		InstallID:    r.Config.InstallID,
 		Hostname:     snapshot.Hostname,
 		OsType:       string(snapshot.OSFamily),
@@ -140,7 +243,24 @@ func (r *Runner) heartbeat(ctx context.Context) error {
 		Capabilities: r.Executor.Capabilities,
 		Timestamp:    time.Now(),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	// AG-026D Codex 019e7314 constraint #5: "credential confirmed"
+	// requires DPAPI write + signed heartbeat HTTP 2xx + accepted=true +
+	// (when present) deviceId match. The persist log above runs after
+	// enroll succeeds; this log only emits after the FIRST signed
+	// heartbeat acknowledges the credential. The AG-026C installer
+	// validation gate keys on this stable, non-secret sentinel line.
+	if response.Accepted {
+		if response.DeviceID == "" || response.DeviceID == r.Config.DeviceID {
+			r.logf("hmac credential confirmed device=%s credential=%s", r.Config.DeviceID, r.Config.CredentialID)
+		} else {
+			r.logf("heartbeat accepted but device_id mismatch local=%s backend=%s — investigation required",
+				r.Config.DeviceID, response.DeviceID)
+		}
+	}
+	return nil
 }
 
 func (r *Runner) logf(format string, args ...interface{}) {

@@ -19,6 +19,7 @@ import (
 	"platform-agent/internal/autoenroll"
 	"platform-agent/internal/commands"
 	"platform-agent/internal/config"
+	"platform-agent/internal/hmacstore"
 	"platform-agent/internal/identity"
 	"platform-agent/internal/inventory"
 	agentlog "platform-agent/internal/logging"
@@ -316,7 +317,16 @@ func newRunner(cfg config.Config, logger *log.Logger) (*app.Runner, error) {
 		return nil, fmt.Errorf("client init failed: %w", err)
 	}
 	client.SetIdentity(cfg.CredentialID, cfg.Secret, cfg.DeviceID)
-	return app.NewRunner(cfg, client, logger), nil
+	runner := app.NewRunner(cfg, client, logger)
+	// AG-026D: wire the HMAC credential store on every build. On
+	// non-Windows builds the Read/Write methods return
+	// hmacstore.ErrUnsupportedOS, which the runner treats as
+	// "persistence disabled — fall through to env-token enroll" rather
+	// than as a hard failure. This keeps cross-platform CI green
+	// (Codex 019e7314 constraint #2) while production Windows agents
+	// get the SCM-env-cache-immune restart path.
+	runner.CredStore = hmacstore.New("", nil)
+	return runner, nil
 }
 
 func handleServiceCommand(args []string) {

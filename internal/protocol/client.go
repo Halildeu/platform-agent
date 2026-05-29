@@ -21,6 +21,39 @@ import (
 // queued (HTTP 204).
 var ErrNoCommand = errors.New("no command available")
 
+// HTTPError is the typed surface for any non-2xx backend response. Callers
+// that need to distinguish auth failures (401) from other errors (5xx, body
+// parse, etc.) should use errors.As with *HTTPError. Substring matching on
+// the formatted error string is fragile and was the documented blocker
+// behind the AG-026D HMAC credential persistence acceptance criteria
+// (Codex 019e7314 constraint #3 — "strings.Contains(\"401\") kabul değil").
+//
+// Codex F5 absorb: Body is bounded to the first 4 KiB of the response and
+// trimmed; it is safe to log directly. The structured fields are the source
+// of truth for routing decisions.
+type HTTPError struct {
+	StatusCode int
+	Method     string
+	Path       string
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("%s %s returned %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
+}
+
+// IsUnauthorized reports whether err — including an error wrapped via
+// fmt.Errorf("%w", ...) — is a 401 Unauthorized HTTPError. Used by the
+// AG-026D runner to route post-restart credential rejection into a
+// controlled single re-enroll attempt.
+func IsUnauthorized(err error) bool {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusUnauthorized
+	}
+	return false
+}
+
 // Client is the agent's HTTP client for the endpoint-admin-service agent API.
 // BE-011: it dials the gateway's external /api/v1/endpoint-agent route but
 // signs the backend-visible /api/v1/agent canonical path.
@@ -169,8 +202,12 @@ func (c *Client) do(ctx context.Context, spec agentRequest, query string, payloa
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("%s %s returned %d: %s",
-			spec.method, spec.suffix, response.StatusCode, strings.TrimSpace(string(data)))
+		return &HTTPError{
+			StatusCode: response.StatusCode,
+			Method:     spec.method,
+			Path:       spec.suffix,
+			Body:       strings.TrimSpace(string(data)),
+		}
 	}
 	if out == nil {
 		io.Copy(io.Discard, response.Body)
