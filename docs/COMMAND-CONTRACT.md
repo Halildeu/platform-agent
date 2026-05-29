@@ -1092,3 +1092,209 @@ pattern; Codex 019e74b5 iter-0 must-fix #7).
   count + presence boolean only; the `displayName` field is read
   to derive `nonMicrosoftAvPresent` but is NEVER passed to the
   wire payload.
+
+---
+
+## 14. AG-032 — Local Administrators Alias Direct Membership (Faz 22.5.2 posture quartet)
+
+The local administrators inventory probe answers the question
+"who is a direct member of the local Built-in Administrators
+alias (S-1-5-32-544) right now?" — without ever modifying
+group membership and without leaking principal identity to the
+wire.
+
+### 14.1 Scope (HARD BOUNDARY)
+
+The probe is strictly **read-only** and strictly **identity-suppressing**:
+
+- It NEVER modifies group membership (no `Add-LocalGroupMember`,
+  no `Remove-LocalGroupMember`, no `net localgroup` mutation, no
+  `NetLocalGroupAdd*` syscall).
+- It NEVER expands transitive domain group / Entra group
+  membership. AG-032 reports **direct members of the local
+  Built-in Administrators alias only**.
+- It NEVER evaluates user-rights assignments (e.g.
+  `SeBackupPrivilege`, `SeDebugPrivilege`), service ACLs,
+  scheduled tasks, or other admin-equivalent privilege paths.
+- It NEVER emits raw SID bytes, full SID string, SID family /
+  authority / sub-authority breakdown, SID relative-ID (RID),
+  domain SID prefix, account name, display name, description,
+  principal path, UPN, or domain name on the wire.
+
+`directMemberCount` is the **direct membership** count; it MUST
+NOT be read as "effective administrator count" since transitive
+group expansion and other privilege paths are not evaluated.
+
+### 14.2 Opt-in payload bit
+
+`COLLECT_INVENTORY` accepts the opt-in bit:
+
+```json
+{
+  "type": "COLLECT_INVENTORY",
+  "payload": { "includeLocalAdminGroup": true }
+}
+```
+
+Default = `false`. Heartbeat / auto-enroll never opt in; the
+AG-025H lightweight contract stays cheap.
+
+### 14.3 Wire-safe result payload
+
+`Snapshot.localAdminGroup` is omitted unless the caller opted in.
+When present:
+
+```json
+{
+  "localAdminGroup": {
+    "schemaVersion": 1,
+    "supported": true,
+    "probeComplete": true,
+    "directMemberCount": 5,
+    "localUserCount": 1,
+    "localGroupCount": 0,
+    "domainUserCount": 0,
+    "domainGroupCount": 1,
+    "domainComputerCount": 0,
+    "builtinAliasCount": 0,
+    "serviceSidCount": 1,
+    "wellKnownPrivilegedCount": 1,
+    "broadWellKnownCount": 0,
+    "cloudPrincipalCount": 1,
+    "capabilityCount": 0,
+    "unknownCount": 0,
+    "hasDomainScopedPrincipal": true,
+    "hasBroadWellKnownPrincipal": false,
+    "hasCloudPrincipal": true,
+    "hasNonBuiltinLocalUser": true,
+    "members": [
+      {"kind":"localUser","isLocalScoped":true,"isDomainScoped":false,"isPrivilegedBuiltinAlias":false,"isBroadWellKnown":false,"isCloudPrincipal":false},
+      {"kind":"domainGroup","isLocalScoped":false,"isDomainScoped":true,"isPrivilegedBuiltinAlias":false,"isBroadWellKnown":false,"isCloudPrincipal":false},
+      {"kind":"wellKnownPrivileged","isLocalScoped":false,"isDomainScoped":false,"isPrivilegedBuiltinAlias":false,"isBroadWellKnown":false,"isCloudPrincipal":false},
+      {"kind":"serviceSid","isLocalScoped":false,"isDomainScoped":false,"isPrivilegedBuiltinAlias":false,"isBroadWellKnown":false,"isCloudPrincipal":false},
+      {"kind":"cloudPrincipal","isLocalScoped":false,"isDomainScoped":false,"isPrivilegedBuiltinAlias":false,"isBroadWellKnown":false,"isCloudPrincipal":true}
+    ],
+    "membersTruncated": false,
+    "maxMembers": 256,
+    "sourceUsed": "netapi",
+    "probeDurationMs": 42
+  }
+}
+```
+
+**Members contract**: `members` ALWAYS serializes as a JSON array
+(never `null`). Empty enumeration is `"members": []`. Failure
+paths also serialize as `[]` so consumers never have to defend
+against `members: null`.
+
+**Member cap**: `members` length is bounded by `maxMembers`
+(default 256). If `directMemberCount > maxMembers`, the slice
+is truncated to the cap and `membersTruncated: true` is set.
+**Counts cover the full enumeration** even when truncated.
+
+### 14.4 Classifier precedence
+
+Each enumerated SID matches **exactly one** Kind via the following
+ordered precedence (first match wins):
+
+| Step | Match | Kind | Bool flag |
+|------|-------|------|-----------|
+| 1 | `S-1-5-32-544` (self-loop), `-547`, `-548`, `-549`, `-551` | `builtinAlias` | `isPrivilegedBuiltinAlias=true` |
+| 2 | `S-1-5-32-545`, `-546`, `-555` (Users / Guests / Remote Desktop Users) | `broadWellKnown` | `isBroadWellKnown=true` |
+| 2 (cont.) | `S-1-1-0` (Everyone), `S-1-5-{2,4,7,11}` (Network/Interactive/Anonymous/Authenticated Users) | `broadWellKnown` | `isBroadWellKnown=true` |
+| 3 | `S-1-5-{18,19,20}` (LocalSystem / LocalService / NetworkService) | `wellKnownPrivileged` | — |
+| 4 | `S-1-5-80-*`, `S-1-5-83-*` | `serviceSid` | — |
+| 5 | `S-1-15-2-*` (AppContainer), `S-1-15-3-*` (capability) | `capability` | — |
+| 6 | `S-1-12-1-*` (MSA / Entra) | `cloudPrincipal` | `isCloudPrincipal=true` |
+| 7 | Any other `S-1-5-32-*` | `builtinAlias` | `isPrivilegedBuiltinAlias=false` |
+| 8 | `S-1-5-21-<machine-prefix>-*` (machine domain) + SID_NAME_USE | `localUser` / `localGroup` / `unknown` | `isLocalScoped=true` |
+| 9 | `S-1-5-21-<not-this-machine>-*` (domain) + SID_NAME_USE | `domainUser` / `domainGroup` / `domainComputer` / `unknown` | `isDomainScoped=true` |
+| 10 | Anything else | `unknown` | — |
+
+If LookupAccountSid fails for an S-1-5-21-* member, the member
+becomes `Kind=unknown` with the scope booleans set according to
+which step matched the prefix (Codex iter-1 MF-5 absorb: no
+guessing user/group/computer from RID alone).
+
+### 14.5 Source ordering
+
+| Order | Source | Description |
+|-------|--------|-------------|
+| 1 (primary) | `netapi` | `NetLocalGroupGetMembers` level 0 (SID-only) targeting the localized Administrators alias resolved from `CreateWellKnownSid(WinBuiltinAdministratorsSid)`. SIDs classified in-place per page; no pointer escapes its NetAPI buffer (lifetime-safe). |
+| 2 (fallback) | `powershellLocalAccounts` | `Get-LocalGroup -SID 'S-1-5-32-544' \| Get-LocalGroupMember -ErrorAction Stop` with a scalar SID allowlist (only `$_.SID.Value` serialized; never the `SecurityIdentifier` object). |
+| 3 (last-resort) | `wmiGroupUser` | v1 stub returns `CMDLET_UNAVAILABLE`. Future runner can land without schema change. |
+
+`sourceUsed` records which source produced the final readout. If
+all three fail, `sourceUsed="none"` and `probeErrors[]` contains
+the failure trail from each attempt.
+
+**Fallback success semantics** (Codex iter-1 MF-3 absorb): when a
+fallback source succeeds, the failures of earlier sources are NOT
+added to `probeErrors[]` — `probeErrors[]` holds
+terminal/incomplete-evidence failures only, not telemetry.
+
+### 14.6 Failure-mode contract
+
+- **NetAPI buffer lifetime**: each `LOCALGROUP_MEMBERS_INFO_0.lgrmi0_sid`
+  pointer is consumed by the in-place classifier BEFORE
+  `NetApiBufferFree` runs on its containing page. No SID pointer
+  outlives its buffer (Codex iter-3 MF-1 absorb).
+- **Invalid buffer guard**: an entry slice is only created from a
+  page when the API status is success / ERROR_MORE_DATA /
+  NERR_BufTooSmall AND the buffer is non-nil AND `entriesRead > 0`
+  (Codex iter-3 MF-2 absorb).
+- **Machine SID resolution failure**: when `NetUserModalsGet`
+  level 2 fails to return the local SAM/account-domain SID, an
+  `MACHINE_SID_RESOLUTION_FAILED` probe error is appended with
+  `source=none` (Codex iter-2 MF-5 absorb), `probeComplete=false`,
+  and S-1-5-21-* members degrade to coarse scope: classifier
+  cannot prove `isLocalScoped` vs `isDomainScoped` reliably, so
+  both default `false`.
+- **NO_EVIDENCE fail-closed**: a successful PowerShell parse of
+  `null` / `{}` triggers a `NO_EVIDENCE` probe error before
+  `probeComplete` is derived (mirroring AG-031 MF-2).
+- **Error summaries** are bounded static phrases (capped 200
+  chars, control-char normalized). Raw Win32 status codes,
+  account names, SIDs, and domain paths NEVER appear in
+  summary text (Codex iter-3 MF-3 absorb).
+
+### 14.7 Security invariants
+
+- **Read-only**: only enumeration cmdlets / syscalls appear in
+  source: `NetLocalGroupGetMembers`, `NetUserModalsGet`,
+  `Get-LocalGroup`, `Get-LocalGroupMember`. No
+  `Add-/Remove-/Set-/Enable-/Disable-/New-` cmdlets, no
+  group-mutation syscall.
+- **Pinned argv**: `powershell.exe -NoProfile -NonInteractive
+  -Command <pinned script>` for the fallback path. No
+  payload-supplied substitution, no `Invoke-Expression`. The
+  script body is reviewed and embedded at build time.
+- **Identifier suppression**: see §14.1 HARD BOUNDARY. The wire
+  carries only Kind enum + bool flags + counts. The localized
+  alias name resolved from `CreateWellKnownSid` is process-local
+  only and never reaches log / summary / JSON / audit trail.
+- **Bounded member array**: `maxMembers=256` cap with explicit
+  `membersTruncated` flag; counts continue to cover the full
+  enumeration.
+- **Posture, never remediation**: no remediation surface in
+  AG-032. The backend / operator decides what to do with the
+  posture readout.
+
+### 14.8 Known v1 exclusions
+
+- **Transitive group expansion**: an admin who is a member via
+  a nested local or domain group is reported as the group's Kind,
+  not as a `localUser` / `domainUser`. Full transitive expansion
+  is out of scope for v1.
+- **Effective admin equivalence**: user-rights assignments
+  (e.g. `SeBackupPrivilege`), service ACLs, scheduled tasks
+  running as SYSTEM, and similar admin-equivalent privilege paths
+  are out of scope.
+- **Per-principal drilldown**: the wire never carries the
+  specific principal identity. Drilldown for remediation requires
+  a separate explicitly-authorized API call (future scope, not
+  AG-032).
+- **WMI fallback runner**: v1 ships a stub for the third source;
+  if NetAPI + PowerShell both fail, `sourceUsed=none`. A real
+  WMI runner can land without schema change.
+- **BitLocker / Defender / Firewall**: those are AG-031 scope.
