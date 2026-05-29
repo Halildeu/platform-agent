@@ -67,8 +67,14 @@ func TestDeriveLocalAdminGroupSummary_RiskFlagsRollUp(t *testing.T) {
 	if !result.HasCloudPrincipal {
 		t.Errorf("expected HasCloudPrincipal=true")
 	}
-	if !result.HasNonBuiltinLocalUser {
-		t.Errorf("expected HasNonBuiltinLocalUser=true when LocalUserCount>0")
+	// HasNonBuiltinLocalUser is set by the Windows live runner's
+	// classifier (Codex iter-1 post-impl MF-2), NOT by the
+	// cross-platform derive step. derive must NOT auto-set it
+	// based on LocalUserCount alone — that would incorrectly flag
+	// a host whose only local-admin local user is the built-in
+	// Administrator (RID 500).
+	if result.HasNonBuiltinLocalUser {
+		t.Errorf("derive must not set HasNonBuiltinLocalUser from LocalUserCount alone; live runner sets it via RID 500 inspection")
 	}
 }
 
@@ -77,6 +83,33 @@ func TestDeriveLocalAdminGroupSummary_NoLocalUserNoFlag(t *testing.T) {
 	deriveLocalAdminGroupSummary(&result)
 	if result.HasNonBuiltinLocalUser {
 		t.Errorf("expected HasNonBuiltinLocalUser=false when LocalUserCount=0")
+	}
+}
+
+func TestDeriveLocalAdminGroupSummary_HonorsRunnerSetFlag(t *testing.T) {
+	// The Windows live runner sets HasNonBuiltinLocalUser directly
+	// when at least one non-builtin local-user member is detected
+	// (RID != 500). Derive must preserve that decision and NOT
+	// reset it based on its own count-based heuristic.
+	result := LocalAdminGroupResult{
+		LocalUserCount:         3,
+		HasNonBuiltinLocalUser: true,
+	}
+	deriveLocalAdminGroupSummary(&result)
+	if !result.HasNonBuiltinLocalUser {
+		t.Errorf("derive must preserve runner-set HasNonBuiltinLocalUser=true")
+	}
+
+	// Also: when runner explicitly set the flag to false (e.g. the
+	// only local-user member is the built-in Administrator),
+	// derive must preserve false.
+	result2 := LocalAdminGroupResult{
+		LocalUserCount:         1,
+		HasNonBuiltinLocalUser: false,
+	}
+	deriveLocalAdminGroupSummary(&result2)
+	if result2.HasNonBuiltinLocalUser {
+		t.Errorf("derive must preserve runner-set HasNonBuiltinLocalUser=false")
 	}
 }
 

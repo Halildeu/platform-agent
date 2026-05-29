@@ -126,12 +126,20 @@ func ProbeLocalAdminGroup(ctx context.Context, now func() time.Time) LocalAdminG
 	}
 
 	// NetAPI failed. Try PowerShell fallback.
-	classifiedPS, psErr := enumeratePowerShell(ctx, machineDomainSid)
-	if psErr == nil {
+	classifiedPS, psNoEvidence, psErr := enumeratePowerShell(ctx, machineDomainSid)
+	if psErr == nil && !psNoEvidence {
 		result.SourceUsed = LocalAdminSourcePowerShellLocalAccounts
 		assignMembersAndCounts(&result, classifiedPS)
 		finalizeLocalAdminGroup(&result, nil, start, now)
 		return result
+	}
+	if psNoEvidence {
+		// MF-3 absorb: parse-success with no evidence body →
+		// NO_EVIDENCE structured probe error. Fall through to WMI.
+		psErr = &rawNetAPIError{
+			Code:    LocalAdminErrNoEvidence,
+			Summary: "PowerShell LocalAccounts enumeration returned no evidence",
+		}
 	}
 
 	// PowerShell failed. Try WMI fallback.
@@ -167,8 +175,11 @@ func ProbeLocalAdminGroup(ctx context.Context, now func() time.Time) LocalAdminG
 
 // enumerateNetAPI is the NetAPI primary path. Each page's SIDs are
 // classified IN-PLACE before the page buffer is freed
-// (Codex 019e74d7 iter-3 MF-1 absorb).
-func enumerateNetAPI(ctx context.Context, aliasSid *windows.SID, machineDomainSid *windows.SID) ([]LocalAdminMember, *rawNetAPIError) {
+// (Codex 019e74d7 iter-3 MF-1 absorb). Returns `[]classifiedSID`
+// so the result-builder can use the process-internal
+// IsBuiltinAdministratorAccount flag to derive HasNonBuiltinLocalUser
+// correctly (iter-1 post-impl MF-2).
+func enumerateNetAPI(ctx context.Context, aliasSid *windows.SID, machineDomainSid *windows.SID) ([]classifiedSID, *rawNetAPIError) {
 	// Resolve the alias SID to its localized name in-process only.
 	// The localized name NEVER leaves this function.
 	aliasName, _, _, lookupErr := aliasSid.LookupAccount("")
@@ -181,7 +192,7 @@ func enumerateNetAPI(ctx context.Context, aliasSid *windows.SID, machineDomainSi
 	aliasNamePtr, _ := windows.UTF16PtrFromString(aliasName)
 	_ = ctx // future cancellation hook
 
-	var classified []LocalAdminMember
+	var classified []classifiedSID
 	var resumeHandle uintptr
 	for page := 0; page < localAdminMaxPages; page++ {
 		var bufPtr unsafe.Pointer
@@ -206,15 +217,15 @@ func enumerateNetAPI(ctx context.Context, aliasSid *windows.SID, machineDomainSi
 
 		if pageUsable {
 			// Walk entries directly from page buffer. Each SID is
-			// classified into POD member rows IMMEDIATELY. No raw
-			// SID pointer escapes this scope.
+			// classified into POD classifiedSID rows IMMEDIATELY.
+			// No raw SID pointer escapes this scope.
 			entries := unsafe.Slice((*localGroupMembersInfo0)(bufPtr), entriesRead)
 			for i := range entries {
 				sid := entries[i].SID
 				if sid == nil {
 					continue
 				}
-				row := classifySID(sid, machineDomainSid)
+				row := classifySIDWithBuiltinFlag(sid, machineDomainSid)
 				classified = append(classified, row)
 			}
 		}
@@ -295,9 +306,47 @@ func resolveMachineDomainSid() (*windows.SID, error) {
 	return domainSid, nil
 }
 
+// classifiedSID couples the wire-visible LocalAdminMember with a
+// process-internal `isBuiltinAdministratorAccount` flag (true iff
+// the SID is the local well-known Administrator account S-1-5-21-
+// <machine>-500). The flag is consumed by assignMembersAndCounts
+// to set `HasNonBuiltinLocalUser` correctly (Codex 019e74d7 iter-1
+// post-impl MF-2 absorb: the built-in Administrator must not
+// trigger the flag). The RID is inspected only here in process;
+// it never reaches the wire.
+type classifiedSID struct {
+	Member                       LocalAdminMember
+	IsBuiltinAdministratorAccount bool
+}
+
 // classifySID applies the 10-step precedence table from
 // COMMAND-CONTRACT.md §14.4 (Codex iter-3 MF-3 + iter-4 MF-1
-// absorb). Each SID matches exactly one Kind.
+// absorb). Each SID matches exactly one Kind. Returns the
+// wire-visible member plus a process-internal flag indicating
+// whether the SID is the local well-known Administrator account.
+func classifySIDWithBuiltinFlag(sid *windows.SID, machineDomainSid *windows.SID) classifiedSID {
+	m := classifySID(sid, machineDomainSid)
+	// Codex 019e74d7 iter-1 post-impl MF-2 absorb: detect the
+	// built-in Administrator account (S-1-5-21-<machine>-500) at
+	// classification time. The RID is inspected only here; it never
+	// reaches the wire. The well-known Administrator account
+	// remains the canonical "always present" local admin and must
+	// not flip HasNonBuiltinLocalUser when it is the only local-user
+	// member.
+	isBuiltinAdmin := false
+	if m.Kind == LocalAdminKindLocalUser && m.IsLocalScoped && sid.SubAuthorityCount() >= 5 {
+		// Last sub-authority is the RID. For S-1-5-21-X-Y-Z-<rid>,
+		// SubAuthority(4) is the RID.
+		if sid.SubAuthority(uint32(sid.SubAuthorityCount()-1)) == 500 {
+			isBuiltinAdmin = true
+		}
+	}
+	return classifiedSID{Member: m, IsBuiltinAdministratorAccount: isBuiltinAdmin}
+}
+
+// classifySID is kept as the pure-shape classifier so the existing
+// in-page hot path remains lean. Callers that need the built-in
+// administrator detection use classifySIDWithBuiltinFlag instead.
 func classifySID(sid *windows.SID, machineDomainSid *windows.SID) LocalAdminMember {
 	// Build a string form once for prefix tests. We do NOT include
 	// this string anywhere on the wire — only sub-authority
@@ -368,11 +417,19 @@ func classifySID(sid *windows.SID, machineDomainSid *windows.SID) LocalAdminMemb
 	// Steps 8/9: S-1-5-21-* (local or domain) based on machine SID
 	// prefix match. SID_NAME_USE classifies user/group/computer.
 	if isAccountDomainSid(authority, subAuthCount, sid) {
-		isLocal := false
-		if machineDomainSid != nil {
-			isLocal = sidPrefixesMatch(sid, machineDomainSid)
+		// Codex 019e74d7 iter-1 post-impl MF-1 absorb: when the
+		// machine account-domain SID is unavailable, local-vs-domain
+		// scope cannot be proven for S-1-5-21-* members. Degrade to
+		// Kind=unknown with BOTH scope booleans false; do NOT guess
+		// from SID_NAME_USE alone.
+		if machineDomainSid == nil {
+			return LocalAdminMember{Kind: LocalAdminKindUnknown}
 		}
-		// Try to resolve SID_NAME_USE; failure degrades to unknown.
+		isLocal := sidPrefixesMatch(sid, machineDomainSid)
+
+		// Try to resolve SID_NAME_USE; failure degrades to unknown
+		// while preserving the scope booleans (scope is provable
+		// from SID prefix family alone once machine SID is known).
 		_, _, sidUse, lookupErr := sid.LookupAccount("")
 		resolved := lookupErr == nil
 
@@ -393,11 +450,12 @@ func classifySID(sid *windows.SID, machineDomainSid *windows.SID) LocalAdminMemb
 			}
 		}
 		// Non-machine S-1-5-21 = domain-scoped (Codex iter-1 MF-5
-		// absorb: scope is provable from family alone).
+		// absorb: scope is provable from family alone once the
+		// machine SID is known and the SID does NOT match it).
 		if !resolved {
 			return LocalAdminMember{
 				Kind:           LocalAdminKindUnknown,
-				IsDomainScoped: machineDomainSid != nil, // only assert when we can prove not-machine
+				IsDomainScoped: true,
 			}
 		}
 		switch sidUse {
@@ -540,7 +598,11 @@ type powerShellEnumOutput struct {
 	Error         string   `json:"error"`
 }
 
-func enumeratePowerShell(ctx context.Context, machineDomainSid *windows.SID) ([]LocalAdminMember, *rawNetAPIError) {
+// enumeratePowerShell returns (classified, noEvidence, err). The
+// `noEvidence` boolean distinguishes "parse succeeded but payload
+// has no usable evidence" from a hard error (Codex 019e74d7 iter-1
+// post-impl MF-3 absorb).
+func enumeratePowerShell(ctx context.Context, machineDomainSid *windows.SID) ([]classifiedSID, bool, *rawNetAPIError) {
 	probeCtx, cancel := context.WithTimeout(ctx, localAdminProbeTimeout)
 	defer cancel()
 
@@ -550,45 +612,59 @@ func enumeratePowerShell(ctx context.Context, machineDomainSid *windows.SID) ([]
 		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
 			code = LocalAdminErrPowerShellTimeout
 		}
-		return nil, &rawNetAPIError{Code: code, Summary: "PowerShell LocalAccounts enumeration failed"}
+		return nil, false, &rawNetAPIError{Code: code, Summary: "PowerShell LocalAccounts enumeration failed"}
 	}
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" {
-		return nil, &rawNetAPIError{
+		return nil, false, &rawNetAPIError{
 			Code:    LocalAdminErrPowerShellEmptyOutput,
 			Summary: "PowerShell LocalAccounts enumeration returned no output",
 		}
 	}
+	// MF-3 absorb: bare `null` JSON literal → NO_EVIDENCE.
+	if trimmed == "null" || trimmed == "{}" {
+		return nil, true, nil
+	}
 	var parsed powerShellEnumOutput
 	if perr := json.Unmarshal([]byte(trimmed), &parsed); perr != nil {
-		return nil, &rawNetAPIError{
+		return nil, false, &rawNetAPIError{
 			Code:    LocalAdminErrPowerShellParseError,
 			Summary: "PowerShell LocalAccounts JSON parse failed",
 		}
 	}
 	if !parsed.SourcePresent {
+		// Distinguish "structured failure" (Error set) from
+		// "no-evidence pure parse-success" (Error empty).
+		if parsed.Error == "" {
+			return nil, true, nil
+		}
 		code := LocalAdminErrPowerShellFailed
 		if parsed.Error == "ACCESS_DENIED" {
 			code = LocalAdminErrAccessDenied
 		} else if parsed.Error == "CMDLET_UNAVAILABLE" {
 			code = LocalAdminErrCmdletUnavailable
 		}
-		return nil, &rawNetAPIError{
+		return nil, false, &rawNetAPIError{
 			Code:    code,
 			Summary: "PowerShell LocalAccounts enumeration failed",
 		}
 	}
+	// sourcePresent=true but members missing/null = malformed
+	// payload; fail closed (MF-3 absorb).
+	if parsed.Members == nil {
+		return nil, true, nil
+	}
 
-	classified := make([]LocalAdminMember, 0, len(parsed.Members))
+	classified := make([]classifiedSID, 0, len(parsed.Members))
 	for _, sidStr := range parsed.Members {
 		sid, parseErr := windows.StringToSid(sidStr)
 		if parseErr != nil || sid == nil {
-			classified = append(classified, LocalAdminMember{Kind: LocalAdminKindUnknown})
+			classified = append(classified, classifiedSID{Member: LocalAdminMember{Kind: LocalAdminKindUnknown}})
 			continue
 		}
-		classified = append(classified, classifySID(sid, machineDomainSid))
+		classified = append(classified, classifySIDWithBuiltinFlag(sid, machineDomainSid))
 	}
-	return classified, nil
+	return classified, false, nil
 }
 
 // enumerateWMI is the last-resort WMI fallback. Uses
@@ -603,7 +679,7 @@ func enumeratePowerShell(ctx context.Context, machineDomainSid *windows.SID) ([]
 // cleanly, so we return CMDLET_UNAVAILABLE. Operators get the
 // NetAPI + PS failure trail in probeErrors[] and SourceUsed=none.
 // Future WMI runner can land without schema change.
-func enumerateWMI(ctx context.Context, machineDomainSid *windows.SID) ([]LocalAdminMember, *rawNetAPIError) {
+func enumerateWMI(ctx context.Context, machineDomainSid *windows.SID) ([]classifiedSID, *rawNetAPIError) {
 	_ = ctx
 	_ = machineDomainSid
 	return nil, &rawNetAPIError{
@@ -613,15 +689,30 @@ func enumerateWMI(ctx context.Context, machineDomainSid *windows.SID) ([]LocalAd
 }
 
 // assignMembersAndCounts incorporates classified rows into the
-// result, increments per-bucket counts, and applies the
-// maxLocalAdminMembers cap (Codex iter-4 MF-3 absorb). counts
-// cover the full enumeration; Members slice is capped.
-func assignMembersAndCounts(result *LocalAdminGroupResult, classified []LocalAdminMember) {
+// result, increments per-bucket counts, applies the
+// maxLocalAdminMembers cap (Codex iter-4 MF-3 absorb), and tracks
+// the built-in Administrator account flag for correct
+// HasNonBuiltinLocalUser derivation (Codex iter-1 post-impl MF-2
+// absorb). counts cover the full enumeration; Members slice is
+// capped.
+func assignMembersAndCounts(result *LocalAdminGroupResult, classified []classifiedSID) {
 	result.DirectMemberCount = len(classified)
-	for _, m := range classified {
+
+	// Track non-builtin local user presence at the source level
+	// (where the RID is visible). The flag is then projected
+	// directly onto the result and overrides the cross-platform
+	// derive-step default.
+	hasNonBuiltinLocalUser := false
+
+	wireMembers := make([]LocalAdminMember, 0, len(classified))
+	for _, c := range classified {
+		m := c.Member
 		switch m.Kind {
 		case LocalAdminKindLocalUser:
 			result.LocalUserCount++
+			if !c.IsBuiltinAdministratorAccount {
+				hasNonBuiltinLocalUser = true
+			}
 		case LocalAdminKindLocalGroup:
 			result.LocalGroupCount++
 		case LocalAdminKindDomainUser:
@@ -645,14 +736,17 @@ func assignMembersAndCounts(result *LocalAdminGroupResult, classified []LocalAdm
 		default:
 			result.UnknownCount++
 		}
+		wireMembers = append(wireMembers, m)
 	}
-	if len(classified) > maxLocalAdminMembers {
-		result.Members = append(result.Members[:0], classified[:maxLocalAdminMembers]...)
+	if len(wireMembers) > maxLocalAdminMembers {
+		result.Members = wireMembers[:maxLocalAdminMembers]
 		result.MembersTruncated = true
 	} else {
-		result.Members = append(result.Members[:0], classified...)
+		result.Members = wireMembers
 		result.MembersTruncated = false
 	}
+	// Cache the source-level decision for the derive step to honor.
+	result.HasNonBuiltinLocalUser = hasNonBuiltinLocalUser
 }
 
 // finalizeLocalAdminGroup normalizes Members to non-nil,

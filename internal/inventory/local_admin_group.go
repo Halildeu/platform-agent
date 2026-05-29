@@ -214,19 +214,13 @@ func deriveLocalAdminGroupSummary(result *LocalAdminGroupResult) {
 	result.HasDomainScopedPrincipal = result.DomainUserCount+result.DomainGroupCount+result.DomainComputerCount > 0
 	result.HasBroadWellKnownPrincipal = result.BroadWellKnownCount > 0
 	result.HasCloudPrincipal = result.CloudPrincipalCount > 0
-	// "Non-builtin local user" = any local user account that is not
-	// the well-known Administrator built-in account. We don't know
-	// the Administrator built-in account identity at this layer
-	// (intentionally — it would re-introduce a name-based check);
-	// the live runner sets this flag during classification.
-	if result.LocalUserCount > 0 {
-		// Set conservatively: any local user member triggers the
-		// flag. The classifier doesn't track "is built-in
-		// Administrator account" because that identity check is
-		// fragile (account can be renamed). Operators reading this
-		// flag should understand it includes the built-in account.
-		result.HasNonBuiltinLocalUser = true
-	}
+	// HasNonBuiltinLocalUser is set by the Windows live runner's
+	// classifier (Codex 019e74d7 iter-1 post-impl MF-2 absorb) —
+	// the runner inspects the SID RID process-locally so the
+	// built-in Administrator (RID 500) does not flip the flag. On
+	// non-Windows platforms there are no enumerated members, so
+	// this stays at its zero value (false). DO NOT override the
+	// runner-set flag here.
 }
 
 // localAdminGroupElapsedMs is the monotonic-duration helper.
