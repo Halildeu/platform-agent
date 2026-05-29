@@ -363,13 +363,20 @@ try {
         Write-Step "existing service found; uninstalling $ServiceName"
         $uninstallScript = Join-Path $PSScriptRoot "uninstall.ps1"
         if (Test-Path -LiteralPath $uninstallScript) {
-            $uninstallArgs = @(
-                "-ServiceName", $ServiceName,
-                "-InstallDir", $InstallDir,
-                "-LogDir", $LogDir
-            )
+            # Live verify 2026-05-29 surfaced a latent issue: the
+            # array-form splat with -Force failed to bind -LogDir to
+            # uninstall.ps1 (PowerShell 5.1 reported
+            # InvalidArgument / PositionalParameterNotFound for the
+            # path that followed). Use hashtable-form splat instead —
+            # bindings are explicit and values containing backslashes
+            # are never re-parsed by the array element walker.
+            $uninstallArgs = @{
+                ServiceName = $ServiceName
+                InstallDir  = $InstallDir
+                LogDir      = $LogDir
+            }
             if (-not [string]::IsNullOrWhiteSpace($MaintenanceToken)) {
-                $uninstallArgs += @("-MaintenanceToken", $MaintenanceToken)
+                $uninstallArgs['MaintenanceToken'] = $MaintenanceToken
             }
             & $uninstallScript @uninstallArgs
         } else {
