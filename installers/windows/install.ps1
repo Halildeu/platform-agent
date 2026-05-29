@@ -250,17 +250,50 @@ function Remove-ServiceEnvironmentEntry {
 # accepted=true, (c) deviceId matched. Only when all three hold does
 # AG-026C clear the enrollment token from the service env regkey.
 # Returns $true on success, $false on timeout.
+#
+# Codex 019e7314 iter-1 P1.1: append-only false-positive guard. The
+# agent log is opened append-only; a previous install/upgrade may
+# have left a "hmac credential confirmed" line in the file. The
+# caller MUST capture the on-disk byte length BEFORE service start
+# and pass it as $BaselineLength; this function ignores every byte at
+# offset <= $BaselineLength so only sentinels written AFTER service
+# start in THIS install window can satisfy the gate.
 function Wait-ForCredentialConfirmed {
     param(
         [string]$LogPath,
-        [int]$TimeoutSeconds = 60
+        [int]$TimeoutSeconds = 60,
+        [long]$BaselineLength = 0
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         if (Test-Path -LiteralPath $LogPath) {
-            $tail = Get-Content -LiteralPath $LogPath -Tail 200 -ErrorAction SilentlyContinue
-            if ($tail | Where-Object { $_ -match 'hmac credential confirmed' }) {
-                return $true
+            $current = (Get-Item -LiteralPath $LogPath -ErrorAction SilentlyContinue).Length
+            if ($current -gt $BaselineLength) {
+                # Read only the new bytes appended since service
+                # start. UTF-8 (no BOM) is the agent logger contract
+                # (logger.go); reading bytes + decoding directly
+                # avoids the cmdlet's CRLF-bound line truncation
+                # when the agent is mid-write.
+                $stream = $null
+                try {
+                    $stream = [System.IO.File]::Open(
+                        $LogPath,
+                        [System.IO.FileMode]::Open,
+                        [System.IO.FileAccess]::Read,
+                        [System.IO.FileShare]::ReadWrite)
+                    $stream.Position = $BaselineLength
+                    $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+                    try {
+                        $newBytes = $reader.ReadToEnd()
+                    } finally {
+                        $reader.Close()
+                    }
+                } finally {
+                    if ($stream) { $stream.Dispose() }
+                }
+                if ($newBytes -match 'hmac credential confirmed') {
+                    return $true
+                }
             }
         }
         Start-Sleep -Seconds 2
@@ -372,6 +405,19 @@ try {
     # presence in env unnecessary across restarts: the agent loads
     # DPAPI credential at cold start and bypasses the env-token path
     # entirely.
+    # Codex 019e7314 iter-1 P1.2: ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256
+    # stays in Machine env. It is a hash (not a secret) — the
+    # uninstall script needs to read it without first having access
+    # to the service-specific regkey (which is per-service and would
+    # need to be looked up by service name AT uninstall time, but the
+    # uninstall path runs BEFORE service registry teardown anyway).
+    # The standalone agent CLI service stop/uninstall paths also
+    # currently consult process env for this hash; moving it to a
+    # service-only regkey would break those out-of-band recovery
+    # operations. Keeping the maintenance hash in Machine env is the
+    # narrow exception to the AG-026C "Machine env NEVER" rule.
+    Set-MachineEnvIfPresent -OriginalValues $originalValues -Name "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" -Value $resolvedMaintenanceTokenHash
+
     $serviceEnv = @{
         "ENDPOINT_AGENT_API_URL" = $ApiUrl
         "ENDPOINT_AGENT_ENROLLMENT_TOKEN" = $EnrollmentToken
@@ -404,6 +450,18 @@ try {
         Set-AgentServiceHardening -Name $ServiceName -Sddl $ServiceSddl
     }
 
+    # Codex 019e7314 iter-1 P1.1: snapshot the agent log byte length
+    # BEFORE service start. The append-only logger may already have a
+    # "hmac credential confirmed" line from a previous install; the
+    # gate below only honours sentinels written at offset >
+    # $logBaselineLength.
+    $agentLog = Join-Path $LogDir "endpoint-agent.log"
+    $logBaselineLength = if (Test-Path -LiteralPath $agentLog) {
+        (Get-Item -LiteralPath $agentLog).Length
+    } else {
+        0
+    }
+
     if ($Start) {
         Write-Step "starting service: $ServiceName"
         Invoke-AgentServiceCommand -ExePath $targetBinary -Arguments @("service", "start", "--name", $ServiceName)
@@ -425,9 +483,8 @@ try {
     # — without DPAPI confirmation we leave the token in place so the
     # next service restart can retry the same enroll.
     if ($Start -and -not [string]::IsNullOrWhiteSpace($EnrollmentToken)) {
-        $agentLog = Join-Path $LogDir "endpoint-agent.log"
-        Write-Step "waiting for AG-026D credential-confirmed sentinel (up to 60s)"
-        if (Wait-ForCredentialConfirmed -LogPath $agentLog -TimeoutSeconds 60) {
+        Write-Step "waiting for AG-026D credential-confirmed sentinel (up to 60s, log baseline=$logBaselineLength bytes)"
+        if (Wait-ForCredentialConfirmed -LogPath $agentLog -TimeoutSeconds 60 -BaselineLength $logBaselineLength) {
             Write-Step "AG-026C: enroll confirmed — removing token from service env regkey"
             Remove-ServiceEnvironmentEntry -Name $ServiceName -Key "ENDPOINT_AGENT_ENROLLMENT_TOKEN"
         } else {
