@@ -79,27 +79,27 @@ func TestRedactInstallerString_MSIProperty(t *testing.T) {
 	}{
 		{
 			name:     "LICENSEKEY assignment",
-			input:    `msiexec /i app.msi LICENSEKEY=ABC-DEF-123-XYZ /qn`,
+			input:    `msiexec /i app.msi LICENSEKEY=XXXX-XXXX-XXXX-XXXX /qn`,
 			want:     `msiexec /i app.msi LICENSEKEY=[REDACTED] /qn`,
-			mustHide: []string{"ABC-DEF-123-XYZ"},
+			mustHide: []string{"XXXX-XXXX-XXXX-XXXX"},
 		},
 		{
 			name:     "SERIAL assignment with quoted value",
-			input:    `setup.exe SERIAL="SN-12345-XYZ" /S`,
+			input:    `setup.exe SERIAL="SN-XXXX-PLCHOLDR" /S`,
 			want:     `setup.exe SERIAL=[REDACTED] /S`,
-			mustHide: []string{"SN-12345-XYZ"},
+			mustHide: []string{"SN-XXXX-PLCHOLDR"},
 		},
 		{
 			name:     "lowercase apikey assignment",
-			input:    `installer.exe apikey=sk_live_abc123 /quiet`,
+			input:    `installer.exe apikey=sk_test_placeholder /quiet`,
 			want:     `installer.exe apikey=[REDACTED] /quiet`,
-			mustHide: []string{"sk_live_abc123"},
+			mustHide: []string{"sk_test_placeholder"},
 		},
 		{
 			name:     "ACTIVATION embedded in vendor template",
-			input:    `Starting install with ACTIVATION=01234567890abc...`,
+			input:    `Starting install with ACTIVATION=FAKE-ACTIVATION-VALUE...`,
 			want:     `Starting install with ACTIVATION=[REDACTED]`,
-			mustHide: []string{"01234567890abc"},
+			mustHide: []string{"FAKE-ACTIVATION-VALUE"},
 		},
 		{
 			name:  "LICENSES_VALIDATED=1 is NOT a credential — must NOT match",
@@ -157,9 +157,9 @@ func TestRedactInstallerString_MSIProperty(t *testing.T) {
 		},
 		{
 			name:     "API_KEY snake_case",
-			input:    `cfg API_KEY=sk_test_KEY01`,
+			input:    `cfg API_KEY=sk_test_placeholder`,
 			want:     `cfg API_KEY=[REDACTED]`,
-			mustHide: []string{"sk_test_KEY01"},
+			mustHide: []string{"sk_test_placeholder"},
 		},
 		{
 			name:     "SECRET_KEY snake_case",
@@ -294,7 +294,7 @@ func TestRedactInstallerString_LayersWithSoftwareString(t *testing.T) {
 
 	input := `User=alice@example.com installed pkg from ` +
 		`https://operator:apitoken@cdn.example.com/?token=secret123 ` +
-		`with LICENSEKEY=KEY-AAA-BBB into C:\Users\alice\AppData\Local\Temp`
+		`with LICENSEKEY=KEY-XXXX-PLCHOLDR into C:\Users\alice\AppData\Local\Temp`
 
 	out := RedactInstallerString(input)
 
@@ -313,7 +313,7 @@ func TestRedactInstallerString_LayersWithSoftwareString(t *testing.T) {
 	if strings.Contains(out, "secret123") {
 		t.Errorf("query string token should be redacted: %q", out)
 	}
-	if strings.Contains(out, "KEY-AAA-BBB") {
+	if strings.Contains(out, "KEY-XXXX-PLCHOLDR") {
 		t.Errorf("LICENSEKEY value should be redacted: %q", out)
 	}
 

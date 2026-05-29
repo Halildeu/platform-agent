@@ -176,7 +176,7 @@ func TestRunInstall_RedactsInstallerCredentialsFromRunnerOutput(t *testing.T) {
 
 	dirty := strings.Join([]string{
 		"Downloading https://operator:s3cret@vendor.example.com/installer.msi",
-		"Applying LICENSEKEY=KEY-AAAA-BBBB-CCCC",
+		"Applying LICENSEKEY=KEY-XXXX-XXXX-PLCH",
 		"Token URL https://cdn.example.com/cb?client_secret=oauth-private-bytes",
 	}, "\n")
 
@@ -208,7 +208,7 @@ func TestRunInstall_RedactsInstallerCredentialsFromRunnerOutput(t *testing.T) {
 
 	for _, secret := range []string{
 		"operator:s3cret",
-		"KEY-AAAA-BBBB-CCCC",
+		"KEY-XXXX-XXXX-PLCH",
 		"oauth-private-bytes",
 	} {
 		if strings.Contains(result.StdoutTail, secret) {

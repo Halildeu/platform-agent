@@ -702,15 +702,19 @@ the wire. The function is layered:
    - `https://user:pass@host/...` → `https://[REDACTED]@host/...`
      (URL userinfo segment, scheme + host preserved for operator
      debuggability).
-   - `KEY=value` where KEY ∈ {`LICENSE`, `LICENSEKEY`, `SERIAL`,
-     `ACTIVATION`, `ACTIVATIONKEY`, `APIKEY`, `APIKEYS`,
-     `ACCESSTOKEN`, `REFRESHTOKEN`, `BEARER`, `OAUTHTOKEN`} —
-     case-insensitive, both bare and quoted values, KEY name
-     preserved (`LICENSEKEY=[REDACTED]`).
-   - `?token=…` / `?api_key=…` / `?access_token=…` /
-     `?refresh_token=…` / `?secret=…` / `?bearer=…` — first or
-     follow-on (`&key=`) parameter position, value masked up to next
-     `&` / whitespace / end-of-string.
+   - `KEY=value` property/CLI assignment where KEY belongs to the
+     credential family — license/serial/activation keys, API / access /
+     refresh / OAuth / auth / ID tokens, client / secret key
+     variants. Covers bare (`LICENSEKEY`), snake_case
+     (`CLIENT_SECRET`), kebab-case (`client-secret`) and camelCase
+     (`clientSecret`) shapes. Case-insensitive, bare + quoted values,
+     KEY name preserved (`LICENSEKEY=[REDACTED]`). Allowlist tracked
+     in `internal/security/redact_installer.go` so silent widening
+     stays out of operator surprise.
+   - Token-bearing query parameters: same credential family as
+     above (`?token=`, `?client_secret=`, `?id_token=`, `?api-key=`,
+     etc.), first or follow-on (`&key=`) parameter position, value
+     masked up to next `&` / whitespace / end-of-string.
 2. **AG-025/AG-026 baseline (`security.RedactSoftwareString`) second**
    — JWT (`eyJ…` shape), `password=` / `pwd=` / `pass=` assignments,
    email/UPN, full domain SIDs, `C:\Users\<account>\` path segment,

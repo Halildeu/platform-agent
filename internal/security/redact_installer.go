@@ -15,27 +15,34 @@ import "regexp"
 //   1. URL with embedded userinfo
 //      ----------------------------
 //      `https://user:pass@host/path` → `https://[REDACTED]@host/path`.
-//      Installer logs occasionally echo download URLs verbatim; if the
-//      vendor template includes a bearer-in-userinfo shape the secret
-//      lands in the log tail.
+//      Authority parsing ends at `/`, `?`, or `#` so query/fragment
+//      values containing `@` (e.g. `?email=user@example.com`) do
+//      not get false-redacted as if they were userinfo. Installer
+//      logs occasionally echo download URLs verbatim; if the vendor
+//      template includes a bearer-in-userinfo shape the secret lands
+//      in the log tail.
 //
 //   2. MSI / installer property assignments with sensitive keys
 //      ---------------------------------------------------------
 //      Property assignments of the form `KEY=value` (or `KEY="value"`)
-//      where KEY matches an allowlist of credential-shaped names —
-//      LICENSE, LICENSEKEY, SERIAL, ACTIVATION, ACTIVATIONKEY, APIKEY,
-//      APIKEYS, ACCESSTOKEN, REFRESHTOKEN, BEARER, OAUTHTOKEN — are
-//      scrubbed to `KEY=[REDACTED]`. The pattern is anchored to a
-//      word boundary so it does not match `LICENSES_VALIDATED=1` or
-//      similar non-secret booleans that happen to contain `LICENSE`.
+//      where KEY belongs to the credential family — license / serial /
+//      activation keys, API / access / refresh / OAuth / auth / ID
+//      tokens, client / secret key variants — are scrubbed to
+//      `KEY=[REDACTED]`. The allowlist covers bare (`LICENSEKEY`),
+//      snake_case (`CLIENT_SECRET`), kebab-case (`client-secret`)
+//      and camelCase (`clientSecret`) shapes via `(?:[_-])?` separator
+//      variants. Case-insensitive on the KEY, bare + quoted values.
+//      The pattern is anchored to a word boundary so it does not
+//      match `LICENSES_VALIDATED=1` or similar non-secret booleans
+//      that happen to contain a credential-family substring.
 //
 //   3. Token-bearing query string parameters
 //      -------------------------------------
-//      `?token=…`, `?api_key=…`, `?access_token=…`, `?refresh_token=…`,
-//      `?secret=…`, `?bearer=…` — case-insensitive, both first
-//      (`?key=`) and subsequent (`&key=`) parameter positions. The
-//      value is captured up to the next `&`, whitespace, or end of
-//      string and replaced with `[REDACTED]`.
+//      Same credential family as #2 — `?token=…`, `?client_secret=…`,
+//      `?id_token=…`, `?api-key=…`, `?oauth_token=…`, `?auth-token=…`,
+//      `?secret_key=…`, etc. — first (`?key=`) or follow-on (`&key=`)
+//      parameter position, value captured up to next `&`, whitespace,
+//      or end of string and replaced with `[REDACTED]`.
 //
 // AG-027L deliberately does NOT scrub:
 //
