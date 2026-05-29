@@ -192,8 +192,16 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 // ProbePendingReboot (Windows registry reads + cross-platform
 // stub); tests override it to assert default-omit / opt-in /
 // unsupported-stub behavior without touching the host registry.
-var collectPendingRebootForSnapshot = func(now time.Time) PendingRebootResult {
-	return ProbePendingReboot(context.Background(), func() time.Time { return now })
+//
+// Codex 019e749c post-impl P0#3: production must NOT pin the probe
+// clock to the snapshot's `CollectedAt` value, otherwise the
+// probe's start and end measurements both read the same constant
+// and probeDurationMs is always 0. Wire the real time.Now into the
+// probe so the duration ms is meaningful elapsed wall-clock; the
+// snapshot's `now` parameter is only the snapshot timestamp and
+// has no bearing on probe duration measurement.
+var collectPendingRebootForSnapshot = func(_ time.Time) PendingRebootResult {
+	return ProbePendingReboot(context.Background(), time.Now)
 }
 
 // collectSoftwareSummary runs the software inventory + winget readiness

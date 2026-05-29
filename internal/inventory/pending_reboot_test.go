@@ -1,6 +1,8 @@
 package inventory
 
 import (
+	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -111,16 +113,12 @@ func TestDerivePendingRebootSummary_ProbeErrorFlipsProbeComplete(t *testing.T) {
 // macOS/Linux test runs and the stub from pending_reboot_other.go
 // is linked instead).
 
-// nonWindowsBuild reports true when the unsupported-platform stub is
-// the linked implementation. Used to skip stub-shape assertions on
-// Windows test runs (where the live registry path is the linked
-// implementation).
-var nonWindowsBuild = func() bool {
-	// Cheap proxy: if the stub returns Supported=false on an empty
-	// call, we're on a non-Windows build.
-	r := ProbePendingReboot(nil, func() time.Time { return time.Unix(0, 0) })
-	return !r.Supported
-}()
+// nonWindowsBuild reports true when the unsupported-platform stub
+// is the linked implementation. Codex 019e749c post-impl P0#1: use
+// runtime.GOOS for the cross-build platform tag instead of probing
+// at package init (the package-init probe panicked on Windows
+// builds because ProbePendingReboot dereferenced a nil ctx).
+var nonWindowsBuild = runtime.GOOS != "windows"
 
 func TestProbePendingReboot_NonWindowsStubShape(t *testing.T) {
 	if !nonWindowsBuild {
@@ -207,5 +205,56 @@ func TestCollectWithOptions_OptInCallsProbeOnce(t *testing.T) {
 	if len(snapshot.PendingReboot.Sources) != 1 || snapshot.PendingReboot.Sources[0] != PendingRebootSourceCBS {
 		t.Fatalf("Sources mismatch: got %v want [CBS]",
 			snapshot.PendingReboot.Sources)
+	}
+}
+
+// ────────────────────────────────────────────────────────────────
+// Wire shape: all-false JSON contract (Codex 019e749c post-impl
+// P0#2 absorb). Every PendingRebootSignals field must remain
+// present in the wire payload even when its value is false; the
+// `omitempty` JSON tag was removed from UpdateExeVolatile and
+// NetlogonJoinPending so the contract is uniform across all six
+// signals.
+
+func TestPendingRebootSignals_AllFalseJSONKeepsAllKeys(t *testing.T) {
+	raw, err := json.Marshal(PendingRebootSignals{})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, key := range []string{
+		`"cbsRebootPending"`,
+		`"windowsUpdateRebootRequired"`,
+		`"pendingFileRenameOperations"`,
+		`"computerNameChangePending"`,
+		`"updateExeVolatile"`,
+		`"netlogonJoinPending"`,
+	} {
+		if !strings.Contains(string(raw), key) {
+			t.Errorf("AllFalse JSON must include %s, got %s",
+				key, raw)
+		}
+	}
+}
+
+func TestPendingRebootSignals_AllFalseJSONValuesAreFalse(t *testing.T) {
+	raw, err := json.Marshal(PendingRebootSignals{})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	// Ensure each key is set to literal `false`, not the
+	// zero-omitted form. We don't unmarshal into a struct because
+	// that would erase the wire-presence question.
+	for _, frag := range []string{
+		`"cbsRebootPending":false`,
+		`"windowsUpdateRebootRequired":false`,
+		`"pendingFileRenameOperations":false`,
+		`"computerNameChangePending":false`,
+		`"updateExeVolatile":false`,
+		`"netlogonJoinPending":false`,
+	} {
+		if !strings.Contains(string(raw), frag) {
+			t.Errorf("AllFalse JSON must include %s, got %s",
+				frag, raw)
+		}
 	}
 }

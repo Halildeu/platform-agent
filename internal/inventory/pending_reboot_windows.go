@@ -29,6 +29,14 @@ type pendingRebootProber struct{}
 // non-Windows stub in pending_reboot_other.go satisfies the same
 // signature so callers compile cross-platform.
 func ProbePendingReboot(ctx context.Context, now func() time.Time) PendingRebootResult {
+	if ctx == nil {
+		// Codex 019e749c post-impl P0#1: nil context guard. The
+		// non-Windows stub tolerates nil, but the Windows live path
+		// dereferences ctx.Err() and would panic. Treat nil as
+		// background context so a careless caller (test, manual
+		// invocation) does not crash the agent service.
+		ctx = context.Background()
+	}
 	if now == nil {
 		now = time.Now
 	}
@@ -167,16 +175,21 @@ func (pendingRebootProber) checkComputerNameChange(_ context.Context, result *Pe
 	}
 }
 
-// checkUpdateExeVolatile is an additional canonical marker enterprise
-// scripts use to corroborate WU pending reboot — recorded in the
-// Volatile registry key (cleared on reboot). Cheap, low false-positive.
+// checkUpdateExeVolatile is an additional canonical marker
+// enterprise reboot detectors check. The value is a DWORD inside
+// the volatile key (cleared on reboot). Codex 019e749c post-impl
+// P0#4 absorb: the marker is a `Flags` DWORD value, not just
+// subkey existence — a present-but-zero `Flags` value means "no
+// reboot pending"; non-zero means pending. Subkey-only check was
+// incorrect.
 func (pendingRebootProber) checkUpdateExeVolatile(_ context.Context, result *PendingRebootResult) {
 	const path = `SOFTWARE\Microsoft\Updates\UpdateExeVolatile`
-	exists, err := keyExistsWow64(winreg.LOCAL_MACHINE, path)
+	k, err := winreg.OpenKey(winreg.LOCAL_MACHINE, path, winreg.QUERY_VALUE|winreg.WOW64_64KEY)
 	if err != nil {
-		// Non-blocking signal; flag as error but do not flip the
-		// header bool. Keep probeComplete=false so consumer can
-		// downgrade trust if all extended signals failed.
+		if errors.Is(err, winreg.ErrNotExist) {
+			// No volatile update marker; definitive false.
+			return
+		}
 		result.ProbeErrors = append(result.ProbeErrors, PendingRebootProbeError{
 			Source:  PendingRebootSourceUpdateExeVolatile,
 			Code:    PendingRebootErrAccessDenied,
@@ -184,7 +197,25 @@ func (pendingRebootProber) checkUpdateExeVolatile(_ context.Context, result *Pen
 		})
 		return
 	}
-	result.Signals.UpdateExeVolatile = exists
+	defer k.Close()
+
+	flags, _, err := k.GetIntegerValue("Flags")
+	if errors.Is(err, winreg.ErrNotExist) {
+		// Key exists, but no Flags DWORD: not a positive reboot
+		// signal.
+		return
+	}
+	if err != nil {
+		result.ProbeErrors = append(result.ProbeErrors, PendingRebootProbeError{
+			Source:  PendingRebootSourceUpdateExeVolatile,
+			Code:    PendingRebootErrValueTypeMismatch,
+			Summary: "UpdateExeVolatile Flags is not a REG_DWORD",
+		})
+		return
+	}
+	if flags != 0 {
+		result.Signals.UpdateExeVolatile = true
+	}
 }
 
 // checkNetlogonJoinPending detects an in-flight domain join via the

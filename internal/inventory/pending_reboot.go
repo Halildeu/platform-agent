@@ -65,13 +65,19 @@ const (
 // a probe-error on that source leaves the field false AND adds an
 // entry to PendingRebootResult.ProbeErrors so the consumer can tell
 // "absent" from "incomplete".
+//
+// All six fields ship without `omitempty` (Codex 019e749c post-impl
+// P0#2): the contract is that every signal key is present in the
+// wire payload regardless of value, so backend/UI cannot mis-read
+// "key missing" as "false". `false` is a positive answer ("this
+// source did not fire"), not absence of evidence.
 type PendingRebootSignals struct {
 	CBSRebootPending            bool `json:"cbsRebootPending"`
 	WindowsUpdateRebootRequired bool `json:"windowsUpdateRebootRequired"`
 	PendingFileRenameOperations bool `json:"pendingFileRenameOperations"`
 	ComputerNameChangePending   bool `json:"computerNameChangePending"`
-	UpdateExeVolatile           bool `json:"updateExeVolatile,omitempty"`
-	NetlogonJoinPending         bool `json:"netlogonJoinPending,omitempty"`
+	UpdateExeVolatile           bool `json:"updateExeVolatile"`
+	NetlogonJoinPending         bool `json:"netlogonJoinPending"`
 }
 
 // PendingRebootProbeError carries a structured probe-level failure

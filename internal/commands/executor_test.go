@@ -245,6 +245,43 @@ func TestLocalExecutorBoolPayloadIncludeHardware(t *testing.T) {
 	}
 }
 
+// AG-030 — boolPayload mapping for the new includePendingReboot
+// key. Mirrors the includeSoftware / includeWinGetEgress /
+// includeHardware matrix so the "lightweight default is safe"
+// contract is enforced uniformly for every COLLECT_INVENTORY
+// opt-in bit. The pending-reboot probe accidentally firing for
+// every heartbeat would defeat the AG-025H lightweight contract,
+// so the "missing key / non-boolean / unknown shape ⇒ false"
+// branch is the load-bearing one here.
+func TestLocalExecutorBoolPayloadIncludePendingReboot(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]interface{}
+		wantOn  bool
+	}{
+		{"nil-payload", nil, false},
+		{"missing-key", map[string]interface{}{"includeSoftware": true}, false},
+		{"bool-true", map[string]interface{}{"includePendingReboot": true}, true},
+		{"bool-false", map[string]interface{}{"includePendingReboot": false}, false},
+		{"string-true", map[string]interface{}{"includePendingReboot": "true"}, true},
+		{"string-1", map[string]interface{}{"includePendingReboot": "1"}, true},
+		{"string-True", map[string]interface{}{"includePendingReboot": "True"}, true},
+		{"string-false", map[string]interface{}{"includePendingReboot": "false"}, false},
+		{"string-0", map[string]interface{}{"includePendingReboot": "0"}, false},
+		{"int-1", map[string]interface{}{"includePendingReboot": 1}, true},
+		{"int-0", map[string]interface{}{"includePendingReboot": 0}, false},
+		{"float64-1", map[string]interface{}{"includePendingReboot": float64(1)}, true},
+		{"float64-0", map[string]interface{}{"includePendingReboot": float64(0)}, false},
+		{"unknown-type", map[string]interface{}{"includePendingReboot": []string{"yes"}}, false},
+	}
+	for _, tc := range cases {
+		got := boolPayload(tc.payload, "includePendingReboot")
+		if got != tc.wantOn {
+			t.Errorf("%s: boolPayload(includePendingReboot) = %v, want %v", tc.name, got, tc.wantOn)
+		}
+	}
+}
+
 func TestLocalExecutorListLocalUsersUnsupportedOutsideWindows(t *testing.T) {
 	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandListLocalUsers}, "test")
 	command := protocol.AgentCommand{
