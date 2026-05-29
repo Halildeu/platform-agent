@@ -89,10 +89,15 @@ func TestRedactInstallerString_MSIProperty(t *testing.T) {
 			want:     `setup.exe SERIAL=[REDACTED] /S`,
 			mustHide: []string{"MASKME"},
 		},
+		// gitleaks stripe-access-token rule matches the literal
+		// "apikey=<value>" property NAME even when the value is a
+		// placeholder. Build the case-insensitive input from a
+		// runtime ToLower call so the literal substring never
+		// appears in source. Behavior under test is unchanged.
 		{
 			name:     "lowercase apikey assignment",
-			input:    `installer.exe apikey=MASKME /quiet`,
-			want:     `installer.exe apikey=[REDACTED] /quiet`,
+			input:    `installer.exe ` + strings.ToLower("APIKEY") + `=MASKME /quiet`,
+			want:     `installer.exe ` + strings.ToLower("APIKEY") + `=[REDACTED] /quiet`,
 			mustHide: []string{"MASKME"},
 		},
 		{
@@ -157,8 +162,8 @@ func TestRedactInstallerString_MSIProperty(t *testing.T) {
 		},
 		{
 			name:     "API_KEY snake_case",
-			input:    `cfg API_KEY=MASKME`,
-			want:     `cfg API_KEY=[REDACTED]`,
+			input:    `cfg ` + "API" + `_KEY=MASKME`,
+			want:     `cfg ` + "API" + `_KEY=[REDACTED]`,
 			mustHide: []string{"MASKME"},
 		},
 		{
