@@ -91,9 +91,9 @@ func TestRedactInstallerString_MSIProperty(t *testing.T) {
 		},
 		{
 			name:     "lowercase apikey assignment",
-			input:    `installer.exe apikey=sk_test_placeholder /quiet`,
+			input:    `installer.exe apikey=FAKE-APIKEY-PLACEHOLDER /quiet`,
 			want:     `installer.exe apikey=[REDACTED] /quiet`,
-			mustHide: []string{"sk_test_placeholder"},
+			mustHide: []string{"FAKE-APIKEY-PLACEHOLDER"},
 		},
 		{
 			name:     "ACTIVATION embedded in vendor template",
@@ -157,9 +157,9 @@ func TestRedactInstallerString_MSIProperty(t *testing.T) {
 		},
 		{
 			name:     "API_KEY snake_case",
-			input:    `cfg API_KEY=sk_test_placeholder`,
+			input:    `cfg API_KEY=FAKE-APIKEY-PLACEHOLDER`,
 			want:     `cfg API_KEY=[REDACTED]`,
-			mustHide: []string{"sk_test_placeholder"},
+			mustHide: []string{"FAKE-APIKEY-PLACEHOLDER"},
 		},
 		{
 			name:     "SECRET_KEY snake_case",
