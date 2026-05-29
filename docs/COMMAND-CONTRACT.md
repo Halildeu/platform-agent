@@ -884,3 +884,155 @@ Boolean precedence (Codex 019e749c iter-1 absorb):
   the contract narrow.
 - **`PostRebootReporting`** — same: candidate for v2 widening once
   v1 telemetry confirms false-positive rate is low.
+
+---
+
+## 13. AG-031 — Endpoint Security Posture (Faz 22.5.2 posture quartet)
+
+The endpoint security posture probe answers the question "what
+state are the host's security controls in right now?" — without
+ever touching them. It runs once per opt-in COLLECT_INVENTORY and
+returns a wire-safe roll-up covering antivirus, host-based firewall
+and drive encryption.
+
+### 13.1 Scope
+
+The probe is strictly **read-only**:
+
+- It NEVER enables or disables a control (no Set-MpPreference, no
+  Enable-NetFirewallProfile, no Manage-bde, no policy push).
+- It NEVER runs a sample scan, decrypts a volume, or exports a
+  recovery key.
+- It NEVER surfaces vendor product names, drive identifiers
+  (letters, mountpoints, volume GUIDs), recovery passwords or key
+  protector contents on the wire.
+
+It answers the posture question: "is Defender on / off / unknown,
+is the firewall on per-profile with block-by-default, is the system
+drive encrypted, how many data drives are encrypted out of how
+many."
+
+### 13.2 Opt-in payload bit
+
+`COLLECT_INVENTORY` accepts an opt-in bit:
+
+```json
+{
+  "type": "COLLECT_INVENTORY",
+  "payload": { "includeSecurityPosture": true }
+}
+```
+
+Default = `false`. Heartbeat / auto-enroll never opt in; the
+AG-025H lightweight contract stays cheap.
+
+### 13.3 Wire-safe result payload
+
+`Snapshot.securityPosture` is omitted unless the caller opted in.
+When present:
+
+```json
+{
+  "securityPosture": {
+    "schemaVersion": 1,
+    "supported": true,
+    "probeComplete": true,
+    "antivirus": {
+      "microsoftDefender": {
+        "present": true,
+        "antivirusEnabled": true,
+        "realTimeProtectionEnabled": true,
+        "signatureAgeDays": 0,
+        "engineVersionPresent": true,
+        "tamperProtected": true
+      },
+      "nonMicrosoftAvPresent": false,
+      "avProductCount": 1
+    },
+    "firewall": {
+      "domain":  { "enabled": true, "defaultInboundAction": "BLOCK" },
+      "private": { "enabled": true, "defaultInboundAction": "BLOCK" },
+      "public":  { "enabled": true, "defaultInboundAction": "BLOCK" }
+    },
+    "bitlocker": {
+      "systemDrivePresent": true,
+      "systemDriveEncrypted": true,
+      "systemDriveProtected": true,
+      "systemDriveEncryptionActive": false,
+      "dataDriveCount": 0,
+      "encryptedDataDriveCount": 0,
+      "protectedDataDriveCount": 0,
+      "suspendedDriveCount": 0
+    },
+    "probeDurationMs": 1234
+  }
+}
+```
+
+Tri-state semantics:
+
+- `antivirusEnabled`, `realTimeProtectionEnabled`, `tamperProtected`,
+  `nonMicrosoftAvPresent` are **nullable booleans**. `null` means
+  "the source returned no value" (cmdlet missing, no SecurityCenter2
+  product registered, host not Defender-aware). `false` means "the
+  source returned and the control is off". Operators MUST NOT
+  collapse `null` to `false`.
+- `signatureAgeDays`, `avProductCount` are nullable integers with
+  the same semantics.
+- `probeComplete` is `true` iff `probeErrors` is empty. Any
+  source-level read failure flips it to `false`.
+
+### 13.4 Sources probed (v1)
+
+| Source         | Cmdlet                                                   | Surfaces                                                                                                       |
+| -------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Defender       | `Get-MpComputerStatus`                                   | `present`, `antivirusEnabled`, `realTimeProtectionEnabled`, `signatureAgeDays`, `engineVersionPresent`, `tamperProtected` |
+| SecurityCenter | `Get-CimInstance -Namespace root\SecurityCenter2 AntiVirusProduct` | `nonMicrosoftAvPresent`, `avProductCount` (count only — never `displayName`)                          |
+| Firewall       | `Get-NetFirewallProfile`                                 | per-profile `enabled` + `defaultInboundAction` ∈ {`ALLOW`, `BLOCK`, `UNKNOWN`}                                 |
+| BitLocker      | `Get-BitLockerVolume`                                    | system-drive booleans + data-drive counts (`dataDriveCount`, `encryptedDataDriveCount`, `protectedDataDriveCount`, `suspendedDriveCount`) |
+
+All four sources run inside a single PowerShell process under
+`-NoProfile -NonInteractive` with a pinned script and a 30-second
+deadline. The script is reviewed once and embedded in the build;
+no payload-supplied substitution, no `Invoke-Expression`, no
+shell. `netsh` is intentionally NOT used (AG-035 PowerShell-only
+pattern; Codex 019e74b5 iter-0 must-fix #7).
+
+### 13.5 Security invariants
+
+- **Read-only argv pin.** Pinned argv:
+  `powershell.exe -NoProfile -NonInteractive -Command <pinned script>`.
+  Payload bits cannot reach the PowerShell invocation; they only
+  flip the opt-in.
+- **No identifier leak.** The PowerShell script's `ConvertTo-Json`
+  output is an allowlist `PSCustomObject` — drive letters,
+  mountpoints, volume GUIDs, key protectors, recovery passwords,
+  AV vendor display names, AV install paths, and firewall rule
+  names are NEVER built into the output. The Go-side normalizer
+  only consumes the allowlisted fields and drops anything else.
+- **Bounded summaries.** Source error summaries are capped at 200
+  characters; raw exception dumps and registry / CIM values never
+  reach `probeErrors[*].summary`.
+- **Tri-state honored.** A failed cmdlet leaves the matching
+  nullable field at `null` and appends a typed `probeErrors[*]`
+  entry. The agent never fabricates a `false` value to fill the
+  shape.
+- **Posture, never remediation.** There is no remediation surface
+  in AG-031. The backend / operator decides what to do with the
+  posture readout.
+
+### 13.6 Known v1 exclusions (planned for future PRs or out of scope)
+
+- **EDR / MDE telemetry posture.** Microsoft Defender for Endpoint
+  onboarding state, sensor health, organization id — deferred to
+  a dedicated AG-039 EDR posture probe (Sprint C scope).
+- **Application Control / WDAC / AppLocker policy state.** Deferred
+  to AG-040 (Sprint C).
+- **Credential Guard / HVCI / VBS attestation.** Deferred to
+  AG-041 (Sprint D).
+- **Drive identifier surfacing.** Out of scope — drive letters,
+  GUIDs, recovery passwords are a HARD BOUNDARY.
+- **Third-party AV vendor enumeration.** SecurityCenter2 returns a
+  count + presence boolean only; the `displayName` field is read
+  to derive `nonMicrosoftAvPresent` but is NEVER passed to the
+  wire payload.

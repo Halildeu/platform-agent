@@ -282,6 +282,35 @@ func TestLocalExecutorBoolPayloadIncludePendingReboot(t *testing.T) {
 	}
 }
 
+func TestLocalExecutorBoolPayloadIncludeSecurityPosture(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]interface{}
+		wantOn  bool
+	}{
+		{"nil-payload", nil, false},
+		{"missing-key", map[string]interface{}{"includeSoftware": true}, false},
+		{"bool-true", map[string]interface{}{"includeSecurityPosture": true}, true},
+		{"bool-false", map[string]interface{}{"includeSecurityPosture": false}, false},
+		{"string-true", map[string]interface{}{"includeSecurityPosture": "true"}, true},
+		{"string-1", map[string]interface{}{"includeSecurityPosture": "1"}, true},
+		{"string-True", map[string]interface{}{"includeSecurityPosture": "True"}, true},
+		{"string-false", map[string]interface{}{"includeSecurityPosture": "false"}, false},
+		{"string-0", map[string]interface{}{"includeSecurityPosture": "0"}, false},
+		{"int-1", map[string]interface{}{"includeSecurityPosture": 1}, true},
+		{"int-0", map[string]interface{}{"includeSecurityPosture": 0}, false},
+		{"float64-1", map[string]interface{}{"includeSecurityPosture": float64(1)}, true},
+		{"float64-0", map[string]interface{}{"includeSecurityPosture": float64(0)}, false},
+		{"unknown-type", map[string]interface{}{"includeSecurityPosture": []string{"yes"}}, false},
+	}
+	for _, tc := range cases {
+		got := boolPayload(tc.payload, "includeSecurityPosture")
+		if got != tc.wantOn {
+			t.Errorf("%s: boolPayload(includeSecurityPosture) = %v, want %v", tc.name, got, tc.wantOn)
+		}
+	}
+}
+
 func TestLocalExecutorListLocalUsersUnsupportedOutsideWindows(t *testing.T) {
 	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandListLocalUsers}, "test")
 	command := protocol.AgentCommand{
