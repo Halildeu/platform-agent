@@ -969,18 +969,34 @@ When present:
 }
 ```
 
-Tri-state semantics:
+Tri-state semantics (Codex 019e74c3 iter-2 absorb — doc updated to
+match the post-MF-3 implementation that distinguishes "successful
+zero readout" from "source unavailable"):
 
 - `antivirusEnabled`, `realTimeProtectionEnabled`, `tamperProtected`,
-  `nonMicrosoftAvPresent` are **nullable booleans**. `null` means
-  "the source returned no value" (cmdlet missing, no SecurityCenter2
-  product registered, host not Defender-aware). `false` means "the
-  source returned and the control is off". Operators MUST NOT
-  collapse `null` to `false`.
+  `nonMicrosoftAvPresent` are **nullable booleans**.
+  - `null` means **source unavailable / cmdlet failed / no value
+    returned**: the cmdlet was missing on the host, threw an
+    exception that the catch block surfaced as a typed
+    `probeErrors[]` entry (e.g. `ACCESS_DENIED`,
+    `CMDLET_UNAVAILABLE`, `POWERSHELL_FAILED`), or returned a
+    structure that did not include the field at all. When any
+    nullable field is `null`, `probeComplete` is also `false`
+    because the matching source's error entry is appended.
+  - `false` means **the source ran successfully and the control is
+    off / not present**. For example, `nonMicrosoftAvPresent=false`
+    + `avProductCount=0` is the canonical "SecurityCenter2 query
+    succeeded and no AV products are registered" readout.
+    `antivirusEnabled=false` means Defender is installed but
+    disabled.
+  - Operators MUST NOT collapse `null` to `false` — they carry
+    different semantics and `probeComplete` distinguishes them.
 - `signatureAgeDays`, `avProductCount` are nullable integers with
-  the same semantics.
+  the same semantics: `null` = unavailable / failure; numeric value
+  (including `0`) = successful readout.
 - `probeComplete` is `true` iff `probeErrors` is empty. Any
-  source-level read failure flips it to `false`.
+  source-level read failure (including a `NO_EVIDENCE` fail-closed
+  guard fire) flips it to `false`.
 
 ### 13.4 Sources probed (v1)
 
