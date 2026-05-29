@@ -99,6 +99,12 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// includeLocalAdminGroup payload bit when a Sprint B
 			// posture refresh is requested.
 			IncludeLocalAdminGroup: boolPayload(command.Payload, "includeLocalAdminGroup"),
+			// AG-033 — opt-in device health snapshot. Defaults to
+			// false so the AG-025H lightweight contract stays cheap.
+			// Backend opts in via COLLECT_INVENTORY's
+			// includeDeviceHealth payload bit for pre-deployment
+			// health gating.
+			IncludeDeviceHealth: boolPayload(command.Payload, "includeDeviceHealth"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"
