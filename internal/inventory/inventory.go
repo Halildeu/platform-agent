@@ -69,6 +69,17 @@ type Snapshot struct {
 	// ProbeComplete=false + UNSUPPORTED_PLATFORM error; callers MUST
 	// NOT infer "host is unprotected" from a non-Windows result.
 	SecurityPosture *SecurityPostureResult `json:"securityPosture,omitempty"`
+
+	// LocalAdminGroup is intentionally nil unless the caller opted
+	// into the AG-032 direct local-administrators alias enumeration
+	// via CollectOptions.IncludeLocalAdminGroup. The probe is
+	// strictly identifier-leak-free: drive letters, GUIDs, account
+	// names, full SIDs, RIDs, domain SID prefixes — none reach the
+	// wire. Only typed Kind enum + bool scope/risk flags + count
+	// totals + bounded Members slice. On non-Windows runtimes the
+	// probe returns Supported=false + ProbeComplete=false +
+	// UNSUPPORTED_PLATFORM. See COMMAND-CONTRACT.md §14.
+	LocalAdminGroup *LocalAdminGroupResult `json:"localAdminGroup,omitempty"`
 }
 
 // CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
@@ -173,6 +184,23 @@ type CollectOptions struct {
 	// third-party AV product names are NEVER surfaced to the wire —
 	// only counts, booleans and bounded enum values.
 	IncludeSecurityPosture bool
+
+	// IncludeLocalAdminGroup gates the AG-032 direct local
+	// Built-in Administrators alias enumeration probe. When true,
+	// CollectWithOptions invokes ProbeLocalAdminGroup (NetAPI
+	// primary → PowerShell LocalAccounts fallback → WMI
+	// last-resort) and attaches the result to
+	// Snapshot.LocalAdminGroup. When false (the default), the
+	// probe is not invoked and the wire payload omits the field.
+	//
+	// HARD BOUNDARY: read-only NetAPI / PowerShell enumeration.
+	// NEVER mutates group membership. NEVER emits raw SID bytes,
+	// SID family / authority / RID, full SID string, domain SID
+	// prefix, account name, display name, description, principal
+	// path, or domain name on the wire. ONLY: typed Kind enum +
+	// bool scope/risk flags + count totals + bounded Members
+	// slice (cap=256, MembersTruncated when exceeded).
+	IncludeLocalAdminGroup bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -224,7 +252,22 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		sp := collectSecurityPostureForSnapshot(now)
 		snapshot.SecurityPosture = &sp
 	}
+	if opts.IncludeLocalAdminGroup {
+		lag := collectLocalAdminGroupForSnapshot(now)
+		snapshot.LocalAdminGroup = &lag
+	}
 	return snapshot
+}
+
+// collectLocalAdminGroupForSnapshot is the test seam for the
+// AG-032 local-administrators probe. Production wires the real
+// ProbeLocalAdminGroup with time.Now (NOT the snapshot's frozen
+// CollectedAt) so ProbeDurationMs measures real elapsed
+// wall-clock. Tests override it to assert default-omit / opt-in /
+// non-Windows stub behavior without spawning a powershell process
+// or invoking NetAPI.
+var collectLocalAdminGroupForSnapshot = func(_ time.Time) LocalAdminGroupResult {
+	return ProbeLocalAdminGroup(context.Background(), time.Now)
 }
 
 // collectSecurityPostureForSnapshot is the test seam for the AG-031

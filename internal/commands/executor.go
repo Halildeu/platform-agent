@@ -92,6 +92,13 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// includeSecurityPosture payload bit when a Sprint B
 			// posture refresh is requested.
 			IncludeSecurityPosture: boolPayload(command.Payload, "includeSecurityPosture"),
+			// AG-032 — opt-in direct local-Administrators
+			// enumeration. Defaults to false so the AG-025H
+			// lightweight contract stays cheap. Backend opts in
+			// explicitly via COLLECT_INVENTORY's
+			// includeLocalAdminGroup payload bit when a Sprint B
+			// posture refresh is requested.
+			IncludeLocalAdminGroup: boolPayload(command.Payload, "includeLocalAdminGroup"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"

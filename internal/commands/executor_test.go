@@ -311,6 +311,35 @@ func TestLocalExecutorBoolPayloadIncludeSecurityPosture(t *testing.T) {
 	}
 }
 
+func TestLocalExecutorBoolPayloadIncludeLocalAdminGroup(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]interface{}
+		wantOn  bool
+	}{
+		{"nil-payload", nil, false},
+		{"missing-key", map[string]interface{}{"includeSoftware": true}, false},
+		{"bool-true", map[string]interface{}{"includeLocalAdminGroup": true}, true},
+		{"bool-false", map[string]interface{}{"includeLocalAdminGroup": false}, false},
+		{"string-true", map[string]interface{}{"includeLocalAdminGroup": "true"}, true},
+		{"string-1", map[string]interface{}{"includeLocalAdminGroup": "1"}, true},
+		{"string-True", map[string]interface{}{"includeLocalAdminGroup": "True"}, true},
+		{"string-false", map[string]interface{}{"includeLocalAdminGroup": "false"}, false},
+		{"string-0", map[string]interface{}{"includeLocalAdminGroup": "0"}, false},
+		{"int-1", map[string]interface{}{"includeLocalAdminGroup": 1}, true},
+		{"int-0", map[string]interface{}{"includeLocalAdminGroup": 0}, false},
+		{"float64-1", map[string]interface{}{"includeLocalAdminGroup": float64(1)}, true},
+		{"float64-0", map[string]interface{}{"includeLocalAdminGroup": float64(0)}, false},
+		{"unknown-type", map[string]interface{}{"includeLocalAdminGroup": []string{"yes"}}, false},
+	}
+	for _, tc := range cases {
+		got := boolPayload(tc.payload, "includeLocalAdminGroup")
+		if got != tc.wantOn {
+			t.Errorf("%s: boolPayload(includeLocalAdminGroup) = %v, want %v", tc.name, got, tc.wantOn)
+		}
+	}
+}
+
 func TestLocalExecutorListLocalUsersUnsupportedOutsideWindows(t *testing.T) {
 	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandListLocalUsers}, "test")
 	command := protocol.AgentCommand{
