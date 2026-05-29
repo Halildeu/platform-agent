@@ -853,7 +853,7 @@ Boolean precedence (Codex 019e749c iter-1 absorb):
 | `WINDOWS_UPDATE_REBOOT_REQUIRED` | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired` subkey exists (WOW64_64KEY view) |
 | `PENDING_FILE_RENAME_OPERATIONS` | `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager` `PendingFileRenameOperations` REG_MULTI_SZ present AND non-empty |
 | `COMPUTER_NAME_CHANGE_PENDING` | `HKLM\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName` != `\ComputerName` (case-insensitive + trim-normalized; raw names do NOT leak) |
-| `UPDATE_EXE_VOLATILE` | `HKLM\SOFTWARE\Microsoft\Updates\UpdateExeVolatile` subkey exists |
+| `UPDATE_EXE_VOLATILE` | `HKLM\SOFTWARE\Microsoft\Updates\UpdateExeVolatile` `Flags` REG_DWORD value: missing key/value = false, Flags=0 = false, Flags!=0 = true, non-DWORD = probe error (Codex 019e749c iter-1 P0#4 absorb) |
 | `NETLOGON_JOIN_PENDING` | `HKLM\SYSTEM\CurrentControlSet\Services\Netlogon` `JoinDomain` OR `AvoidSpnSet` value exists |
 
 ### 12.5 Security invariants
