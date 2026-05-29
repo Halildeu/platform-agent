@@ -181,12 +181,28 @@ type NetworkCheck struct {
 
 // EgressSummary aggregates the DNS / TCP / HTTPS reachability
 // probes against DefaultEgressTargets.
+//
+// AG-026A follow-up (HALILKOOLUB735 lab 2026-05-29): the JSON tags
+// no longer carry omitempty. Backend WinGetEgressPayloadPolicy
+// (endpoint-admin-service) treats `dns` / `tcp` / `https` as required
+// arrays when supported=true — a nil slice that omits to JSON silence
+// trips a 400
+//   "wingetEgress.egress.dns is required (array) when supported=true"
+// at result-submit, so the whole COLLECT_INVENTORY round-trip fails
+// and hardware ingest (BE-022 V14) is also dropped because the
+// command result never persists. Defensive shape — always emit `[]`
+// — lets the backend persist the result, run the hardware ingest
+// hook, and surface the empty-probe state honestly.
+//
+// runEgressWith initialises the three slices to non-nil empty slices
+// so json.Marshal serialises them as `[]` (a nil slice would still
+// serialise as `null`).
 type EgressSummary struct {
-	DNS        []NetworkCheck `json:"dns,omitempty"`
-	TCP        []NetworkCheck `json:"tcp,omitempty"`
-	HTTPS      []NetworkCheck `json:"https,omitempty"`
-	ProxyURL   string         `json:"proxyUrl,omitempty"`
-	ProxyConfigured bool      `json:"proxyConfigured"`
+	DNS             []NetworkCheck `json:"dns"`
+	TCP             []NetworkCheck `json:"tcp"`
+	HTTPS           []NetworkCheck `json:"https"`
+	ProxyURL        string         `json:"proxyUrl,omitempty"`
+	ProxyConfigured bool           `json:"proxyConfigured"`
 }
 
 // SourceEgressReadiness is the wire-safe preflight result.
@@ -574,7 +590,16 @@ func runPackageQuery(parent context.Context, opts SourceEgressOptions, wingetPat
 // context so the overall preflight deadline always clamps the total
 // wall-clock even if the per-probe slice is larger.
 func runEgressWith(parent context.Context, opts SourceEgressOptions, targets []EgressTarget, perProbe time.Duration) EgressSummary {
-	summary := EgressSummary{}
+	// AG-026A follow-up: initialise the three probe slices to non-nil
+	// empty slices so json.Marshal emits `[]` instead of `null` when
+	// no targets are reached (Windows without winget, all probes
+	// failed before any append). Backend WinGetEgressPayloadPolicy
+	// requires the arrays to be present whenever supported=true.
+	summary := EgressSummary{
+		DNS:   []NetworkCheck{},
+		TCP:   []NetworkCheck{},
+		HTTPS: []NetworkCheck{},
+	}
 	resolve := opts.Resolve
 	if resolve == nil {
 		resolve = defaultResolver

@@ -2,6 +2,7 @@ package winget
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -547,4 +548,64 @@ func sampleSourceListOutput() string {
 		"--------------------------------------------------------------------------------------------------\n" +
 		"winget    https://cdn.winget.microsoft.com/cache            Microsoft.PreIndexed.Package      Trusted\n" +
 		"msstore   https://storeedgefd.dsx.mp.microsoft.com/v9.0     Microsoft.Rest                    Trusted\n"
+}
+
+// TestEgressSummaryWireShape — AG-026A follow-up regression guard.
+//
+// Backend WinGetEgressPayloadPolicy treats dns / tcp / https as
+// required arrays when supported=true. A nil slice that omits to JSON
+// silence trips a 400 ("wingetEgress.egress.dns is required (array)
+// when supported=true") at result-submit. This test asserts the
+// shape on the wire — that EgressSummary serialises empty slices as
+// `[]` and never as `null` or as a missing field.
+func TestEgressSummaryWireShape(t *testing.T) {
+	// Zero-value-with-empty-slice construction mirrors what
+	// runEgressWith returns when no probe target was reached.
+	summary := EgressSummary{
+		DNS:   []NetworkCheck{},
+		TCP:   []NetworkCheck{},
+		HTTPS: []NetworkCheck{},
+	}
+	body, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	wire := string(body)
+	for _, key := range []string{`"dns":`, `"tcp":`, `"https":`} {
+		if !strings.Contains(wire, key) {
+			t.Fatalf("egress summary wire payload missing %s: %s", key, wire)
+		}
+	}
+	// Backend explicitly rejects null. Empty array must serialise as `[]`.
+	for _, banned := range []string{`"dns":null`, `"tcp":null`, `"https":null`} {
+		if strings.Contains(wire, banned) {
+			t.Fatalf("egress summary must not emit %s: %s", banned, wire)
+		}
+	}
+	// Sanity — the empty-slice serialisation is `[]`.
+	if !strings.Contains(wire, `"dns":[]`) {
+		t.Fatalf("expected dns=[] in wire payload, got %s", wire)
+	}
+}
+
+// TestEgressSummaryNilSliceWireShape pins the *negative* contract too:
+// even if a future caller constructs an EgressSummary with nil slices,
+// the wire payload must NOT include the old `omitempty` behaviour
+// where the keys vanished altogether. This is a defence-in-depth
+// guard so a refactor that re-introduces omitempty fails fast.
+func TestEgressSummaryNilSliceWireShape(t *testing.T) {
+	summary := EgressSummary{} // nil slices intentionally
+	body, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	wire := string(body)
+	for _, key := range []string{`"dns":`, `"tcp":`, `"https":`} {
+		if !strings.Contains(wire, key) {
+			t.Fatalf(
+				"AG-026A regression: nil slice must still serialise the key (no omitempty), got %s",
+				wire,
+			)
+		}
+	}
 }
