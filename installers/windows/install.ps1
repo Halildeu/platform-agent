@@ -188,6 +188,86 @@ function Set-AgentServiceHardening {
     Invoke-NativeCommand -FilePath "sc.exe" -Arguments @("sdset", $Name, $Sddl)
 }
 
+# AG-026C: build the service-specific Environment regkey value
+# (REG_MULTI_SZ at HKLM\SYSTEM\CurrentControlSet\Services\<name>\Environment).
+# Windows SCM reads this on every service spawn and overlays it on the
+# inherited machine env block, side-stepping the SCM env block cache that
+# caused the 3-hour SRB-AIDENETIMPC live-rollout debug session
+# (Codex 019e7314). Tokens stored here are temporary (cleared by
+# Clear-ServiceEnvironmentToken after AG-026D's "hmac credential
+# confirmed" sentinel proves the credential persisted to DPAPI).
+function Set-ServiceEnvironmentRegkey {
+    param(
+        [string]$Name,
+        [hashtable]$Values
+    )
+    $servicePath = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    if (-not (Test-Path -LiteralPath $servicePath)) {
+        throw "Service registry key not found: $servicePath"
+    }
+    $entries = @()
+    foreach ($key in $Values.Keys) {
+        $v = $Values[$key]
+        if (-not [string]::IsNullOrWhiteSpace($v)) {
+            $entries += "$key=$v"
+        }
+    }
+    if ($entries.Count -gt 0) {
+        New-ItemProperty -Path $servicePath -Name 'Environment' -Value $entries -PropertyType MultiString -Force | Out-Null
+    } else {
+        # No values to set — clear any stale regkey so the next service
+        # spawn does not inherit obsolete state.
+        Remove-ItemProperty -Path $servicePath -Name 'Environment' -ErrorAction SilentlyContinue
+    }
+}
+
+# AG-026C: strip a single key from the service-specific Environment
+# REG_MULTI_SZ value. Used after enroll confirmation to remove the
+# ENROLLMENT_TOKEN entry while keeping the non-secret config (API_URL,
+# INSTALL_ID, LOG_DIR, MAINTENANCE_TOKEN_SHA256). The next service
+# restart will see the env without the token; AG-026D's DPAPI store
+# already holds the issued credential so the token is no longer needed.
+function Remove-ServiceEnvironmentEntry {
+    param(
+        [string]$Name,
+        [string]$Key
+    )
+    $servicePath = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    $existing = Get-ItemProperty -Path $servicePath -Name 'Environment' -ErrorAction SilentlyContinue
+    if ($null -eq $existing -or $null -eq $existing.Environment) { return }
+    $prefix = "$Key="
+    $filtered = @($existing.Environment | Where-Object { $_ -notlike "$prefix*" })
+    if ($filtered.Count -gt 0) {
+        New-ItemProperty -Path $servicePath -Name 'Environment' -Value $filtered -PropertyType MultiString -Force | Out-Null
+    } else {
+        Remove-ItemProperty -Path $servicePath -Name 'Environment' -ErrorAction SilentlyContinue
+    }
+}
+
+# AG-026C: scan the agent log for the AG-026D "hmac credential
+# confirmed" sentinel that proves: (a) the DPAPI store wrote the
+# credential, (b) the first signed heartbeat returned 2xx with
+# accepted=true, (c) deviceId matched. Only when all three hold does
+# AG-026C clear the enrollment token from the service env regkey.
+# Returns $true on success, $false on timeout.
+function Wait-ForCredentialConfirmed {
+    param(
+        [string]$LogPath,
+        [int]$TimeoutSeconds = 60
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $LogPath) {
+            $tail = Get-Content -LiteralPath $LogPath -Tail 200 -ErrorAction SilentlyContinue
+            if ($tail | Where-Object { $_ -match 'hmac credential confirmed' }) {
+                return $true
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
 function Remove-ServiceBestEffort {
     param(
         [string]$Name,
@@ -226,6 +306,17 @@ $installedService = $false
 $resolvedMaintenanceTokenHash = Resolve-MaintenanceTokenHash -Token $MaintenanceToken -Hash $MaintenanceTokenHash
 
 try {
+    # AG-026C: defuse the regkey override mechanism BEFORE any service
+    # work happens. A previous incomplete install or a parallel script
+    # may have written `HKLM\...\Services\$ServiceName\Environment`
+    # with a stale token; if we leave it in place even a fresh service
+    # install would inherit it. Clearing first guarantees the
+    # service env regkey below is the SOLE source of agent config.
+    if (Test-ServiceExists -Name $ServiceName) {
+        Write-Step "clearing stale service env regkey: $ServiceName\\Environment"
+        Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" -Name 'Environment' -ErrorAction SilentlyContinue
+    }
+
     if ((Test-ServiceExists -Name $ServiceName) -and -not $Force) {
         throw "Service '$ServiceName' already exists. Use -Force to replace it."
     }
@@ -260,13 +351,36 @@ try {
     Unblock-File -LiteralPath $targetBinary -ErrorAction SilentlyContinue
     $copiedBinary = $true
 
-    Set-MachineEnvIfPresent -OriginalValues $originalValues -Name "ENDPOINT_AGENT_API_URL" -Value $ApiUrl
-    Set-MachineEnvIfPresent -OriginalValues $originalValues -Name "ENDPOINT_AGENT_ENROLLMENT_TOKEN" -Value $EnrollmentToken
-    Set-MachineEnvIfPresent -OriginalValues $originalValues -Name "ENDPOINT_AGENT_ID" -Value $AgentId
-    Set-MachineEnvIfPresent -OriginalValues $originalValues -Name "ENDPOINT_AGENT_SECRET" -Value $AgentSecret
-    Set-MachineEnvIfPresent -OriginalValues $originalValues -Name "ENDPOINT_AGENT_INSTALL_ID" -Value $InstallId
-    Set-MachineEnvIfPresent -OriginalValues $originalValues -Name "ENDPOINT_AGENT_LOG_DIR" -Value $LogDir
-    Set-MachineEnvIfPresent -OriginalValues $originalValues -Name "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" -Value $resolvedMaintenanceTokenHash
+    # AG-026C: install agent config to the SERVICE-SPECIFIC env regkey
+    # (HKLM\SYSTEM\CurrentControlSet\Services\$ServiceName\Environment)
+    # instead of the Machine env. Bypasses the SCM env block caching
+    # quirk that delayed SCM from picking up Machine env changes on
+    # high-uptime hosts (live evidence: SRB-AIDENETIMPC 3-hour debug
+    # session, 2026-05-29; Codex 019e7314). The service spawn ALWAYS
+    # reads this regkey, so an install→reboot dance is no longer
+    # required and a service restart inherits the new config
+    # immediately.
+    #
+    # The ENROLLMENT_TOKEN is included here only for the single
+    # bootstrap window between install completion and the
+    # AG-026D-emitted "hmac credential confirmed" sentinel. Once the
+    # sentinel proves DPAPI persistence + signed heartbeat acceptance,
+    # the post-install gate below removes ONLY the token entry,
+    # leaving non-secret config in place.
+    #
+    # AG-026D credential persistence makes the token's continued
+    # presence in env unnecessary across restarts: the agent loads
+    # DPAPI credential at cold start and bypasses the env-token path
+    # entirely.
+    $serviceEnv = @{
+        "ENDPOINT_AGENT_API_URL" = $ApiUrl
+        "ENDPOINT_AGENT_ENROLLMENT_TOKEN" = $EnrollmentToken
+        "ENDPOINT_AGENT_ID" = $AgentId
+        "ENDPOINT_AGENT_SECRET" = $AgentSecret
+        "ENDPOINT_AGENT_INSTALL_ID" = $InstallId
+        "ENDPOINT_AGENT_LOG_DIR" = $LogDir
+        "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" = $resolvedMaintenanceTokenHash
+    }
 
     Write-Step "installing service: $ServiceName"
     Invoke-AgentServiceCommand -ExePath $targetBinary -Arguments @(
@@ -276,6 +390,16 @@ try {
         "--description", $Description
     )
     $installedService = $true
+
+    # AG-026C: write the service-specific env regkey AFTER service
+    # install (the service registry key must exist first) but BEFORE
+    # service start (so the first spawn sees the new config). Stale
+    # entries from a previous install/upgrade are overwritten by
+    # New-ItemProperty -Force; this also defuses the regkey override
+    # mechanism that masked Machine env updates in the SRB live debug.
+    Write-Step "writing service env regkey: $ServiceName\\Environment"
+    Set-ServiceEnvironmentRegkey -Name $ServiceName -Values $serviceEnv
+
     if (-not $DisableTamperProtection) {
         Set-AgentServiceHardening -Name $ServiceName -Sddl $ServiceSddl
     }
@@ -287,6 +411,30 @@ try {
 
     Write-Step "status"
     Invoke-AgentServiceCommand -ExePath $targetBinary -Arguments @("service", "status", "--name", $ServiceName)
+
+    # AG-026C: post-install enroll validation gate. Codex 019e7314
+    # iter-1 must_fix #1 keyed the AG-026D-emitted "hmac credential
+    # confirmed" sentinel on (a) DPAPI store write success in this
+    # process AND (b) signed heartbeat 2xx accepted + deviceId match.
+    # When the sentinel appears, the credential is durably persisted
+    # and the env token is no longer needed; we strip it from the
+    # service env regkey so a subsequent OS administrator inspecting
+    # `Get-ItemProperty HKLM:\...\Services\EndpointAgent` does not
+    # see the consumed token. The degraded sentinel ("hmac credential
+    # accepted (not persisted)") is deliberately ignored by the gate
+    # — without DPAPI confirmation we leave the token in place so the
+    # next service restart can retry the same enroll.
+    if ($Start -and -not [string]::IsNullOrWhiteSpace($EnrollmentToken)) {
+        $agentLog = Join-Path $LogDir "endpoint-agent.log"
+        Write-Step "waiting for AG-026D credential-confirmed sentinel (up to 60s)"
+        if (Wait-ForCredentialConfirmed -LogPath $agentLog -TimeoutSeconds 60) {
+            Write-Step "AG-026C: enroll confirmed — removing token from service env regkey"
+            Remove-ServiceEnvironmentEntry -Name $ServiceName -Key "ENDPOINT_AGENT_ENROLLMENT_TOKEN"
+        } else {
+            Write-Warning "AG-026C: 'hmac credential confirmed' sentinel not seen within 60s; token left in service env regkey for next restart retry"
+        }
+    }
+
     Write-Step "install completed"
 } catch {
     Write-Error $_
