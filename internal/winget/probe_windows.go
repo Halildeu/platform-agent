@@ -49,10 +49,23 @@ func defaultLocator() (string, error) {
 		}
 	}
 	if programFiles := os.Getenv("ProgramFiles"); programFiles != "" {
-		// Microsoft.DesktopAppInstaller_8wekyb3d8bbwe is the AppX
-		// family name. We glob it so the version segment doesn't
-		// pin us to one specific store release.
-		pattern := filepath.Join(programFiles, "WindowsApps", "Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe", "winget.exe")
+		// Microsoft.DesktopAppInstaller_<version>_<arch>__8wekyb3d8bbwe
+		// is the AppX package-folder format (8wekyb3d8bbwe is the
+		// publisher hash). We glob the version+arch segment so the
+		// locator works on every CPU architecture, not just x64.
+		//
+		// Prior bug: the glob hard-coded `_x64__`, so on ARM64
+		// Windows (Surface Pro X, Windows-on-ARM, Apple-Silicon
+		// Parallels VMs) the folder is `..._arm64__8wekyb3d8bbwe`
+		// and the glob never matched — winget was reported
+		// not-found under LocalSystem, which made AG-026A report
+		// wingetReady=false and BE-021A preflight BLOCK every
+		// install on those endpoints. The arch-agnostic glob
+		// `Microsoft.DesktopAppInstaller_*__8wekyb3d8bbwe` matches
+		// x64 / arm64 / arm / x86 alike (the `*` spans
+		// `<version>_<arch>`, the literal `__8wekyb3d8bbwe` suffix
+		// pins the publisher hash).
+		pattern := filepath.Join(programFiles, "WindowsApps", DesktopAppInstallerGlob, "winget.exe")
 		if matches, err := filepath.Glob(pattern); err == nil && len(matches) > 0 {
 			return matches[0], nil
 		}
