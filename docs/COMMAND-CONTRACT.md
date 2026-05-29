@@ -998,7 +998,32 @@ no payload-supplied substitution, no `Invoke-Expression`, no
 shell. `netsh` is intentionally NOT used (AG-035 PowerShell-only
 pattern; Codex 019e74b5 iter-0 must-fix #7).
 
-### 13.5 Security invariants
+### 13.5 Failure-mode contract (Codex 019e74c3 iter-1 absorb)
+
+- **No-evidence fail-closed guard.** A `null` / `{}` PowerShell
+  payload now triggers a `NO_EVIDENCE` probe error before
+  `probeComplete` is derived; backend never sees "ran but probed
+  nothing" as `probeComplete=true` (MF-2).
+- **Source enum allowlist.** PowerShell error sources are mapped
+  through `normalizeSecuritySource` — only `defender`,
+  `securityCenter`, `firewall`, `bitlocker`, `powershell` are
+  honoured. Unknown / blank / lower-cased `securitycenter` collapse
+  to the `powershell` catch-all so the typed enum surface is never
+  violated (MF-1).
+- **SecurityCenter2 explicit failure detection.** The
+  `Get-CimInstance root\SecurityCenter2 AntiVirusProduct` call uses
+  `-ErrorAction Stop` so namespace-missing / access-denied / CIM
+  failure paths throw to the catch block and emit
+  `ACCESS_DENIED` / `CMDLET_UNAVAILABLE` / `POWERSHELL_FAILED` —
+  distinct from "cmdlet succeeded with zero products"
+  (`nonMicrosoftAvPresent=false`, `avProductCount=0`) (MF-3).
+- **Summary control-char normalization.** `boundSummary` strips
+  NUL / BEL / ESC / DEL etc. and folds CR/LF/TAB to single spaces
+  (in addition to the 200-char cap) so downstream consumers
+  (audit log, UI, alerting) cannot be tripped by stray control
+  bytes in error summaries.
+
+### 13.6 Security invariants
 
 - **Read-only argv pin.** Pinned argv:
   `powershell.exe -NoProfile -NonInteractive -Command <pinned script>`.
@@ -1021,7 +1046,7 @@ pattern; Codex 019e74b5 iter-0 must-fix #7).
   in AG-031. The backend / operator decides what to do with the
   posture readout.
 
-### 13.6 Known v1 exclusions (planned for future PRs or out of scope)
+### 13.7 Known v1 exclusions (planned for future PRs or out of scope)
 
 - **EDR / MDE telemetry posture.** Microsoft Defender for Endpoint
   onboarding state, sensor health, organization id — deferred to

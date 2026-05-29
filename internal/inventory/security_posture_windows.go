@@ -67,8 +67,13 @@ try {
 }
 
 # ---- SecurityCenter2 third-party AV summary ----
+# Codex 019e74c3 iter-1 MF-3 absorb: use -ErrorAction Stop so that
+# CIM/namespace/access failures throw to the catch block and emit a
+# structured error, instead of being silently swallowed by
+# $ErrorActionPreference='SilentlyContinue' and producing
+# nullable=null + probeComplete=true.
 try {
-  $avProducts = Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName 'AntiVirusProduct'
+  $avProducts = Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName 'AntiVirusProduct' -ErrorAction Stop
   if ($null -ne $avProducts) {
     $count = ($avProducts | Measure-Object).Count
     $nonMs = $false
@@ -82,11 +87,24 @@ try {
       avProductCount        = $count
     }
   } else {
-    $result.securityCenter = [ordered]@{ nonMicrosoftAvPresent = $null; avProductCount = $null }
+    # Cmdlet succeeded but no AV products registered. Definitive
+    # readout: zero products, no third-party AV. Distinct from
+    # cmdlet failure (caught below).
+    $result.securityCenter = [ordered]@{
+      nonMicrosoftAvPresent = $false
+      avProductCount        = 0
+    }
   }
 } catch {
+  # Namespace missing, access denied, or CIM failure. Surface a
+  # typed probe error so probeComplete=false; keep both nullable
+  # fields at null so the wire cannot be confused with a real
+  # zero-products readout.
   $result.securityCenter = [ordered]@{ nonMicrosoftAvPresent = $null; avProductCount = $null }
-  $result.errors += @{ source = 'securityCenter'; code = 'POWERSHELL_FAILED'; summary = 'Get-CimInstance SecurityCenter2 threw' }
+  $errCode = 'POWERSHELL_FAILED'
+  if ($_.Exception -and $_.Exception.GetType().Name -like '*UnauthorizedAccess*') { $errCode = 'ACCESS_DENIED' }
+  elseif ($_.Exception -and $_.Exception.GetType().Name -like '*ManagementException*') { $errCode = 'CMDLET_UNAVAILABLE' }
+  $result.errors += @{ source = 'securityCenter'; code = $errCode; summary = 'Get-CimInstance SecurityCenter2 threw' }
 }
 
 # ---- Firewall per-profile ----
@@ -331,9 +349,31 @@ func ProbeSecurityPosture(ctx context.Context, now func() time.Time) SecurityPos
 	}
 	for _, e := range parsed.Errors {
 		result.ProbeErrors = append(result.ProbeErrors, SecurityProbeError{
-			Source:  SecurityProbeSource(strings.ToLower(strings.TrimSpace(e.Source))),
+			// Codex 019e74c3 iter-1 MF-1 absorb: don't lower-case the
+			// source — the SecurityProbeSource enum is mixed-case
+			// (`securityCenter`). Use an explicit allowlist that
+			// preserves canonical source names and collapses
+			// unrecognized values to the powershell catch-all so the
+			// typed enum contract stays intact.
+			Source:  normalizeSecuritySource(e.Source),
 			Code:    strings.TrimSpace(e.Code),
 			Summary: boundSummary(e.Summary),
+		})
+	}
+
+	// Codex 019e74c3 iter-1 MF-2 absorb: a successful JSON parse
+	// against a `null` or `{}` PowerShell output decodes into a
+	// zero-value rawSecurityProbeOutput with no sub-objects
+	// populated. Without this guard, the result would be reported as
+	// probeComplete=true with no evidence — backend can't tell "the
+	// host has no AV / no firewall / no encryption" from "the script
+	// silently produced nothing". Fail-closed: at least one source
+	// object OR one source-level error must be present.
+	if !hasAnySecurityEvidence(&parsed) && len(parsed.Errors) == 0 {
+		result.ProbeErrors = append(result.ProbeErrors, SecurityProbeError{
+			Source:  SecurityProbeSourcePowerShell,
+			Code:    SecurityProbeErrNoEvidence,
+			Summary: "security posture script returned no evidence (no sources populated, no errors emitted)",
 		})
 	}
 
@@ -342,16 +382,75 @@ func ProbeSecurityPosture(ctx context.Context, now func() time.Time) SecurityPos
 	return result
 }
 
-// boundSummary trims free-form text to a fixed cap. Operator-facing
-// error summaries must never carry raw PowerShell exception dumps
-// or registry value contents.
+// hasAnySecurityEvidence reports whether at least one sub-source
+// object was populated by the PowerShell script. Used by the
+// MF-2 fail-closed guard above to distinguish "ran but emitted
+// nothing" (treated as a NO_EVIDENCE probe error) from "ran and
+// returned at least one source readout" (treated as a real
+// measurement).
+func hasAnySecurityEvidence(p *rawSecurityProbeOutput) bool {
+	if p == nil {
+		return false
+	}
+	if p.Defender != nil || p.SecurityCenter != nil || p.BitLocker != nil {
+		return true
+	}
+	if p.Firewall.Domain != nil || p.Firewall.Private != nil || p.Firewall.Public != nil {
+		return true
+	}
+	return false
+}
+
+// normalizeSecuritySource maps a raw PowerShell error-source string
+// into the canonical SecurityProbeSource enum. Unknown values fall
+// back to SecurityProbeSourcePowerShell so the typed enum surface
+// is never violated. Codex 019e74c3 iter-1 MF-1 absorb.
+func normalizeSecuritySource(raw string) SecurityProbeSource {
+	switch strings.TrimSpace(raw) {
+	case "defender":
+		return SecurityProbeSourceDefender
+	case "securityCenter":
+		return SecurityProbeSourceSecurityCenter
+	case "firewall":
+		return SecurityProbeSourceFirewall
+	case "bitlocker":
+		return SecurityProbeSourceBitLocker
+	case "powershell":
+		return SecurityProbeSourcePowerShell
+	default:
+		return SecurityProbeSourcePowerShell
+	}
+}
+
+// boundSummary trims free-form text to a fixed cap and normalizes
+// control characters. Operator-facing error summaries must never
+// carry raw PowerShell exception dumps or registry value contents,
+// and downstream consumers (audit log, UI, alerting) must not have
+// to defend against stray NUL / TAB / CR / LF / DEL bytes that a
+// buggy script could emit inside a summary string. Codex 019e74c3
+// iter-1 nice-to-have absorb.
 func boundSummary(s string) string {
 	const max = 200
 	s = strings.TrimSpace(s)
 	if len(s) > max {
 		s = s[:max]
 	}
-	return s
+	// Replace control characters (including NUL, BEL, BS, VT, FF,
+	// SO/SI, ESC, DEL) with single spaces; keep TAB/CR/LF since they
+	// are common in legitimate cmdlet messages.
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t', r == '\n', r == '\r':
+			b.WriteRune(' ')
+		case r < 0x20, r == 0x7f:
+			b.WriteRune(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // normalizeFirewallAction collapses unknown / blank inputs to the
