@@ -1406,14 +1406,23 @@ different thresholds without an agent change.
 - **Uptime failure / clock skew**: non-positive duration →
   `UPTIME_QUERY_FAILED`; implausible derived boot epoch (future or
   ≤0) → `BOOT_TIME_FAILED`; either flips `probeComplete=false`.
-- **No-evidence sentinel**: when no source produced any evidence
-  (zero fixed disks AND zero memory AND zero uptime) → aggregate
-  `NO_EVIDENCE` + `sourceUsed=none`. A zero-fixed-disk host is also
-  treated as no-evidence so a deployment gate never reads it as
-  "ready".
+- **No-evidence sentinel**: the aggregate `NO_EVIDENCE` +
+  `sourceUsed=none` fires ONLY when ALL THREE sources came back
+  empty together (`fixedDiskCount == 0` AND
+  `memory.totalPhysicalBytes == 0` AND `uptime.uptimeSeconds == 0`).
+  A host with zero fixed disks but valid memory + uptime does NOT
+  trip the aggregate sentinel; instead the **backend deployment
+  gate** must treat `fixedDiskCount == 0` as not-install-ready on
+  its own (see §15.7 / the deployment-gate guidance), since the
+  agent cannot prove install-target free space without at least one
+  fixed volume. (Codex 019e7500 post-impl clarification: the agent
+  emits the all-empty aggregate sentinel; the zero-disk-only gate
+  is a backend-side policy, not an agent `NO_EVIDENCE`.)
 - `probeComplete` is `true` iff `probeErrors` is empty. A
   `supported=true` + `probeComplete=false` result MUST NOT be read
-  as deployment-ready.
+  as deployment-ready. Likewise a `probeComplete=true` result with
+  `fixedDiskCount == 0` MUST NOT be read as install-ready by the
+  backend gate.
 
 ### 15.6 Security invariants
 

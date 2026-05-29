@@ -81,11 +81,12 @@ func ProbeDeviceHealth(ctx context.Context, now func() time.Time) DeviceHealthRe
 	collectDeviceHealthMemory(&result)
 	collectDeviceHealthUptime(now, &result)
 
-	// Aggregate NO_EVIDENCE sentinel (Codex iter-1): if no source
-	// produced any meaningful evidence at all, flag it. Zero fixed
-	// disks alone is also treated as no-evidence — a deployment
-	// gate must not read a 0-disk host as "ready" (Codex iter-1
-	// nice-to-have).
+	// Aggregate NO_EVIDENCE sentinel (Codex 019e7500 post-impl
+	// clarification): fires ONLY when ALL THREE sources came back
+	// empty together. A zero-fixed-disk host with valid memory +
+	// uptime does NOT trip this — that gate is a backend-side
+	// policy (fixedDiskCount==0 is not install-ready), NOT an agent
+	// NO_EVIDENCE. See COMMAND-CONTRACT.md §15.5.
 	if result.FixedDiskCount == 0 &&
 		result.Memory.TotalPhysicalBytes == 0 &&
 		result.Uptime.UptimeSeconds == 0 {
