@@ -1,0 +1,142 @@
+//go:build windows
+
+package inventory
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+// NOTE: The pure WinGet `upgrade` table parsing (parseUpgradeOutput /
+// parseUpgradeLine and helpers) lives in the build-tag-agnostic file
+// outdated_software_parse.go so it compiles + is tested on every
+// platform (incl. the linux CI host). Only the exec/syscall surface
+// below is //go:build windows.
+
+const outdatedSoftwareProbeTimeout = 60 * time.Second
+
+var runOutdatedSoftwareProbe = runOutdatedSoftwareProbeReal
+
+func runOutdatedSoftwareProbeReal(ctx context.Context) ([]byte, error) {
+	path, err := outdatedSoftwareLocator()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, path, "upgrade", "--include-returning-apps", "--source", "winget")
+	return cmd.Output()
+}
+
+func ProbeOutdatedSoftware(ctx context.Context, now func() time.Time) OutdatedSoftwareResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if now == nil {
+		now = time.Now
+	}
+	start := now()
+	result := OutdatedSoftwareResult{
+		SchemaVersion: OutdatedSoftwareSchemaVersion,
+		Supported:     true,
+		SourceUsed:    OutdatedSoftwareSourceNone,
+		MaxUpgrade:    MaxOutdatedPackages,
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, outdatedSoftwareProbeTimeout)
+	defer cancel()
+
+	raw, err := runOutdatedSoftwareProbe(probeCtx)
+	if err != nil {
+		code := OutdatedSoftwareErrWinGetFailed
+		summary := "WinGet upgrade enumeration failed"
+		switch {
+		case isNotFoundErr(err):
+			code = OutdatedSoftwareErrWinGetNotFound
+			summary = "WinGet executable not found"
+		case errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(probeCtx.Err(), context.DeadlineExceeded):
+			// The 60s probe budget elapsed: classify as a distinct
+			// timeout rather than a generic failure so the backend can
+			// retry-vs-degrade differently. The exec error from a
+			// deadline-killed process does not always wrap
+			// DeadlineExceeded, so probeCtx.Err() is the reliable
+			// signal.
+			code = OutdatedSoftwareErrWinGetTimeout
+			summary = "WinGet upgrade enumeration timed out"
+		}
+		result.ProbeErrors = append(result.ProbeErrors, OutdatedSoftwareProbeError{
+			Source:  OutdatedSoftwareSourceWinGet,
+			Code:    code,
+			Summary: summary,
+		})
+		finalizeOutdatedSoftware(&result, start, now)
+		return result
+	}
+
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		result.ProbeErrors = append(result.ProbeErrors, OutdatedSoftwareProbeError{
+			Source:  OutdatedSoftwareSourceWinGet,
+			Code:    OutdatedSoftwareErrWinGetEmptyOutput,
+			Summary: "WinGet upgrade returned no output",
+		})
+		finalizeOutdatedSoftware(&result, start, now)
+		return result
+	}
+
+	if isNoUpgradeOutput(trimmed) {
+		result.SourceUsed = OutdatedSoftwareSourceWinGet
+		finalizeOutdatedSoftware(&result, start, now)
+		return result
+	}
+
+	classified, parseErr := parseUpgradeOutput(trimmed)
+	if parseErr != nil {
+		result.ProbeErrors = append(result.ProbeErrors, OutdatedSoftwareProbeError{
+			Source:  OutdatedSoftwareSourceWinGet,
+			Code:    OutdatedSoftwareErrWinGetParseError,
+			Summary: "WinGet upgrade output parse failed",
+		})
+		finalizeOutdatedSoftware(&result, start, now)
+		return result
+	}
+
+	result.SourceUsed = OutdatedSoftwareSourceWinGet
+	if len(classified) > MaxOutdatedPackages {
+		result.Upgrade = classified[:MaxOutdatedPackages]
+		result.UpgradeTruncated = true
+	} else {
+		result.Upgrade = classified
+	}
+	finalizeOutdatedSoftware(&result, start, now)
+	return result
+}
+
+var outdatedSoftwareLocator = func() (string, error) {
+	path, err := exec.LookPath("winget")
+	if err == nil {
+		return path, nil
+	}
+	locAppData := os.Getenv("LOCALAPPDATA")
+	if locAppData != "" {
+		winApps := locAppData + `\Microsoft\WindowsApps`
+		cmd := exec.Command("cmd", "/c", "dir", "/b", winApps+`\winget.exe`)
+		out, _ := cmd.Output()
+		trimmed := strings.TrimSpace(string(out))
+		if trimmed != "" && !strings.Contains(trimmed, "File Not Found") {
+			return winApps + `\` + trimmed, nil
+		}
+	}
+	return "", err
+}
+
+func finalizeOutdatedSoftware(result *OutdatedSoftwareResult, start time.Time, now func() time.Time) {
+	deriveOutdatedSoftwareSummary(result)
+	if result.UpgradeCount == 0 {
+		result.UpgradeCount = len(result.Upgrade)
+	}
+	result.ProbeDurationMs = outdatedSoftwareElapsedMs(start, now)
+}

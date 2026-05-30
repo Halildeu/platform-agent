@@ -105,6 +105,13 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// includeDeviceHealth payload bit for pre-deployment
 			// health gating.
 			IncludeDeviceHealth: boolPayload(command.Payload, "includeDeviceHealth"),
+			// AG-036 — opt-in outdated-software probe. Defaults to false
+			// so the AG-025H lightweight contract stays cheap. Backend
+			// opts in via COLLECT_INVENTORY's includeOutdatedSoftware
+			// payload bit for upgrade eligibility scanning.
+			// HARD BOUNDARY: read-only `winget upgrade
+			// --include-returning-apps`; never mutates package state.
+			IncludeOutdatedSoftware: boolPayload(command.Payload, "includeOutdatedSoftware"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"
