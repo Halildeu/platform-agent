@@ -112,6 +112,13 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// HARD BOUNDARY: read-only `winget upgrade
 			// --include-returning-apps`; never mutates package state.
 			IncludeOutdatedSoftware: boolPayload(command.Payload, "includeOutdatedSoftware"),
+			// AG-038 — opt-in agent self-diagnostics probe. Defaults to
+			// false so the AG-025H lightweight contract stays cheap.
+			// Backend opts in via COLLECT_INVENTORY's
+			// includeDiagnostics payload bit for operational health
+			// visibility. HARD BOUNDARY: read-only — DNS lookup + TLS
+			// handshake only; no PII, credentials, or paths on wire.
+			IncludeDiagnostics: boolPayload(command.Payload, "includeDiagnostics"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"

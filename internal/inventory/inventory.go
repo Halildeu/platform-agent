@@ -102,6 +102,17 @@ type Snapshot struct {
 	// "agent does not support outdated-software probe here" instead
 	// of treating the absence as a failed ingest.
 	OutdatedSoftware *OutdatedSoftwareResult `json:"outdatedSoftware,omitempty"`
+
+	// Diagnostics is intentionally nil unless the caller opted into
+	// the AG-038 agent self-diagnostics probe via
+	// CollectOptions.IncludeDiagnostics. The JSON tag omitempty
+	// hides the field from the heartbeat / auto-enroll wire payload
+	// and from COLLECT_INVENTORY runs that did not request the probe.
+	// On non-Windows runtimes the probe returns Supported=false with
+	// the canonical OS metadata so the backend can persist evidence of
+	// "agent does not support diagnostics here" instead of treating
+	// the absence as a failed ingest.
+	Diagnostics *DiagnosticsResult `json:"diagnostics,omitempty"`
 }
 
 // CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
@@ -266,6 +277,23 @@ type CollectOptions struct {
 	// the PII surface per the AG-036 spec. The OutdatedSoftwarePackage
 	// JSON-keys regression test pins this exact key set.
 	IncludeOutdatedSoftware bool
+
+	// IncludeDiagnostics gates the AG-038 agent self-diagnostics
+	// probe. When true, CollectWithOptions invokes ProbeDiagnostics
+	// (DNS lookup + TLS handshake on Windows; a Supported=false stub
+	// on every other platform) and attaches the result to
+	// Snapshot.Diagnostics. When false (the default), the probe is not
+	// invoked and the wire payload omits the field.
+	//
+	// The backend uses true via COLLECT_INVENTORY's
+	// includeDiagnostics payload bit when an operational health
+	// snapshot is being evaluated. Heartbeat / auto-enroll /
+	// lightweight inventory never opt in.
+	//
+	// HARD BOUNDARY: read-only. No PII, credentials, or paths appear
+	// in ConfigHash — only SHA-256(version|apiURL). DNS and TLS
+	// checks are fire-and-forget with 5s timeout; errors do not block.
+	IncludeDiagnostics bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -329,6 +357,10 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		os := collectOutdatedSoftwareForSnapshot(now)
 		snapshot.OutdatedSoftware = &os
 	}
+	if opts.IncludeDiagnostics {
+		diag := collectDiagnosticsForSnapshot(now)
+		snapshot.Diagnostics = &diag
+	}
 	return snapshot
 }
 
@@ -345,6 +377,10 @@ var collectDeviceHealthForSnapshot = func(_ time.Time) DeviceHealthResult {
 
 var collectOutdatedSoftwareForSnapshot = func(_ time.Time) OutdatedSoftwareResult {
 	return ProbeOutdatedSoftware(context.Background(), time.Now)
+}
+
+var collectDiagnosticsForSnapshot = func(_ time.Time) DiagnosticsResult {
+	return ProbeDiagnostics(context.Background(), time.Now)
 }
 
 // collectLocalAdminGroupForSnapshot is the test seam for the

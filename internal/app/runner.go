@@ -53,6 +53,11 @@ type Runner struct {
 
 func NewRunner(cfg config.Config, client *protocol.Client, logger *log.Logger) *Runner {
 	capabilities := inventory.RuntimeCapabilities()
+	// AG-038: register the live agent config so the self-diagnostics probe
+	// reports the REAL AgentVersion + a hash of the REAL APIURL (not the
+	// "unknown" placeholder). CredentialID is recorded for credential-presence
+	// reasoning only — it is never emitted on the wire nor hashed.
+	inventory.SetDiagnosticsConfig(cfg.AgentVersion, cfg.APIURL, cfg.CredentialID)
 	return &Runner{
 		Config:       cfg,
 		Client:       client,
@@ -115,7 +120,13 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		}
 	}
 
+	pollStart := time.Now()
 	command, err := r.Client.NextCommand(ctx)
+	// AG-038: record the NextCommand round-trip so a subsequent
+	// COLLECT_INVENTORY diagnostics probe reports the REAL last-poll
+	// latency rather than 0. Measured even on ErrNoCommand (204) — an
+	// empty poll is still a representative backend round-trip.
+	inventory.RecordPollLatency(int(time.Since(pollStart) / time.Millisecond))
 	if errors.Is(err, protocol.ErrNoCommand) {
 		r.logf("no command available")
 		return nil
@@ -195,6 +206,10 @@ func (r *Runner) hydrateFromStore(ctx context.Context) {
 	// stays false so the heartbeat sentinel does not double-confirm a
 	// blob we did not produce. Codex 019e7314 iter-1 must_fix #1.
 	r.credentialPersisted = false
+	// AG-038: a cold-start hydrate populated CredentialID — refresh the
+	// diagnostics provider so credential-presence reasoning is accurate.
+	// CredentialID stays off the wire / out of the hash.
+	inventory.SetDiagnosticsConfig(r.Config.AgentVersion, r.Config.APIURL, r.Config.CredentialID)
 	r.logf("hmac credential loaded from store device=%s credential=%s", cred.DeviceID, cred.CredentialKeyID)
 }
 
