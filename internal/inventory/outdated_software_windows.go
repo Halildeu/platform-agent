@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// NOTE: The pure WinGet `upgrade` table parsing (parseUpgradeOutput /
+// parseUpgradeLine and helpers) lives in the build-tag-agnostic file
+// outdated_software_parse.go so it compiles + is tested on every
+// platform (incl. the linux CI host). Only the exec/syscall surface
+// below is //go:build windows.
+
 const outdatedSoftwareProbeTimeout = 60 * time.Second
 
 var runOutdatedSoftwareProbe = runOutdatedSoftwareProbeReal
@@ -45,13 +51,26 @@ func ProbeOutdatedSoftware(ctx context.Context, now func() time.Time) OutdatedSo
 	raw, err := runOutdatedSoftwareProbe(probeCtx)
 	if err != nil {
 		code := OutdatedSoftwareErrWinGetFailed
-		if isNotFoundErr(err) {
+		summary := "WinGet upgrade enumeration failed"
+		switch {
+		case isNotFoundErr(err):
 			code = OutdatedSoftwareErrWinGetNotFound
+			summary = "WinGet executable not found"
+		case errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(probeCtx.Err(), context.DeadlineExceeded):
+			// The 60s probe budget elapsed: classify as a distinct
+			// timeout rather than a generic failure so the backend can
+			// retry-vs-degrade differently. The exec error from a
+			// deadline-killed process does not always wrap
+			// DeadlineExceeded, so probeCtx.Err() is the reliable
+			// signal.
+			code = OutdatedSoftwareErrWinGetTimeout
+			summary = "WinGet upgrade enumeration timed out"
 		}
 		result.ProbeErrors = append(result.ProbeErrors, OutdatedSoftwareProbeError{
 			Source:  OutdatedSoftwareSourceWinGet,
 			Code:    code,
-			Summary: "WinGet upgrade enumeration failed",
+			Summary: summary,
 		})
 		finalizeOutdatedSoftware(&result, start, now)
 		return result
@@ -112,95 +131,6 @@ var outdatedSoftwareLocator = func() (string, error) {
 		}
 	}
 	return "", err
-}
-
-func parseUpgradeOutput(output string) ([]OutdatedSoftwarePackage, error) {
-	lines := strings.Split(output, "\n")
-	headerIdx := -1
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if len(trimmed) > 20 && strings.Count(trimmed, "-") > 10 {
-			headerIdx = i
-			break
-		}
-	}
-	start := headerIdx + 2
-	if headerIdx < 0 || start >= len(lines) {
-		return nil, errors.New("unparseable winGet upgrade output: no header separator found")
-	}
-
-	var classified []OutdatedSoftwarePackage
-	for _, line := range lines[start:] {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		c := trimmed[0]
-		if c == ' ' || c == '\t' || (c >= '0' && c <= '9') {
-			continue
-		}
-		pkg := parseUpgradeLine(trimmed)
-		if pkg.PackageID == "" {
-			continue
-		}
-		classified = append(classified, pkg)
-		if len(classified) >= MaxOutdatedPackages {
-			break
-		}
-	}
-	return classified, nil
-}
-
-func parseUpgradeLine(line string) OutdatedSoftwarePackage {
-	tokens := strings.Fields(line)
-	if len(tokens) < 4 {
-		return OutdatedSoftwarePackage{}
-	}
-
-	idIdx := -1
-	installedIdx := -1
-	availableIdx := -1
-
-	for i, t := range tokens {
-		if idIdx < 0 && (strings.Contains(t, ".") || strings.Contains(t, "-")) {
-			idIdx = i
-			continue
-		}
-		if installedIdx < 0 && looksLikeVersion(t) {
-			installedIdx = i
-			if i+1 < len(tokens) && looksLikeVersion(tokens[i+1]) {
-				availableIdx = i + 1
-			}
-		}
-		if idIdx > 0 && installedIdx > 0 {
-			break
-		}
-	}
-
-	if idIdx < 0 || installedIdx < 0 {
-		if len(tokens) >= 4 {
-			idIdx = 1
-			installedIdx = 2
-			availableIdx = 3
-		} else {
-			return OutdatedSoftwarePackage{}
-		}
-	}
-	if availableIdx < 0 {
-		availableIdx = installedIdx + 1
-	}
-	pkgID := tokens[idIdx]
-	if !strings.Contains(pkgID, ".") && !strings.Contains(pkgID, "-") {
-		return OutdatedSoftwarePackage{}
-	}
-	if availableIdx >= len(tokens) {
-		availableIdx = installedIdx
-	}
-	return OutdatedSoftwarePackage{
-		PackageID:        pkgID,
-		InstalledVersion: tokens[installedIdx],
-		AvailableVersion: tokens[availableIdx],
-	}
 }
 
 func finalizeOutdatedSoftware(result *OutdatedSoftwareResult, start time.Time, now func() time.Time) {

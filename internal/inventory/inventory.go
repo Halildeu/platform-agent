@@ -258,10 +258,13 @@ type CollectOptions struct {
 	// lightweight inventory never opt in.
 	//
 	// HARD BOUNDARY: read-only. `winget upgrade --include-returning-apps`
-	// never mutates any package state. PackageId (not name, publisher,
-	// install location, license, or download URL) is the only
-	// package-level wire field — narrowing the PII surface per the
-	// AG-036 spec.
+	// never mutates any package state. Per-package wire fields are
+	// packageId + installedVersion + availableVersion (the two version
+	// strings are required for upgrade-eligibility detection and are
+	// public, non-PII). EXCLUDED PII (never serialized): name,
+	// publisher, install location, license, and download URL — narrowing
+	// the PII surface per the AG-036 spec. The OutdatedSoftwarePackage
+	// JSON-keys regression test pins this exact key set.
 	IncludeOutdatedSoftware bool
 }
 

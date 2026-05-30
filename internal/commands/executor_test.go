@@ -369,6 +369,36 @@ func TestLocalExecutorBoolPayloadIncludeDeviceHealth(t *testing.T) {
 	}
 }
 
+// AG-036 — boolPayload mapping for the includeOutdatedSoftware key.
+func TestLocalExecutorBoolPayloadIncludeOutdatedSoftware(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]interface{}
+		wantOn  bool
+	}{
+		{"nil-payload", nil, false},
+		{"missing-key", map[string]interface{}{"includeSoftware": true}, false},
+		{"bool-true", map[string]interface{}{"includeOutdatedSoftware": true}, true},
+		{"bool-false", map[string]interface{}{"includeOutdatedSoftware": false}, false},
+		{"string-true", map[string]interface{}{"includeOutdatedSoftware": "true"}, true},
+		{"string-1", map[string]interface{}{"includeOutdatedSoftware": "1"}, true},
+		{"string-True", map[string]interface{}{"includeOutdatedSoftware": "True"}, true},
+		{"string-false", map[string]interface{}{"includeOutdatedSoftware": "false"}, false},
+		{"string-0", map[string]interface{}{"includeOutdatedSoftware": "0"}, false},
+		{"int-1", map[string]interface{}{"includeOutdatedSoftware": 1}, true},
+		{"int-0", map[string]interface{}{"includeOutdatedSoftware": 0}, false},
+		{"float64-1", map[string]interface{}{"includeOutdatedSoftware": float64(1)}, true},
+		{"float64-0", map[string]interface{}{"includeOutdatedSoftware": float64(0)}, false},
+		{"unknown-type", map[string]interface{}{"includeOutdatedSoftware": []string{"yes"}}, false},
+	}
+	for _, tc := range cases {
+		got := boolPayload(tc.payload, "includeOutdatedSoftware")
+		if got != tc.wantOn {
+			t.Errorf("%s: boolPayload(includeOutdatedSoftware) = %v, want %v", tc.name, got, tc.wantOn)
+		}
+	}
+}
+
 func TestLocalExecutorListLocalUsersUnsupportedOutsideWindows(t *testing.T) {
 	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandListLocalUsers}, "test")
 	command := protocol.AgentCommand{
