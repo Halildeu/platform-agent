@@ -93,7 +93,7 @@ func ProbeOutdatedSoftware(ctx context.Context, now func() time.Time) OutdatedSo
 		return result
 	}
 
-	classified, parseErr := parseUpgradeOutput(trimmed)
+	classified, truncated, parseErr := parseUpgradeOutput(trimmed)
 	if parseErr != nil {
 		result.ProbeErrors = append(result.ProbeErrors, OutdatedSoftwareProbeError{
 			Source:  OutdatedSoftwareSourceWinGet,
@@ -105,12 +105,18 @@ func ProbeOutdatedSoftware(ctx context.Context, now func() time.Time) OutdatedSo
 	}
 
 	result.SourceUsed = OutdatedSoftwareSourceWinGet
-	if len(classified) > MaxOutdatedPackages {
-		result.Upgrade = classified[:MaxOutdatedPackages]
-		result.UpgradeTruncated = true
-	} else {
-		result.Upgrade = classified
-	}
+	// parseUpgradeOutput already enforced the MaxOutdatedPackages hard
+	// upper bound and reports whether more classifiable upgrade rows than
+	// the cap were present. The previous `len(classified) >
+	// MaxOutdatedPackages` check here was dead code — the in-parser cap
+	// made it impossible — so truncation went unreported (AG-036).
+	//
+	// NOTE: when truncated, Upgrade (and the derived UpgradeCount below)
+	// reflect the capped list length (MaxOutdatedPackages), NOT the true
+	// pending total; UpgradeTruncated is the authoritative "list is
+	// incomplete" signal consumers must read.
+	result.Upgrade = classified
+	result.UpgradeTruncated = truncated
 	finalizeOutdatedSoftware(&result, start, now)
 	return result
 }

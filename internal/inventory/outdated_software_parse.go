@@ -34,7 +34,19 @@ import (
 // slice the header/data rows into columns for a layout-aware id +
 // version extraction (more robust than a pure whitespace-token
 // heuristic when a display name contains a dot or dash).
-func parseUpgradeOutput(output string) ([]OutdatedSoftwarePackage, error) {
+//
+// The returned bool reports truncation. parseUpgradeOutput enforces the
+// MaxOutdatedPackages hard upper bound (the returned slice never exceeds
+// it) and returns truncated=true when MORE classifiable upgrade rows than
+// the cap were present (i.e. the returned list is incomplete — a genuine
+// package beyond the cap was seen, not merely a list that ended exactly
+// at it). Keeping this detection here — the single, build-tag-agnostic,
+// test-covered source of truth — is the fix for AG-036's dead
+// UpgradeTruncated branch: the Windows caller previously tested
+// `len(classified) > MaxOutdatedPackages`, which the in-parser cap made
+// impossible, so hosts exceeding the cap were silently truncated with
+// upgradeTruncated=false.
+func parseUpgradeOutput(output string) ([]OutdatedSoftwarePackage, bool, error) {
 	lines := strings.Split(output, "\n")
 	headerIdx := -1
 	for i, line := range lines {
@@ -48,7 +60,7 @@ func parseUpgradeOutput(output string) ([]OutdatedSoftwarePackage, error) {
 	// separator. headerIdx-1 is the column-header row.
 	start := headerIdx + 1
 	if headerIdx < 0 || start > len(lines) {
-		return nil, errors.New("unparseable winget upgrade output: no header separator found")
+		return nil, false, errors.New("unparseable winget upgrade output: no header separator found")
 	}
 
 	// Derive column boundaries from the header row (headerIdx-1) using
@@ -58,6 +70,7 @@ func parseUpgradeOutput(output string) ([]OutdatedSoftwarePackage, error) {
 	cols := deriveUpgradeColumns(headerColumnsSource(lines, headerIdx))
 
 	var classified []OutdatedSoftwarePackage
+	truncated := false
 	for _, line := range lines[start:] {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -76,12 +89,18 @@ func parseUpgradeOutput(output string) ([]OutdatedSoftwarePackage, error) {
 		if pkg.PackageID == "" {
 			continue
 		}
-		classified = append(classified, pkg)
+		// Enforce the hard upper bound AND detect truncation, with the cap
+		// check BEFORE the append: a genuine (MaxOutdatedPackages+1)th
+		// package trips truncated=true, while a list that ends at exactly
+		// the cap stays complete (truncated=false). classified therefore
+		// never exceeds MaxOutdatedPackages.
 		if len(classified) >= MaxOutdatedPackages {
+			truncated = true
 			break
 		}
+		classified = append(classified, pkg)
 	}
-	return classified, nil
+	return classified, truncated, nil
 }
 
 // headerColumnsSource returns the column-header row text (the line
