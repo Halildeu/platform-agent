@@ -21,36 +21,36 @@ const (
 
 const (
 	OutdatedSoftwareErrUnsupportedPlatform = "UNSUPPORTED_PLATFORM"
-	OutdatedSoftwareErrWinGetNotFound     = "WINGET_NOT_FOUND"
-	OutdatedSoftwareErrWinGetTimeout      = "WINGET_TIMEOUT"
-	OutdatedSoftwareErrWinGetFailed       = "WINGET_FAILED"
-	OutdatedSoftwareErrWinGetEmptyOutput  = "WINGET_EMPTY_OUTPUT"
-	OutdatedSoftwareErrWinGetParseError   = "WINGET_PARSE_ERROR"
+	OutdatedSoftwareErrWinGetNotFound      = "WINGET_NOT_FOUND"
+	OutdatedSoftwareErrWinGetTimeout       = "WINGET_TIMEOUT"
+	OutdatedSoftwareErrWinGetFailed        = "WINGET_FAILED"
+	OutdatedSoftwareErrWinGetEmptyOutput   = "WINGET_EMPTY_OUTPUT"
+	OutdatedSoftwareErrWinGetParseError    = "WINGET_PARSE_ERROR"
 )
 
 type OutdatedSoftwareProbeError struct {
 	Source  OutdatedSoftwareProbeSource `json:"source,omitempty"`
-	Code    string                       `json:"code"`
-	Summary string                       `json:"summary,omitempty"`
+	Code    string                      `json:"code"`
+	Summary string                      `json:"summary,omitempty"`
 }
 
 type OutdatedSoftwarePackage struct {
-	PackageID         string `json:"packageId"`
-	InstalledVersion  string `json:"installedVersion"`
-	AvailableVersion  string `json:"availableVersion"`
+	PackageID        string `json:"packageId"`
+	InstalledVersion string `json:"installedVersion"`
+	AvailableVersion string `json:"availableVersion"`
 }
 
 type OutdatedSoftwareResult struct {
 	SchemaVersion    int                          `json:"schemaVersion"`
-	Supported       bool                         `json:"supported"`
-	ProbeComplete   bool                         `json:"probeComplete"`
-	UpgradeCount    int                          `json:"upgradeCount"`
-	Upgrade         []OutdatedSoftwarePackage   `json:"upgrade"`
-	UpgradeTruncated bool                       `json:"upgradeTruncated"`
-	MaxUpgrade      int                          `json:"maxUpgrade"`
-	SourceUsed      OutdatedSoftwareProbeSource `json:"sourceUsed"`
-	ProbeErrors     []OutdatedSoftwareProbeError `json:"probeErrors,omitempty"`
-	ProbeDurationMs int                          `json:"probeDurationMs"`
+	Supported        bool                         `json:"supported"`
+	ProbeComplete    bool                         `json:"probeComplete"`
+	UpgradeCount     int                          `json:"upgradeCount"`
+	Upgrade          []OutdatedSoftwarePackage    `json:"upgrade"`
+	UpgradeTruncated bool                         `json:"upgradeTruncated"`
+	MaxUpgrade       int                          `json:"maxUpgrade"`
+	SourceUsed       OutdatedSoftwareProbeSource  `json:"sourceUsed"`
+	ProbeErrors      []OutdatedSoftwareProbeError `json:"probeErrors,omitempty"`
+	ProbeDurationMs  int                          `json:"probeDurationMs"`
 }
 
 func deriveOutdatedSoftwareSummary(result *OutdatedSoftwareResult) {

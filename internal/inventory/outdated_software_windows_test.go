@@ -116,7 +116,7 @@ func TestProbeOutdatedSoftwareDuration(t *testing.T) {
 	}
 }
 
-func TestProbeOutdatedSoftwareNilCtx(t *testing.T) {
+func TestProbeOutdatedSoftwareNilCtxWindows(t *testing.T) {
 	result := ProbeOutdatedSoftware(nil, time.Now)
 	if result.SchemaVersion == 0 {
 		t.Errorf("SchemaVersion should be set; got %d", result.SchemaVersion)

@@ -4,6 +4,7 @@ package inventory
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -196,32 +197,10 @@ func parseUpgradeLine(line string) OutdatedSoftwarePackage {
 		availableIdx = installedIdx
 	}
 	return OutdatedSoftwarePackage{
-		PackageID:         pkgID,
-		InstalledVersion:  tokens[installedIdx],
-		AvailableVersion:  tokens[availableIdx],
+		PackageID:        pkgID,
+		InstalledVersion: tokens[installedIdx],
+		AvailableVersion: tokens[availableIdx],
 	}
-}
-
-func looksLikeVersion(t string) bool {
-	if len(t) == 0 {
-		return false
-	}
-	if t[0] == 'v' || t[0] == 'V' {
-		t = t[1:]
-	}
-	parts := strings.Split(t, ".")
-	if len(parts) < 2 {
-		return false
-	}
-	for _, p := range parts {
-		if len(p) == 0 {
-			continue
-		}
-		if p[0] < '0' || p[0] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 func finalizeOutdatedSoftware(result *OutdatedSoftwareResult, start time.Time, now func() time.Time) {
