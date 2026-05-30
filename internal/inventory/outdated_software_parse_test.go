@@ -8,6 +8,7 @@ package inventory
 // because the only coverage lived behind a skipped Windows-only test.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -32,7 +33,7 @@ func TestParseUpgradeOutput_SinglePackage_NotDropped(t *testing.T) {
 	out := wingetTable(
 		"7-Zip                7zip.7zip                24.09    25.01      winget",
 	)
-	got, err := parseUpgradeOutput(out)
+	got, _, err := parseUpgradeOutput(out)
 	if err != nil {
 		t.Fatalf("parseUpgradeOutput error: %v", err)
 	}
@@ -53,7 +54,7 @@ func TestParseUpgradeOutput_MultiPackage_FirstKept(t *testing.T) {
 		"Git                  Git.Git                  2.43.0   2.44.0     winget",
 		"Visual Studio Code   Microsoft.VisualStudioCode 1.85.0 1.86.0    winget",
 	)
-	got, err := parseUpgradeOutput(out)
+	got, _, err := parseUpgradeOutput(out)
 	if err != nil {
 		t.Fatalf("parseUpgradeOutput error: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestParseUpgradeOutput_DottedDisplayName_CorrectID(t *testing.T) {
 		"Node.js              OpenJS.NodeJS            20.10.0  20.11.0    winget",
 		"Adobe Acrobat-Reader Adobe.Acrobat.Reader.64-bit 23.1 24.1      winget",
 	)
-	got, err := parseUpgradeOutput(out)
+	got, _, err := parseUpgradeOutput(out)
 	if err != nil {
 		t.Fatalf("parseUpgradeOutput error: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestParseUpgradeOutput_SkipsProgressAndContinuation(t *testing.T) {
 		"   12% progress bar artifact",
 		"Git                  Git.Git                  2.43.0   2.44.0     winget",
 	)
-	got, err := parseUpgradeOutput(out)
+	got, _, err := parseUpgradeOutput(out)
 	if err != nil {
 		t.Fatalf("parseUpgradeOutput error: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestParseUpgradeOutput_SkipsProgressAndContinuation(t *testing.T) {
 // TestParseUpgradeOutput_NoSeparator_Errors confirms the parse-error
 // path when no dashed separator is present.
 func TestParseUpgradeOutput_NoSeparator_Errors(t *testing.T) {
-	_, err := parseUpgradeOutput("some random text without table markers\nstill nothing")
+	_, _, err := parseUpgradeOutput("some random text without table markers\nstill nothing")
 	if err == nil {
 		t.Fatal("expected error when no header separator found")
 	}
@@ -132,7 +133,7 @@ func TestParseUpgradeOutput_NoSeparator_Errors(t *testing.T) {
 // where the separator is the final line (no data rows).
 func TestParseUpgradeOutput_SeparatorIsLastLine_NoPanic(t *testing.T) {
 	out := wingetHeader + "\n" + wingetSep + "\n"
-	got, err := parseUpgradeOutput(out)
+	got, _, err := parseUpgradeOutput(out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -202,5 +203,127 @@ func TestIsWinGetPackageID(t *testing.T) {
 		if got := isWinGetPackageID(c.in); got != c.want {
 			t.Errorf("isWinGetPackageID(%q) = %v, want %v", c.in, got, c.want)
 		}
+	}
+}
+
+// wingetTableN renders a column-aligned winget `upgrade` table with n
+// synthetic package rows (App<i> / Vendor.App<i> / 1.0.0 -> 2.0.0). The
+// fixed-width columns line up with wingetHeader (Id@21, Version@46,
+// Available@55, Source@66) so the layout-aware parser resolves real
+// columns; the whitespace-token fallback also parses each row, so the
+// truncation boundary is exercised on every platform without
+// GOOS=windows regardless of which parse path runs.
+// upgradeRow renders one column-aligned winget data row that the
+// layout-aware parser reads (and the whitespace-token fallback also
+// parses): App<i> / Vendor.App<i> / 1.0.0 -> 2.0.0.
+func upgradeRow(i int) string {
+	return fmt.Sprintf("%-21s%-25s%-9s%-11s%s",
+		fmt.Sprintf("App%d", i),
+		fmt.Sprintf("Vendor.App%d", i),
+		"1.0.0", "2.0.0", "winget")
+}
+
+func wingetTableN(n int) string {
+	rows := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		rows = append(rows, upgradeRow(i))
+	}
+	return wingetTable(rows...)
+}
+
+// TestParseUpgradeOutput_TruncatesBeyondCap is the direct regression for
+// AG-036's dead UpgradeTruncated branch. When the host has MORE than
+// MaxOutdatedPackages classifiable upgrade rows, parseUpgradeOutput must cap the
+// slice at exactly MaxOutdatedPackages AND report truncated=true. The old
+// behaviour capped the slice in-parser and the Windows caller's
+// `len(classified) > MaxOutdatedPackages` check could never fire, so
+// >MaxOutdatedPackages hosts were silently truncated with
+// upgradeTruncated=false (consumers could not tell truncation happened).
+func TestParseUpgradeOutput_TruncatesBeyondCap(t *testing.T) {
+	out := wingetTableN(MaxOutdatedPackages + 50) // comfortably over the cap
+	got, truncated, err := parseUpgradeOutput(out)
+	if err != nil {
+		t.Fatalf("parseUpgradeOutput error: %v", err)
+	}
+	if !truncated {
+		t.Errorf("truncated = false; want true when input has > %d packages", MaxOutdatedPackages)
+	}
+	if len(got) != MaxOutdatedPackages {
+		t.Errorf("len = %d; want %d (hard upper bound preserved)", len(got), MaxOutdatedPackages)
+	}
+}
+
+// TestParseUpgradeOutput_ExactlyAtCap_NotTruncated pins the boundary: a
+// list of exactly MaxOutdatedPackages packages is complete, NOT truncated.
+func TestParseUpgradeOutput_ExactlyAtCap_NotTruncated(t *testing.T) {
+	out := wingetTableN(MaxOutdatedPackages)
+	got, truncated, err := parseUpgradeOutput(out)
+	if err != nil {
+		t.Fatalf("parseUpgradeOutput error: %v", err)
+	}
+	if truncated {
+		t.Error("truncated = true; want false at exactly the cap")
+	}
+	if len(got) != MaxOutdatedPackages {
+		t.Errorf("len = %d; want %d", len(got), MaxOutdatedPackages)
+	}
+}
+
+// TestParseUpgradeOutput_UnderCap_NotTruncated is the common case: a
+// short upgrade list is returned whole, untruncated.
+func TestParseUpgradeOutput_UnderCap_NotTruncated(t *testing.T) {
+	out := wingetTableN(10)
+	got, truncated, err := parseUpgradeOutput(out)
+	if err != nil {
+		t.Fatalf("parseUpgradeOutput error: %v", err)
+	}
+	if truncated {
+		t.Error("truncated = true; want false under the cap")
+	}
+	if len(got) != 10 {
+		t.Errorf("len = %d; want 10", len(got))
+	}
+}
+
+// TestParseUpgradeOutput_TrailingNoiseNotTruncated pins that non-package
+// lines after exactly MaxOutdatedPackages real rows do NOT trip
+// truncation — they are skipped before the cap check.
+func TestParseUpgradeOutput_TrailingNoiseNotTruncated(t *testing.T) {
+	rows := make([]string, 0, MaxOutdatedPackages+3)
+	for i := 0; i < MaxOutdatedPackages; i++ {
+		rows = append(rows, upgradeRow(i))
+	}
+	rows = append(rows, "  - wrapped continuation text", "   45% progress artifact", "")
+	got, truncated, err := parseUpgradeOutput(wingetTable(rows...))
+	if err != nil {
+		t.Fatalf("parseUpgradeOutput error: %v", err)
+	}
+	if truncated {
+		t.Error("truncated = true; want false (trailing noise is not a package)")
+	}
+	if len(got) != MaxOutdatedPackages {
+		t.Errorf("len = %d; want %d", len(got), MaxOutdatedPackages)
+	}
+}
+
+// TestParseUpgradeOutput_TruncationCountsValidRowsOnly pins that
+// truncation is decided by classified packages, not raw lines: noise
+// between the cap-th package and a genuine (cap+1)th package is skipped,
+// and the real extra package still trips truncation.
+func TestParseUpgradeOutput_TruncationCountsValidRowsOnly(t *testing.T) {
+	rows := make([]string, 0, MaxOutdatedPackages+3)
+	for i := 0; i < MaxOutdatedPackages; i++ {
+		rows = append(rows, upgradeRow(i))
+	}
+	rows = append(rows, "  - wrapped continuation text", "   45% progress artifact", upgradeRow(MaxOutdatedPackages))
+	got, truncated, err := parseUpgradeOutput(wingetTable(rows...))
+	if err != nil {
+		t.Fatalf("parseUpgradeOutput error: %v", err)
+	}
+	if !truncated {
+		t.Error("truncated = false; want true (a genuine package beyond the cap)")
+	}
+	if len(got) != MaxOutdatedPackages {
+		t.Errorf("len = %d; want %d", len(got), MaxOutdatedPackages)
 	}
 }

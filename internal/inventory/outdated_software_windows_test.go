@@ -163,3 +163,31 @@ func TestProbeOutdatedSoftwareNilCtxWindows(t *testing.T) {
 		t.Errorf("SchemaVersion should be set; got %d", result.SchemaVersion)
 	}
 }
+
+// TestProbeOutdatedSoftwareTruncatedPropagates pins the parser->result
+// truncation propagation end-to-end: a host with more classifiable
+// upgrade rows than the cap must yield a capped Upgrade list AND
+// UpgradeTruncated=true,
+// so the `result.UpgradeTruncated = truncated` assignment can't be
+// silently dropped (AG-036). wingetTableN lives in the build-tag-agnostic
+// parse test file and is linked into this Windows test binary.
+func TestProbeOutdatedSoftwareTruncatedPropagates(t *testing.T) {
+	orig := runOutdatedSoftwareProbe
+	t.Cleanup(func() { runOutdatedSoftwareProbe = orig })
+
+	table := wingetTableN(MaxOutdatedPackages + 25)
+	runOutdatedSoftwareProbe = func(ctx context.Context) ([]byte, error) {
+		return []byte(table), nil
+	}
+
+	result := ProbeOutdatedSoftware(context.Background(), time.Now)
+	if !result.UpgradeTruncated {
+		t.Error("UpgradeTruncated = false; want true when host exceeds the cap")
+	}
+	if len(result.Upgrade) != MaxOutdatedPackages {
+		t.Errorf("len(Upgrade) = %d; want %d (hard upper bound)", len(result.Upgrade), MaxOutdatedPackages)
+	}
+	if result.UpgradeCount != MaxOutdatedPackages {
+		t.Errorf("UpgradeCount = %d; want %d", result.UpgradeCount, MaxOutdatedPackages)
+	}
+}
