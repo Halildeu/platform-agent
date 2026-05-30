@@ -142,7 +142,16 @@ func TestProbeOutdatedSoftwareDuration(t *testing.T) {
 		return []byte("No applicable upgrade packages found."), nil
 	}
 
-	result := ProbeOutdatedSoftware(context.Background(), time.Now)
+	// Deterministic monotonic clock: each call advances 5ms so the
+	// elapsed (finalize now() - start) is fixed and positive — avoids a
+	// sub-millisecond real-clock flake on a fast CI runner.
+	var ticks int64
+	clock := func() time.Time {
+		ticks++
+		return time.Unix(0, ticks*int64(5*time.Millisecond))
+	}
+
+	result := ProbeOutdatedSoftware(context.Background(), clock)
 	if result.ProbeDurationMs <= 0 {
 		t.Errorf("ProbeDurationMs = %d; want > 0", result.ProbeDurationMs)
 	}

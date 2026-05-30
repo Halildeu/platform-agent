@@ -62,6 +62,9 @@ func TestIsNoUpgradeOutput(t *testing.T) {
 }
 
 func TestProbeOutdatedSoftwareUnsupported(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("non-Windows stub behavior; Windows uses the live runner")
+	}
 	result := ProbeOutdatedSoftware(nil, time.Now)
 	if result.Supported {
 		t.Error("Supported should be false on non-Windows")
