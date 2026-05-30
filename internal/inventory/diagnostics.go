@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"net"
 	"net/url"
+	"sync"
 	"time"
 )
 
@@ -25,19 +26,93 @@ type probeConfig struct {
 	CredentialID string
 }
 
-// getProbeConfig reads runtime diagnostics values. Tests override the seam.
-var getProbeConfig = func() probeConfig {
-	return probeConfig{
+// diagnosticsProvider is the process-wide source of truth the diagnostics
+// probe reads in production. The runner populates it: the static agent
+// config once at startup (SetDiagnosticsConfig), and the most recent
+// NextCommand round-trip latency after every poll (RecordPollLatency). The
+// getProbeConfig / getLastPollLatencyMs seams read from it by default so a
+// live agent reports its REAL version + API-URL hash + poll latency rather
+// than the "unknown" / 0 placeholders. Guarded by a mutex because the
+// runner loop writes latency from the poll goroutine while a COLLECT_INVENTORY
+// command may read it from the executor.
+//
+// REDACTION: CredentialID is stored here only so the probe MAY fold
+// credential *presence* into operational reasoning. It is never serialized
+// on the wire and never fed into configHash (which hashes AgentVersion|APIURL
+// only). The diagnosticsProvider value itself is never marshalled.
+var diagnosticsProvider = struct {
+	mu                sync.RWMutex
+	cfg               probeConfig
+	lastPollLatencyMs int
+}{
+	cfg: probeConfig{
+		// Pre-startup defaults. Overwritten by SetDiagnosticsConfig once
+		// the runner has parsed config; if the probe somehow fires before
+		// that, it fails closed to "unknown" rather than leaking anything.
 		AgentVersion: "unknown",
 		APIURL:       "unknown",
-		CredentialID: "",
+	},
+}
+
+// SetDiagnosticsConfig records the live agent config the self-diagnostics
+// probe reports. The runner calls this once at startup with the real
+// AgentVersion + APIURL from internal/config. credentialID is stored for
+// optional presence-reasoning ONLY — it is never emitted on the wire nor
+// hashed (see the REDACTION CONTRACT on probeConfig + configHash).
+func SetDiagnosticsConfig(agentVersion, apiURL, credentialID string) {
+	diagnosticsProvider.mu.Lock()
+	defer diagnosticsProvider.mu.Unlock()
+	diagnosticsProvider.cfg = probeConfig{
+		AgentVersion: agentVersion,
+		APIURL:       apiURL,
+		CredentialID: credentialID,
 	}
 }
 
+// RecordPollLatency records the most recent NextCommand round-trip duration
+// (milliseconds) so a subsequent COLLECT_INVENTORY diagnostics probe can
+// report it as lastPollLatencyMs. The runner calls this after each poll.
+// Negative inputs are clamped to 0 so a clock skew never produces a negative
+// wire value.
+func RecordPollLatency(ms int) {
+	if ms < 0 {
+		ms = 0
+	}
+	diagnosticsProvider.mu.Lock()
+	defer diagnosticsProvider.mu.Unlock()
+	diagnosticsProvider.lastPollLatencyMs = ms
+}
+
+// DiagnosticsConfigSnapshot reports what the diagnostics provider currently
+// holds, for operational logging and as a wiring regression check. It
+// deliberately returns hasCredential (presence) rather than the raw
+// credentialID so this accessor can never become a credential-leak path:
+// the redaction contract holds even here.
+func DiagnosticsConfigSnapshot() (agentVersion, apiURL string, hasCredential bool, lastPollLatencyMs int) {
+	diagnosticsProvider.mu.RLock()
+	defer diagnosticsProvider.mu.RUnlock()
+	return diagnosticsProvider.cfg.AgentVersion,
+		diagnosticsProvider.cfg.APIURL,
+		diagnosticsProvider.cfg.CredentialID != "",
+		diagnosticsProvider.lastPollLatencyMs
+}
+
+// getProbeConfig reads runtime diagnostics values. In production it returns
+// the config registered by SetDiagnosticsConfig; tests override the seam to
+// supply fixture values without touching the provider.
+var getProbeConfig = func() probeConfig {
+	diagnosticsProvider.mu.RLock()
+	defer diagnosticsProvider.mu.RUnlock()
+	return diagnosticsProvider.cfg
+}
+
 // getLastPollLatencyMs returns the most recent NextCommand round-trip
-// duration in milliseconds. Tests override the seam.
+// duration in milliseconds. In production it returns the value recorded by
+// RecordPollLatency; tests override the seam.
 var getLastPollLatencyMs = func() int {
-	return 0
+	diagnosticsProvider.mu.RLock()
+	defer diagnosticsProvider.mu.RUnlock()
+	return diagnosticsProvider.lastPollLatencyMs
 }
 
 // AG-038 — Agent Self-Diagnostics Probe (Faz 22.5 Sprint B P2 operational visibility).
@@ -99,21 +174,57 @@ func configHash(agentVersion, apiURL string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// parseBackendHost extracts the host:port from a backend API URL for DNS check.
-// Returns empty string if URL is unparseable.
-func parseBackendHost(apiURL string) string {
+// backendHostParts holds the three distinct values the reachability probe
+// needs, each derived from the backend API URL:
+//
+//   - Hostname:    the bare host with NO port — fed to net.Resolver.LookupHost
+//     and used as the TLS ServerName (SNI). A "host:port" string is never a
+//     valid DNS name or SNI value.
+//   - DialAddress: host:port for tls.DialContext("tcp", ...). The port is the
+//     URL's explicit port, or "443" (https default) when the URL omits it —
+//     a bare hostname has no port and the dial would otherwise fail.
+//   - ServerName:  the SNI / certificate-verification name, equal to Hostname
+//     (no port). Including the port in SNI breaks certificate validation.
+//
+// OK reports whether a usable host was derived; false (empty / unparseable /
+// hostless URL) drives the fail-closed BACKEND_HOST_UNRESOLVED path.
+type backendHostParts struct {
+	Hostname    string
+	DialAddress string
+	ServerName  string
+	OK          bool
+}
+
+// parseBackendHost derives the DNS / dial / SNI values from a backend API URL.
+// It uses url.Hostname() (port-stripped) for DNS + SNI and net.JoinHostPort
+// with the URL port (or the https default 443) for the dial address. So
+// "https://api.example.com" (no port) still dials :443, and
+// "https://api.example.com:8443/x" resolves the bare hostname rather than
+// "api.example.com:8443" and sends SNI "api.example.com" rather than
+// "api.example.com:8443". Returns OK=false for an empty / unparseable /
+// hostless URL.
+func parseBackendHost(apiURL string) backendHostParts {
 	if apiURL == "" {
-		return ""
+		return backendHostParts{}
 	}
-	// Strip query and fragment
 	parsed, err := url.Parse(apiURL)
 	if err != nil {
-		return ""
+		return backendHostParts{}
 	}
-	if parsed.Host == "" {
-		return ""
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return backendHostParts{}
 	}
-	return parsed.Host
+	port := parsed.Port()
+	if port == "" {
+		port = "443"
+	}
+	return backendHostParts{
+		Hostname:    hostname,
+		DialAddress: net.JoinHostPort(hostname, port),
+		ServerName:  hostname,
+		OK:          true,
+	}
 }
 
 // checkDNSReachability and checkBackendTLS are package-level seams (function
@@ -139,17 +250,19 @@ func checkDNSReachabilityReal(host string) bool {
 	return err == nil
 }
 
-// checkBackendTLSReal attempts a TLS handshake to the backend host.
-// Returns false on any connection or certificate error.
-// Timeout is caller-controlled via the provided context.
-func checkBackendTLSReal(ctx context.Context, host string) bool {
+// checkBackendTLSReal attempts a TLS handshake to the backend.
+// dialAddress is the host:port to connect to; serverName is the bare
+// hostname used for SNI + certificate verification (never host:port).
+// Returns false on any connection or certificate error. Timeout is
+// caller-controlled via the provided context.
+func checkBackendTLSReal(ctx context.Context, dialAddress, serverName string) bool {
 	dialer := &tls.Dialer{
 		Config: &tls.Config{
-			ServerName: host,
+			ServerName: serverName,
 			MinVersion: tls.VersionTLS10,
 		},
 	}
-	conn, err := dialer.DialContext(ctx, "tcp", host)
+	conn, err := dialer.DialContext(ctx, "tcp", dialAddress)
 	if err != nil {
 		return false
 	}
@@ -168,8 +281,12 @@ func checkBackendTLSReal(ctx context.Context, host string) bool {
 // seams to assert behavior without real network calls.
 //
 // The apiURL/agentVersion parameters are retained for signature stability but
-// the authoritative values come from the getProbeConfig seam, so the probe
-// reflects the live agent config rather than caller-passed strings.
+// the authoritative values come from the getProbeConfig / getLastPollLatencyMs
+// seams. In production those seams read the diagnosticsProvider, which the
+// runner populates via SetDiagnosticsConfig (live AgentVersion + APIURL at
+// startup) and RecordPollLatency (real NextCommand round-trip after each
+// poll) — so the probe reflects the live agent config rather than the
+// "unknown" placeholders or caller-passed strings.
 var runDiagnosticsProbeReal = func(ctx context.Context, apiURL, agentVersion string) DiagnosticsResult {
 	if ctx == nil {
 		ctx = context.Background()
@@ -186,12 +303,15 @@ var runDiagnosticsProbeReal = func(ctx context.Context, apiURL, agentVersion str
 	result.LastPollLatencyMs = getLastPollLatencyMs()
 
 	host := parseBackendHost(cfg.APIURL)
-	if host != "" {
-		result.BackendDNSReachable = checkDNSReachability(host)
+	if host.OK {
+		// DNS resolves the bare hostname; TLS dials host:port and verifies
+		// SNI against the bare hostname. Three distinct values — a
+		// "host:port" string is neither a valid DNS name nor SNI value.
+		result.BackendDNSReachable = checkDNSReachability(host.Hostname)
 
 		tlsCtx, cancel := context.WithTimeout(ctx, diagnosticsProbeTimeout)
 		defer cancel()
-		result.BackendTLSValid = checkBackendTLS(tlsCtx, host)
+		result.BackendTLSValid = checkBackendTLS(tlsCtx, host.DialAddress, host.ServerName)
 	} else {
 		// No resolvable backend host (empty or unparseable API URL) means
 		// the reachability probe could not run. Record a bounded, static

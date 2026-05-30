@@ -107,17 +107,17 @@ type Config struct {
 // (typically APIURL and AgentVersion).
 func Defaults() Config {
 	return Config{
-		AgentVersion:        "0.2.0-dev",
-		APIURL:              "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin",
-		CertFilter:          DefaultCertFilter(),
-		HeartbeatInterval:   60 * time.Second,
-		CommandPollInterval: 30 * time.Second,
-		CommandTimeout:      120 * time.Second,
+		AgentVersion:          "0.2.0-dev",
+		APIURL:                "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin",
+		CertFilter:            DefaultCertFilter(),
+		HeartbeatInterval:     60 * time.Second,
+		CommandPollInterval:   30 * time.Second,
+		CommandTimeout:        120 * time.Second,
 		InstallCommandTimeout: 30 * time.Minute,
-		HTTPTimeout:         30 * time.Second,
-		TokenRefreshWindow:  2 * time.Hour,
-		CertRenewalWindow:   7 * 24 * time.Hour,
-		NoCertBackoff:       60 * time.Minute,
+		HTTPTimeout:           30 * time.Second,
+		TokenRefreshWindow:    2 * time.Hour,
+		CertRenewalWindow:     7 * 24 * time.Hour,
+		NoCertBackoff:         60 * time.Minute,
 	}
 }
 
@@ -147,6 +147,12 @@ func NewRunner(cfg Config, cert CertProvider, reg RegistryReader, store ConfigSt
 	if _, err := url.Parse(cfg.APIURL); err != nil {
 		return nil, fmt.Errorf("autoenroll: api url invalid: %w", err)
 	}
+	// AG-038: register the live agent config so the self-diagnostics probe
+	// reports the REAL AgentVersion + a hash of the REAL APIURL. The
+	// auto-enroll path authenticates with an mTLS cert + service token, not
+	// an HMAC credential ID, so no credentialID is passed (and none would
+	// ever reach the wire / hash anyway).
+	inventory.SetDiagnosticsConfig(cfg.AgentVersion, cfg.APIURL, "")
 	return &Runner{
 		Config:       cfg,
 		CertProvider: cert,
@@ -511,7 +517,13 @@ func (r *Runner) heartbeat(ctx context.Context, persisted PersistedConfig) error
 
 // pollAndExecute fetches one queued command (if any) and runs it.
 func (r *Runner) pollAndExecute(ctx context.Context, persisted PersistedConfig) error {
+	pollStart := time.Now()
 	command, err := r.wireClient.NextCommand(ctx, persisted.ServiceToken)
+	// AG-038: record the NextCommand round-trip so a subsequent
+	// COLLECT_INVENTORY diagnostics probe reports the REAL last-poll latency.
+	// Measured even on ErrNoCommand (204) — an empty poll is still a
+	// representative backend round-trip.
+	inventory.RecordPollLatency(int(time.Since(pollStart) / time.Millisecond))
 	if errors.Is(err, ErrNoCommand) {
 		r.logf("no command available")
 		return nil

@@ -92,24 +92,85 @@ func TestConfigHash_NoCredentialID(t *testing.T) {
 	}
 }
 
+// TestParseBackendHost is a REAL (non-seam-mocked) unit test of the
+// DNS/dial/SNI derivation. It pins the three distinct values so a future
+// refactor cannot regress to feeding "host:port" into LookupHost or SNI, or
+// dialing a portless address. Codex 019e76c5 finding #2 absorb.
 func TestParseBackendHost(t *testing.T) {
 	cases := []struct {
-		url  string
-		want string
+		name           string
+		url            string
+		wantOK         bool
+		wantHostname   string
+		wantDial       string
+		wantServerName string
 	}{
-		{"https://api.example.com", "api.example.com"},
-		{"https://api.example.com:8443/endpoint-agent", "api.example.com:8443"},
-		{"https://192.168.1.1:8080/api", "192.168.1.1:8080"},
-		{"", ""},
-		{"not-a-url", ""},
-		{"ftp://example.com", "example.com"}, // net/url parses host for any scheme
-		{"https://", ""},
+		{
+			// No explicit port: DNS + SNI use the bare hostname; the dial
+			// must default to :443 (https) — a portless dial fails.
+			name:           "no port defaults dial to 443",
+			url:            "https://api.example.com",
+			wantOK:         true,
+			wantHostname:   "api.example.com",
+			wantDial:       "api.example.com:443",
+			wantServerName: "api.example.com",
+		},
+		{
+			// Explicit non-default port: DNS resolves the bare hostname
+			// (not "host:8443") and SNI is the bare hostname (no port),
+			// while the dial carries the explicit port.
+			name:           "explicit port keeps hostname bare for DNS+SNI",
+			url:            "https://api.example.com:8443/x",
+			wantOK:         true,
+			wantHostname:   "api.example.com",
+			wantDial:       "api.example.com:8443",
+			wantServerName: "api.example.com",
+		},
+		{
+			name:           "IPv4 literal with port",
+			url:            "https://192.168.1.1:8080/api",
+			wantOK:         true,
+			wantHostname:   "192.168.1.1",
+			wantDial:       "192.168.1.1:8080",
+			wantServerName: "192.168.1.1",
+		},
+		{
+			name:           "non-default scheme still derives host with default 443",
+			url:            "ftp://example.com",
+			wantOK:         true,
+			wantHostname:   "example.com",
+			wantDial:       "example.com:443",
+			wantServerName: "example.com",
+		},
+		// Hostless / garbage URLs → OK=false, which drives the fail-closed
+		// BACKEND_HOST_UNRESOLVED path in the orchestration.
+		{name: "empty", url: "", wantOK: false},
+		{name: "no host", url: "https://", wantOK: false},
+		{name: "garbage no scheme", url: "not-a-url", wantOK: false},
 	}
 	for _, c := range cases {
-		got := parseBackendHost(c.url)
-		if got != c.want {
-			t.Errorf("parseBackendHost(%q) = %q; want %q", c.url, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			got := parseBackendHost(c.url)
+			if got.OK != c.wantOK {
+				t.Fatalf("parseBackendHost(%q).OK = %v; want %v", c.url, got.OK, c.wantOK)
+			}
+			if !c.wantOK {
+				return
+			}
+			if got.Hostname != c.wantHostname {
+				t.Errorf("parseBackendHost(%q).Hostname = %q; want %q", c.url, got.Hostname, c.wantHostname)
+			}
+			if got.DialAddress != c.wantDial {
+				t.Errorf("parseBackendHost(%q).DialAddress = %q; want %q", c.url, got.DialAddress, c.wantDial)
+			}
+			if got.ServerName != c.wantServerName {
+				t.Errorf("parseBackendHost(%q).ServerName = %q; want %q", c.url, got.ServerName, c.wantServerName)
+			}
+			// Hardening: SNI / DNS must never carry the port.
+			if strings.ContainsRune(got.ServerName, ':') {
+				t.Errorf("ServerName %q must not contain a port", got.ServerName)
+			}
+		})
 	}
 }
 
@@ -121,8 +182,8 @@ func TestCheckDNSReachability_EmptyHost(t *testing.T) {
 
 func TestCheckBackendTLS_EmptyHost(t *testing.T) {
 	ctx := context.Background()
-	if checkBackendTLS(ctx, "") {
-		t.Error("checkBackendTLS with empty host should return false")
+	if checkBackendTLS(ctx, "", "") {
+		t.Error("checkBackendTLS with empty dial address should return false")
 	}
 }
 
