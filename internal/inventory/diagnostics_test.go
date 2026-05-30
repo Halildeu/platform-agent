@@ -33,7 +33,7 @@ func TestDeriveDiagnosticsSummary_WithError(t *testing.T) {
 	result := &DiagnosticsResult{
 		SchemaVersion: DiagnosticsSchemaVersion,
 		Supported:     true,
-		ProbeErrors: []DiagnosticsProbeError{{Code: "FOO_ERR"}},
+		ProbeErrors:   []DiagnosticsProbeError{{Code: "FOO_ERR"}},
 	}
 	deriveDiagnosticsSummary(result)
 	if result.ProbeComplete {
@@ -102,7 +102,7 @@ func TestParseBackendHost(t *testing.T) {
 		{"https://192.168.1.1:8080/api", "192.168.1.1:8080"},
 		{"", ""},
 		{"not-a-url", ""},
-		{"ftp://example.com", "example.com"},  // net/url parses host for any scheme
+		{"ftp://example.com", "example.com"}, // net/url parses host for any scheme
 		{"https://", ""},
 	}
 	for _, c := range cases {
