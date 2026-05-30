@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -205,6 +206,9 @@ func TestDiagnosticsElapsedMs_NilNow(t *testing.T) {
 }
 
 func TestProbeDiagnostics_NonWindowsStub(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("non-Windows stub behavior; Windows uses the live runner")
+	}
 	result := ProbeDiagnostics(nil, time.Now)
 	if result.Supported {
 		t.Error("Supported should be false on non-Windows")
