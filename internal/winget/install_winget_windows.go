@@ -27,7 +27,15 @@ func InstallWinGet(ctx context.Context, req InstallRequest) InstallResult {
 			return DetectSourceEgress(time.Now())
 		},
 		DetectionProbe: func(probeCtx context.Context, rule DetectionRule, wingetPath string) (PreDetectResult, error) {
-			return ProbeViaWingetList(probeCtx, defaultExecutor, rule, wingetPath)
+			// Dispatch by rule type. REGISTRY_UNINSTALL uses the ARP
+			// registry (Session-0-reliable, AUTHORITATIVE); WINGET_PACKAGE
+			// uses `winget list` (CONFIRM_ONLY under Session-0 — §11.3b).
+			switch rule.Type {
+			case DetectionRuleTypeRegistryUninstall:
+				return ProbeViaRegistry(probeCtx, defaultArpReader(), rule)
+			default:
+				return ProbeViaWingetList(probeCtx, defaultExecutor, rule, wingetPath)
+			}
 		},
 		InstallRunner: windowsInstallRunner,
 		Timeout:       DefaultInstallTimeout,

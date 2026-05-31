@@ -571,9 +571,10 @@ edilmez.
 The agent re-verifies the AG-026A WinGet source/egress readiness,
 pre-detects whether the catalog package is already present, runs
 `winget install` with a hard-coded argument vector, and post-verifies via
-the catalog's detection rule. v1 supports `WINGET_PACKAGE` detection
-rules only; any other detection rule type is rejected fail-closed
-BEFORE mutation.
+the catalog's detection rule. Supported detection rule types:
+`WINGET_PACKAGE` (CONFIRM_ONLY under Session-0 — §11.3b) and
+`REGISTRY_UNINSTALL` (AUTHORITATIVE — §11.3c). Any unimplemented rule
+type is rejected fail-closed BEFORE mutation.
 
 Codex 019e6bfa plan-time AGREE (iter-2) — schema locked.
 
@@ -661,7 +662,8 @@ audit / UI / compliance consumers can read the exact verdict.
 ### 11.3 Decision pipeline
 
 ```text
-1. validate detectionRule.type ∈ {WINGET_PACKAGE}
+1. validate detectionRule (type ∈ {WINGET_PACKAGE, REGISTRY_UNINSTALL} +
+   type-specific fields — mirrors backend validator)
    else FAILED_UNSUPPORTED_DETECTION_RULE (no mutation)
 
 2. validate argsPolicyPreset ∈ {DEFAULT, VENDOR_RECOMMENDED_WINGET_NO_UPGRADE}
@@ -673,11 +675,13 @@ audit / UI / compliance consumers can read the exact verdict.
 4. egressVerify() re-runs AG-026A SourceEgressPreflight
    if !ready → FAILED_EGRESS (no mutation)
 
-5. pre-detect via detection probe (see §11.3b)
+5. pre-detect via detection probe (reliability-keyed — see §11.3b/§11.3c)
    • present + versionPredicate satisfied → SUCCEEDED_NOOP
    • present + versionPredicate fails    → FAILED_PREEXISTING_VERSION_CONFLICT
                                             (no silent upgrade)
    • not present                          → proceed
+   • AUTHORITATIVE detector probe error  → FAIL-CLOSED before install
+     (REGISTRY_UNINSTALL); CONFIRM_ONLY (winget) probe error → proceed
 
 6. run winget install (30-min hard cap; timeout → process-tree kill via
    `taskkill /F /T /PID` fallback; killStrategy field carries audit
@@ -692,16 +696,17 @@ audit / UI / compliance consumers can read the exact verdict.
    • any other non-zero                   → FAILED_INSTALL (winget_exit_<n>)
    exitCode is retained on the result for audit.
 
-7. post-verify is CONFIRM-ONLY (see §11.3b) — it upgrades evidence but
-   never downgrades a clean install exit on a winget-list miss:
+7. post-verify is RELIABILITY-KEYED (see §11.3b/§11.3c):
    • positive + versionPredicate ok    → keep base status; attach matched version
    • positive + version mismatch       → FAILED_VERIFICATION
                                           (post_verify_version_predicate_failed)
-   • miss / error / timeout            → postVerification.status=INCONCLUSIVE;
-                                          keep base status for LATEST/no predicate.
-                                          A versioned predicate with no version
-                                          proof fails closed → FAILED_VERIFICATION
+   • miss / error (CONFIRM_ONLY, winget) → postVerification.status=INCONCLUSIVE;
+                                          keep base status for LATEST/no predicate;
+                                          versioned + no proof → FAILED_VERIFICATION
                                           (post_verify_inconclusive_version_required)
+   • miss / error (AUTHORITATIVE, registry) → FAILED_VERIFICATION, status=NOT_SATISFIED
+                                          (post_verify_not_satisfied / _probe_error /
+                                          detection_rule_ambiguous_match)
 ```
 
 ### 11.3b Install-state authority vs detection probe (AG-027)
@@ -760,11 +765,54 @@ a clean install exit on a winget-list miss:
 `detectionMethod` (and `status`/`reasonCode` on post-verify) are recorded
 for audit / debug.
 
-**Follow-up (separate work):** a registry-ARP / file-existence detection
-rule (`REGISTRY_UNINSTALL` / `FILE_EXISTS` carrying a concrete
-key/path/version) is the durable Session-0 inventory model — a winget
-package id alone is not a reliable installed-state detector under
-Session-0. Tracked in §11.5 + the backend catalog schema.
+**Durable Session-0 detection:** `REGISTRY_UNINSTALL` (§11.3c) is the
+AUTHORITATIVE, Session-0-reliable detector — a winget package id alone is
+not a reliable installed-state detector under Session-0. `FILE_EXISTS` /
+`FILE_VERSION` / `FILE_SHA256` remain follow-ups (§11.5).
+
+### 11.3c REGISTRY_UNINSTALL — authoritative Session-0 detection (AG-detect)
+
+`winget list` is unreliable under Session-0 (§11.3b), so WINGET_PACKAGE
+detection is CONFIRM_ONLY. The **ARP (Add/Remove Programs) registry** IS
+readable under SYSTEM Session-0, so a `REGISTRY_UNINSTALL` rule is an
+**AUTHORITATIVE** detector: a post-verify miss IS a real denial.
+
+**Rule fields** (additive; the agent re-validates fail-closed, mirroring
+the backend `DetectionRuleValidator`):
+- `productCode` — MSI `{GUID}`. Primary, precise: a case-insensitive ARP
+  subkey-name match. When present, name/publisher are ignored.
+- else **DisplayName fallback**: `displayName` + `displayNameMatch`
+  (`EXACT|PREFIX|CONTAINS|GLOB`) + `publisher` + `publisherMatch`
+  (`EXACT|CONTAINS`). Matching is case-insensitive; GLOB honours only `*`
+  and `?` (NO regex). `publisher` is REQUIRED for the fallback unless
+  `allowPublisherMissing` is set with an `EXACT` `displayName` (avoids
+  "7-Zip"/"Zoom"/"Teams" false positives).
+
+**Matching**: both `HKLM\…\Uninstall` and `HKLM\WOW6432Node\…\Uninstall`
+are enumerated (machine scope; HKCU is out of scope for SYSTEM). Entries
+without a `DisplayName` are skipped; raw `UninstallString` is never read.
+32/64-bit duplicates of the same `(DisplayName, Publisher, DisplayVersion)`
+dedupe to one. **Multiple DISTINCT matches → ambiguous** (never a silent
+first-match): pre-detect → `detection_rule_ambiguous_match` fail-close;
+post-verify → `FAILED_VERIFICATION`. `matchedVersion` = `DisplayVersion`.
+
+**Reliability-keyed authority** (`postVerification.authority`):
+| ruleType | authority | pre-detect probe error | post-verify miss/error |
+|---|---|---|---|
+| `WINGET_PACKAGE` | `CONFIRM_ONLY` | proceed (best-effort) | `INCONCLUSIVE`, keep base exit (§11.3b) |
+| `REGISTRY_UNINSTALL` | `AUTHORITATIVE` | **fail-closed BEFORE install** | `FAILED_VERIFICATION` (`post_verify_not_satisfied` / `…_probe_error` / `detection_rule_ambiguous_match`) |
+
+A positive probe is `SATISFIED` for both; a positive version-predicate
+mismatch downgrades for both. `detectionMethod=registry_uninstall`.
+
+**Security**: read-only native registry API (no shell); strings
+trimmed/control-stripped/length-capped before the wire; enumeration capped;
+the package-id↔install-target identity check applies only to
+`WINGET_PACKAGE`.
+
+**Follow-ups**: bounded post-verify retry (absorb installers that write ARP
+slightly after exit); `FILE_*` rule types; backend catalog-schema + payload
+forwarding the authored rule (agent-first sequencing — Codex 019e7d82).
 
 ### 11.3a Installer log redaction (AG-027L)
 
