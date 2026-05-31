@@ -673,7 +673,7 @@ audit / UI / compliance consumers can read the exact verdict.
 4. egressVerify() re-runs AG-026A SourceEgressPreflight
    if !ready → FAILED_EGRESS (no mutation)
 
-5. pre-detect via `winget list --id <pkg> --exact --source winget`
+5. pre-detect via detection probe (see §11.3b)
    • present + versionPredicate satisfied → SUCCEEDED_NOOP
    • present + versionPredicate fails    → FAILED_PREEXISTING_VERSION_CONFLICT
                                             (no silent upgrade)
@@ -683,12 +683,88 @@ audit / UI / compliance consumers can read the exact verdict.
    `taskkill /F /T /PID` fallback; killStrategy field carries audit
    evidence)
 
-7. post-verify via `winget list ...`
-   • satisfied + versionPredicate ok  → SUCCEEDED (or SUCCEEDED_REBOOT_REQUIRED
-                                         when exit 3010 / reboot signal)
-   • satisfied but version mismatch    → FAILED_VERIFICATION
-   • not satisfied                     → FAILED_VERIFICATION
+6a. the winget install exit code is the AUTHORITY for installed-state
+    (winget list is unreliable under Session-0 — see §11.3b); base status:
+   • 0                                    → SUCCEEDED (reboot flag → REBOOT_REQUIRED)
+   • 3010                                 → SUCCEEDED_REBOOT_REQUIRED
+   • 0x8A150061 (already installed /      → SUCCEEDED_NOOP
+     no applicable upgrade)
+   • any other non-zero                   → FAILED_INSTALL (winget_exit_<n>)
+   exitCode is retained on the result for audit.
+
+7. post-verify is CONFIRM-ONLY (see §11.3b) — it upgrades evidence but
+   never downgrades a clean install exit on a winget-list miss:
+   • positive + versionPredicate ok    → keep base status; attach matched version
+   • positive + version mismatch       → FAILED_VERIFICATION
+                                          (post_verify_version_predicate_failed)
+   • miss / error / timeout            → postVerification.status=INCONCLUSIVE;
+                                          keep base status for LATEST/no predicate.
+                                          A versioned predicate with no version
+                                          proof fails closed → FAILED_VERIFICATION
+                                          (post_verify_inconclusive_version_required)
 ```
+
+### 11.3b Install-state authority vs detection probe (AG-027)
+
+**winget is an install provider, not a reliable inventory provider under
+Session-0.** LIVE evidence (7-Zip first-install pilot, HALILKOOLUB735)
+proved that under the **SYSTEM Session-0 service context** `winget list`
+cannot reliably enumerate installed packages — it returns a clean
+no-match even when the package IS installed — independent of `--source`
+(both the source-scoped and no-source ARP attempts miss). `winget
+install`, by contrast, reports installed-state reliably (e.g. exit
+`0x8A150061` "already installed"). Therefore `winget list` MUST NOT be the
+verification authority; the winget INSTALL exit code is.
+
+**Authority model (step 6a).** The install exit code decides the base
+status: `0` → SUCCEEDED, `3010` → SUCCEEDED_REBOOT_REQUIRED, `0x8A150061`
+(UPDATE_NOT_APPLICABLE) → SUCCEEDED_NOOP, any other non-zero →
+FAILED_INSTALL. `exitCode` is retained on the result for audit. The
+signed/unsigned HRESULT representations of `0x8A150061` (2316632161 /
+-1978335135) are normalized via `uint32()`.
+
+**The detection probe (`ProbeViaWingetList`)** is shared by pre-detect and
+post-verify and answers "is `<packageId>` installed?" with two attempts:
+1. **Source-scoped (preferred):** `winget list --id <pkg> --exact --source
+   winget ...` → `detectionMethod = winget_list_source`.
+2. **No-source fallback (on a MISS):** drops `--source winget` (ARP query)
+   → `detectionMethod = winget_list_no_source_fallback`. Helps
+   non-Session-0 contexts where only the source correlation fails; under
+   Session-0 both attempts miss (handled by the authority model, not by
+   failing). A "miss" is a non-zero winget exit OR a clean exit parsed
+   not-satisfied; a hard failure (launch failure / timeout) bubbles up.
+   Both attempts require an **exact package-id match** (no fuzzy
+   display-name): a positive result is PRESENCE / identity evidence, not
+   source-provenance evidence. Source trust stays in the INSTALL path
+   (step 6 keeps `--source winget`).
+
+**Pre-detect — best-effort optimization.** A positive pre-detect
+short-circuits (predicate ok → SUCCEEDED_NOOP; predicate mismatch →
+FAILED_PREEXISTING_VERSION_CONFLICT). A miss OR a probe error is NOT fatal
+— the install path is idempotent (`--no-upgrade`), so we proceed.
+
+**Post-verify — confirm-only.** It upgrades evidence but never downgrades
+a clean install exit on a winget-list miss:
+- **Positive** (Satisfied): reliable. Attach the matched version; a
+  positive version-predicate mismatch is an authoritative contradiction →
+  FAILED_VERIFICATION / `post_verify_version_predicate_failed`.
+- **Miss / error / timeout**: INCONCLUSIVE. `winget list` could neither
+  confirm nor deny. The base install-exit status stands; the caveat is
+  carried on `postVerification.status = INCONCLUSIVE` +
+  `reasonCode = winget_list_session0_enumeration_unreliable` — never as a
+  `failedReasonCode` on a SUCCEEDED result. EXCEPTION: a versioned
+  predicate (EXACT/MINIMUM/RANGE) needs a concrete installed version to
+  verify; with no version evidence it fails closed (strict v1) →
+  FAILED_VERIFICATION / `post_verify_inconclusive_version_required`.
+
+`detectionMethod` (and `status`/`reasonCode` on post-verify) are recorded
+for audit / debug.
+
+**Follow-up (separate work):** a registry-ARP / file-existence detection
+rule (`REGISTRY_UNINSTALL` / `FILE_EXISTS` carrying a concrete
+key/path/version) is the durable Session-0 inventory model — a winget
+package id alone is not a reliable installed-state detector under
+Session-0. Tracked in §11.5 + the backend catalog schema.
 
 ### 11.3a Installer log redaction (AG-027L)
 

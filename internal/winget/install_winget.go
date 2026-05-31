@@ -90,8 +90,66 @@ const PreVerifyEgressTimeout = 10 * time.Second
 
 // DetectionProbeTimeout is the wall-clock budget for a single
 // `winget list --id <pkg> --exact --source winget` invocation
-// (pre-detect + post-verify).
+// (pre-detect + post-verify). The probe may run TWO attempts
+// (source-scoped, then no-source fallback) inside this budget.
 const DetectionProbeTimeout = 30 * time.Second
+
+// Detection-probe method tags recorded in
+// PreDetectResult/PostVerificationResult.DetectionMethod for audit/debug.
+// The source-scoped probe is preferred (it proves the installed package
+// correlates to the trusted winget catalog source); the no-source
+// fallback proves installed-state PRESENCE/identity only, NOT source
+// provenance (see COMMAND-CONTRACT.md §11.3b).
+const (
+	DetectionMethodSource           = "winget_list_source"
+	DetectionMethodNoSourceFallback = "winget_list_no_source_fallback"
+)
+
+// wingetExitUpdateNotApplicable (0x8A150061,
+// APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE) is winget's "package
+// already installed / no newer version available" signal. It is NOT an
+// install failure: the desired installed-state may already be met, so
+// the pipeline treats it as verify-gated (fall through to post-verify)
+// rather than a terminal FAILED_INSTALL.
+const wingetExitUpdateNotApplicable uint32 = 0x8A150061
+
+// isWingetAlreadyInstalledExit normalizes the signed/unsigned HRESULT
+// representations of the winget exit code (2316632161 as uint32 ==
+// -1978335135 as int32) before comparing against UPDATE_NOT_APPLICABLE.
+func isWingetAlreadyInstalledExit(code int) bool {
+	return uint32(code) == wingetExitUpdateNotApplicable
+}
+
+// Post-verification verdict (PostVerificationResult.Status). The
+// winget INSTALL exit code is the AUTHORITY for installed-state; the
+// `winget list` post-verify is CONFIRM-ONLY. A positive probe is
+// SATISFIED (and a positive version mismatch still fails); a miss /
+// error / timeout is INCONCLUSIVE and never downgrades a clean install
+// exit (LIVE evidence: `winget list` enumeration is unreliable under the
+// SYSTEM Session-0 service context). See COMMAND-CONTRACT.md §11.3b.
+const (
+	PostVerifyStatusSatisfied    = "SATISFIED"
+	PostVerifyStatusInconclusive = "INCONCLUSIVE"
+)
+
+// postVerifyInconclusiveSession0 is the ReasonCode carried on an
+// INCONCLUSIVE post-verify: `winget list` could neither confirm nor deny
+// installed-state under SYSTEM Session-0. It is a verification caveat on
+// a SUCCEEDED result, NOT a FailedReasonCode.
+const postVerifyInconclusiveSession0 = "winget_list_session0_enumeration_unreliable"
+
+// versionPredicateRequiresVersionProof reports whether the predicate can
+// only be verified against a concrete installed version
+// (EXACT / MINIMUM / RANGE). LATEST and the zero value need no version
+// proof, so an INCONCLUSIVE post-verify is acceptable for them.
+func versionPredicateRequiresVersionProof(p VersionPredicate) bool {
+	switch p.Type {
+	case VersionPredicateExact, VersionPredicateMinimum, VersionPredicateRange:
+		return true
+	default:
+		return false
+	}
+}
 
 // CaptureLimitBytes caps each of stdout / stderr tail capture
 // in the wire-safe result. The remainder is dropped silently
@@ -102,9 +160,9 @@ const CaptureLimitBytes = 4 * 1024
 // Final status enum (machine-readable, locked in plan-time AGREE)
 
 const (
-	FinalStatusSucceeded                       = "SUCCEEDED"
-	FinalStatusSucceededNoop                   = "SUCCEEDED_NOOP"
-	FinalStatusSucceededRebootRequired         = "SUCCEEDED_REBOOT_REQUIRED"
+	FinalStatusSucceeded                        = "SUCCEEDED"
+	FinalStatusSucceededNoop                    = "SUCCEEDED_NOOP"
+	FinalStatusSucceededRebootRequired          = "SUCCEEDED_REBOOT_REQUIRED"
 	FinalStatusFailedPreexistingVersionConflict = "FAILED_PREEXISTING_VERSION_CONFLICT"
 	FinalStatusFailedUnsupportedDetectionRule   = "FAILED_UNSUPPORTED_DETECTION_RULE"
 	FinalStatusFailedUnsupportedArgsPolicy      = "FAILED_UNSUPPORTED_ARGS_POLICY"
@@ -259,16 +317,45 @@ type PreDetectResult struct {
 	Satisfied        bool   `json:"satisfied"`
 	MatchedPackageID string `json:"matchedPackageId,omitempty"`
 	MatchedVersion   string `json:"matchedVersion,omitempty"`
+	// DetectionMethod records which winget-list probe variant produced
+	// this result: DetectionMethodSource (preferred, `--source winget`)
+	// or DetectionMethodNoSourceFallback (ARP-based, used when the
+	// source-scoped probe could not correlate an installed package — a
+	// known failure mode under the SYSTEM Session-0 service context).
+	// Empty when no probe ran (validation error) or in injected stubs.
+	// This is PRESENCE/identity evidence, not source-provenance evidence
+	// (see COMMAND-CONTRACT.md §11.3b).
+	DetectionMethod string `json:"detectionMethod,omitempty"`
 }
 
-// PostVerificationResult is the post-install detection-rule probe.
-// On SUCCEEDED both `Satisfied=true` and the matched fields are
-// populated; on FAILED_VERIFICATION `Satisfied=false`.
+// PostVerificationResult is the CONFIRM-ONLY post-install detection
+// probe. A positive probe sets `Satisfied=true` + `Status=SATISFIED` and
+// populates the matched fields. A miss/error/timeout sets
+// `Satisfied=false` + `Status=INCONCLUSIVE` (it does NOT deny installed
+// state — `winget list` is unreliable under Session-0) and carries a
+// `ReasonCode`. The winget install exit code, not this probe, is the
+// install-state authority (see COMMAND-CONTRACT.md §11.3b).
 type PostVerificationResult struct {
-	Satisfied        bool              `json:"satisfied"`
+	Satisfied bool `json:"satisfied"`
+	// Status is the verification verdict: PostVerifyStatusSatisfied (the
+	// probe positively confirmed installed-state) or
+	// PostVerifyStatusInconclusive (the probe could neither confirm nor
+	// deny — `winget list` is unreliable under the SYSTEM Session-0
+	// service context, so a miss is NOT a denial). Empty in legacy/stub
+	// paths. A clean install exit is NEVER downgraded by an INCONCLUSIVE
+	// post-verify (see §11.3b).
+	Status string `json:"status,omitempty"`
+	// ReasonCode explains an INCONCLUSIVE verdict
+	// (postVerifyInconclusiveSession0). Empty when SATISFIED.
+	ReasonCode       string            `json:"reasonCode,omitempty"`
 	MatchedPackageID string            `json:"matchedPackageId,omitempty"`
 	MatchedVersion   string            `json:"matchedVersion,omitempty"`
 	RuleType         DetectionRuleType `json:"ruleType,omitempty"`
+	// DetectionMethod mirrors PreDetectResult.DetectionMethod for the
+	// post-install probe (winget_list_source vs
+	// winget_list_no_source_fallback) — audit/debug for which variant
+	// ran.
+	DetectionMethod string `json:"detectionMethod,omitempty"`
 }
 
 // InstallResult is the wire-safe outcome the agent reports back
@@ -276,23 +363,23 @@ type PostVerificationResult struct {
 // no human-formatted text is required for the backend to drive UI
 // or audit downstream.
 type InstallResult struct {
-	FinalStatus       string                  `json:"finalStatus"`
-	SchemaVersion     int                     `json:"schemaVersion"`
-	Supported         bool                    `json:"supported"`
-	FailedReasonCode  string                  `json:"failedReasonCode,omitempty"`
-	ExitCode          int                     `json:"exitCode"`
-	DurationMs        int                     `json:"durationMs"`
-	RebootRequired    bool                    `json:"rebootRequired"`
-	KillStrategy      string                  `json:"killStrategy,omitempty"`
-	PreDetect         PreDetectResult         `json:"preDetect"`
-	PostVerification  PostVerificationResult  `json:"postVerification"`
-	Egress            SourceEgressReadiness   `json:"egress"`
-	StdoutTail        string                  `json:"stdoutTail,omitempty"`
-	StdoutTruncated   bool                    `json:"stdoutTruncated"`
-	StdoutTotalBytes  int                     `json:"stdoutTotalBytes"`
-	StderrTail        string                  `json:"stderrTail,omitempty"`
-	StderrTruncated   bool                    `json:"stderrTruncated"`
-	StderrTotalBytes  int                     `json:"stderrTotalBytes"`
+	FinalStatus      string                 `json:"finalStatus"`
+	SchemaVersion    int                    `json:"schemaVersion"`
+	Supported        bool                   `json:"supported"`
+	FailedReasonCode string                 `json:"failedReasonCode,omitempty"`
+	ExitCode         int                    `json:"exitCode"`
+	DurationMs       int                    `json:"durationMs"`
+	RebootRequired   bool                   `json:"rebootRequired"`
+	KillStrategy     string                 `json:"killStrategy,omitempty"`
+	PreDetect        PreDetectResult        `json:"preDetect"`
+	PostVerification PostVerificationResult `json:"postVerification"`
+	Egress           SourceEgressReadiness  `json:"egress"`
+	StdoutTail       string                 `json:"stdoutTail,omitempty"`
+	StdoutTruncated  bool                   `json:"stdoutTruncated"`
+	StdoutTotalBytes int                    `json:"stdoutTotalBytes"`
+	StderrTail       string                 `json:"stderrTail,omitempty"`
+	StderrTruncated  bool                   `json:"stderrTruncated"`
+	StderrTotalBytes int                    `json:"stderrTotalBytes"`
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -346,12 +433,12 @@ type RunnerOutcome struct {
 // Windows; tests override every seam to exercise the pipeline
 // hermetically.
 type InstallOptions struct {
-	Locator          Locator
-	EgressVerify     EgressVerifier
-	DetectionProbe   DetectionProbeFn
-	InstallRunner    InstallRunnerFn
-	Timeout          time.Duration
-	Now              func() time.Time
+	Locator        Locator
+	EgressVerify   EgressVerifier
+	DetectionProbe DetectionProbeFn
+	InstallRunner  InstallRunnerFn
+	Timeout        time.Duration
+	Now            func() time.Time
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -471,15 +558,14 @@ func RunInstall(parentCtx context.Context, req InstallRequest, opts InstallOptio
 	preCtx, preCancel := context.WithTimeout(ctx, DetectionProbeTimeout)
 	pre, preErr := opts.DetectionProbe(preCtx, req.DetectionRule, wingetPath)
 	preCancel()
-	if preErr != nil {
-		result.FinalStatus = FinalStatusFailedInternal
-		result.FailedReasonCode = "pre_detect_error"
-		result.PreDetect = pre
-		result.DurationMs = elapsedMs(startedAt, opts.Now)
-		return result
-	}
 	result.PreDetect = pre
-	if pre.Satisfied {
+	// Pre-detect is a best-effort optimization (the NOOP short-circuit).
+	// A probe error or a miss is NOT fatal — `winget list` is unreliable
+	// under Session-0 and the install path is idempotent — so we proceed
+	// to install rather than fail the command. Only a POSITIVE pre-detect
+	// short-circuits (NOOP, or FAILED_PREEXISTING_VERSION_CONFLICT on a
+	// version-predicate mismatch).
+	if preErr == nil && pre.Satisfied {
 		// Pre-detect already proves the catalog package present.
 		// Check that the version predicate is also satisfied to
 		// decide NOOP vs FAILED_PREEXISTING_VERSION_CONFLICT.
@@ -487,9 +573,11 @@ func RunInstall(parentCtx context.Context, req InstallRequest, opts InstallOptio
 			result.FinalStatus = FinalStatusSucceededNoop
 			result.PostVerification = PostVerificationResult{
 				Satisfied:        true,
+				Status:           PostVerifyStatusSatisfied,
 				MatchedPackageID: pre.MatchedPackageID,
 				MatchedVersion:   pre.MatchedVersion,
 				RuleType:         req.DetectionRule.Type,
+				DetectionMethod:  pre.DetectionMethod,
 			}
 			result.DurationMs = elapsedMs(startedAt, opts.Now)
 			return result
@@ -535,57 +623,90 @@ func RunInstall(parentCtx context.Context, req InstallRequest, opts InstallOptio
 		return result
 	}
 
-	// Exit-code interpretation: 0 = clean success, 3010 = success
-	// with reboot required, anything else = install failure.
-	switch runnerOutcome.ExitCode {
-	case 0, 3010:
-		// fall through to post-verify
+	// 8. Base install-state from the winget INSTALL exit code. winget is
+	// the AUTHORITY for installed-state: LIVE evidence proved `winget list`
+	// enumeration is unreliable under the SYSTEM Session-0 service context,
+	// so it cannot be the verification authority, whereas `winget install`
+	// reports installed-state reliably.
+	//   0          → SUCCEEDED (reboot flag → SUCCEEDED_REBOOT_REQUIRED)
+	//   3010       → SUCCEEDED_REBOOT_REQUIRED
+	//   0x8A150061 → SUCCEEDED_NOOP (already installed / no applicable upgrade)
+	//   other      → FAILED_INSTALL (winget_exit_<n>)
+	// result.ExitCode retains the winget code for audit.
+	var baseStatus string
+	switch {
+	case runnerOutcome.ExitCode == 0:
+		if runnerOutcome.RebootRequired {
+			result.RebootRequired = true
+			baseStatus = FinalStatusSucceededRebootRequired
+		} else {
+			baseStatus = FinalStatusSucceeded
+		}
+	case runnerOutcome.ExitCode == 3010:
+		result.RebootRequired = true
+		baseStatus = FinalStatusSucceededRebootRequired
+	case isWingetAlreadyInstalledExit(runnerOutcome.ExitCode):
+		baseStatus = FinalStatusSucceededNoop
 	default:
 		result.FinalStatus = FinalStatusFailedInstall
 		result.FailedReasonCode = "winget_exit_" + strconv.Itoa(runnerOutcome.ExitCode)
 		result.DurationMs = runnerOutcome.DurationMs
 		return result
 	}
+	result.DurationMs = runnerOutcome.DurationMs
 
-	// 8. Post-install verification — re-run detection rule.
+	// 9. Post-install verification — CONFIRM-ONLY. A `winget list` probe
+	// that POSITIVELY finds the package upgrades evidence (and a positive
+	// version-predicate mismatch is an authoritative contradiction that
+	// still downgrades). A miss / error / timeout is INCONCLUSIVE (the
+	// Session-0 enumeration limitation) and never downgrades a clean
+	// install exit.
 	postCtx, postCancel := context.WithTimeout(ctx, DetectionProbeTimeout)
 	post, postErr := opts.DetectionProbe(postCtx, req.DetectionRule, wingetPath)
 	postCancel()
-	verification := PostVerificationResult{
-		Satisfied:        post.Satisfied,
-		MatchedPackageID: post.MatchedPackageID,
-		MatchedVersion:   post.MatchedVersion,
-		RuleType:         req.DetectionRule.Type,
-	}
-	result.PostVerification = verification
-	result.DurationMs = runnerOutcome.DurationMs
-	if postErr != nil || !post.Satisfied {
-		result.FinalStatus = FinalStatusFailedVerification
-		if postErr != nil {
-			result.FailedReasonCode = "post_verify_error"
-		} else {
-			result.FailedReasonCode = "post_verify_not_satisfied"
+
+	if postErr == nil && post.Satisfied {
+		result.PostVerification = PostVerificationResult{
+			Satisfied:        true,
+			Status:           PostVerifyStatusSatisfied,
+			MatchedPackageID: post.MatchedPackageID,
+			MatchedVersion:   post.MatchedVersion,
+			RuleType:         req.DetectionRule.Type,
+			DetectionMethod:  post.DetectionMethod,
 		}
-		return result
-	}
-	// Re-check version predicate post-install (handles MINIMUM /
-	// RANGE / EXACT where catalog supplied a concrete spec).
-	if !versionPredicateSatisfied(req.VersionPredicate, req.ResolvedVersion, post.MatchedVersion) {
-		result.FinalStatus = FinalStatusFailedVerification
-		result.FailedReasonCode = "post_verify_version_predicate_failed"
+		// A positive probe reporting a CONFLICTING version is an
+		// authoritative contradiction — downgrade.
+		if !versionPredicateSatisfied(req.VersionPredicate, req.ResolvedVersion, post.MatchedVersion) {
+			result.FinalStatus = FinalStatusFailedVerification
+			result.FailedReasonCode = "post_verify_version_predicate_failed"
+			return result
+		}
+		result.FinalStatus = baseStatus
 		return result
 	}
 
-	if runnerOutcome.RebootRequired || runnerOutcome.ExitCode == 3010 {
-		// Exit code 3010 is the documented MSI / WinGet reboot signal.
-		// Even when the runner did not flip RebootRequired explicitly
-		// (older runner implementations) we surface it here so the
-		// result.RebootRequired flag matches FinalStatus consistently.
-		result.RebootRequired = true
-		result.FinalStatus = FinalStatusSucceededRebootRequired
+	// Inconclusive post-verify: `winget list` could neither confirm nor
+	// deny under this context. Carry the caveat on PostVerification — do
+	// NOT pollute a SUCCEEDED result with a FailedReasonCode.
+	result.PostVerification = PostVerificationResult{
+		Satisfied:       false,
+		Status:          PostVerifyStatusInconclusive,
+		ReasonCode:      postVerifyInconclusiveSession0,
+		RuleType:        req.DetectionRule.Type,
+		DetectionMethod: post.DetectionMethod,
+	}
+	// A versioned predicate REQUIRES a concrete installed version to
+	// verify; with no version evidence we cannot assert it. Fail closed
+	// (strict v1) — never claim a versioned install we could not prove.
+	if versionPredicateRequiresVersionProof(req.VersionPredicate) {
+		result.FinalStatus = FinalStatusFailedVerification
+		result.FailedReasonCode = "post_verify_inconclusive_version_required"
 		return result
 	}
-	result.FinalStatus = FinalStatusSucceeded
+	// LATEST / no version predicate: the winget install exit code is a
+	// sufficient authority; keep the base success status with the
+	// verification caveat carried in PostVerification.
+	result.FinalStatus = baseStatus
 	return result
 }
 
@@ -771,17 +892,36 @@ func CaptureTail(raw []byte, limit int) (tail string, truncated bool, totalBytes
 // ────────────────────────────────────────────────────────────────
 // Detection-rule probe (winget list parser)
 
-// ProbeViaWingetList runs `winget list --id <pkg> --exact
-// --source winget` via the supplied Executor and returns a
-// PreDetectResult. Exposed for production wire-up; tests
+// ProbeViaWingetList answers "is <pkg> installed?" via `winget list`,
+// using a two-attempt strategy. Exposed for production wire-up; tests
 // inject their own DetectionProbeFn that bypasses this entirely.
 //
-// Exit-code semantics: `winget list` returns a non-zero exit when
-// no matching package is found. This helper treats that as a
-// not-satisfied result (no error to the caller). Any other error
-// surface — locator failure, ctx timeout, parse failure — bubbles
-// up as a Go error so the pipeline can map it to a precise
-// FAILED_INTERNAL.
+// Attempt 1 (preferred) is source-scoped: `winget list --id <pkg>
+// --exact --source winget`. It proves the installed package correlates
+// to the trusted winget catalog source.
+//
+// Attempt 2 (fallback, unconditional on a MISS) drops `--source winget`:
+// `winget list --id <pkg> --exact`. LIVE evidence (AG-027 7-Zip smoke)
+// showed that under the SYSTEM Session-0 service context the source-
+// scoped probe cannot always correlate an installed MSI (ARP) entry to
+// the catalog source, returning a clean no-match even though the package
+// IS installed. The no-source probe queries installed packages (ARP)
+// directly and helps non-Session-0 contexts where only the source
+// correlation fails. NOTE: under the genuine Session-0 service context
+// BOTH attempts can still miss (`winget list` enumeration is unreliable
+// there); that case is handled by the install-exit authority model (the
+// probe is best-effort/confirm-only), NOT by this fallback. It still
+// requires an EXACT package-id match — no fuzzy display-name fallback —
+// so it is PRESENCE/identity evidence, not source-provenance evidence
+// (COMMAND-CONTRACT.md §11.3b). The INSTALL path keeps `--source winget`;
+// only DETECTION degrades gracefully.
+//
+// "Miss" = a source-scoped attempt that returned cleanly (no error) but
+// not-satisfied, OR a non-zero winget exit ("no matching package"). A
+// HARD failure — winget launch failure, ctx timeout, etc. — is NOT a
+// miss: it bubbles up as a Go error (no fallback) so the pipeline maps a
+// precise FAILED_INTERNAL and a genuine not-installed result is never
+// masked by a probe that could not run.
 func ProbeViaWingetList(ctx context.Context, runner Executor, rule DetectionRule, wingetPath string) (PreDetectResult, error) {
 	if runner == nil {
 		return PreDetectResult{}, errors.New("AG-027 detection probe executor is nil")
@@ -792,32 +932,58 @@ func ProbeViaWingetList(ctx context.Context, runner Executor, rule DetectionRule
 	if strings.TrimSpace(rule.PackageID) == "" {
 		return PreDetectResult{}, errors.New("AG-027 detection rule package id is empty")
 	}
-	stdout, err := runner(ctx, wingetPath,
-		"list",
-		"--id", rule.PackageID,
-		"--exact",
-		"--source", "winget",
-		"--accept-source-agreements",
-		"--disable-interactivity",
-	)
+
+	src, hardErr := wingetListAttempt(ctx, runner, rule.PackageID, wingetPath, true, DetectionMethodSource)
+	if hardErr != nil {
+		return PreDetectResult{}, hardErr
+	}
+	if src.Satisfied {
+		return src, nil
+	}
+
+	// Source-scoped miss → no-source ARP fallback.
+	nos, hardErr := wingetListAttempt(ctx, runner, rule.PackageID, wingetPath, false, DetectionMethodNoSourceFallback)
+	if hardErr != nil {
+		return PreDetectResult{}, hardErr
+	}
+	return nos, nil
+}
+
+// wingetListAttempt runs a single `winget list --id <pkg> --exact
+// [--source winget] --accept-source-agreements --disable-interactivity`
+// probe. A non-zero winget exit ("no matching package") is a soft miss
+// → {Satisfied:false, DetectionMethod:method}, nil. A process-launch
+// failure or context deadline is a HARD error → ({}, err) so the caller
+// can distinguish a genuine not-installed result from an undetermined
+// probe.
+func wingetListAttempt(ctx context.Context, runner Executor, packageID, wingetPath string, useSource bool, method string) (PreDetectResult, error) {
+	args := []string{"list", "--id", packageID, "--exact"}
+	if useSource {
+		args = append(args, "--source", "winget")
+	}
+	args = append(args, "--accept-source-agreements", "--disable-interactivity")
+
+	stdout, err := runner(ctx, wingetPath, args...)
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return PreDetectResult{}, fmt.Errorf("AG-027 detection probe timed out: %w", ctx.Err())
+		return PreDetectResult{}, fmt.Errorf("AG-027 detection probe timed out (%s): %w", method, ctx.Err())
 	}
 	if err != nil {
 		var exitErr interface{ ExitCode() int }
 		if errors.As(err, &exitErr) {
 			// Non-zero exit on `winget list` is the documented
-			// "no matching package" signal; treat as not-satisfied
-			// without returning an error to the caller.
-			return PreDetectResult{Satisfied: false}, nil
+			// "no matching package" signal; treat as a soft miss
+			// (not-satisfied) without an error so the caller can try
+			// the next probe variant.
+			return PreDetectResult{Satisfied: false, DetectionMethod: method}, nil
 		}
 		return PreDetectResult{}, err
 	}
-	pkg, ver, found := parseDetectionListOutput(string(stdout), rule.PackageID)
+	pkg, ver, found := parseDetectionListOutput(string(stdout), packageID)
 	return PreDetectResult{
 		Satisfied:        found,
 		MatchedPackageID: pkg,
 		MatchedVersion:   ver,
+		DetectionMethod:  method,
 	}, nil
 }
 
