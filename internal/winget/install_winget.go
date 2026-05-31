@@ -19,11 +19,14 @@ import (
 //
 // HARD BOUNDARIES (locked in the plan-time consensus):
 //
-//   - **Fail-closed pre-mutation on unsupported detection rules.**
-//     v1 only supports `WINGET_PACKAGE` detection rules. Any other
-//     rule type returns FinalStatusFailedUnsupportedDetectionRule
-//     BEFORE running winget — the agent never mutates a system it
-//     cannot subsequently verify.
+//   - **Fail-closed pre-mutation on invalid/unsupported detection rules.**
+//     Supported types: `WINGET_PACKAGE` (CONFIRM_ONLY) and
+//     `REGISTRY_UNINSTALL` (AUTHORITATIVE — Session-0-reliable; a miss is
+//     a real denial). An invalid or unimplemented rule returns
+//     FinalStatusFailedUnsupportedDetectionRule BEFORE running winget —
+//     the agent never mutates a system it cannot subsequently verify. For
+//     an AUTHORITATIVE detector that cannot run, even the pre-detect fails
+//     closed before mutation (see §11.3c).
 //
 //   - **Args policy is an enum preset, never a free-text string.**
 //     The catalog publishes `argsPolicyPreset ∈ {DEFAULT,
@@ -101,8 +104,9 @@ const DetectionProbeTimeout = 30 * time.Second
 // fallback proves installed-state PRESENCE/identity only, NOT source
 // provenance (see COMMAND-CONTRACT.md §11.3b).
 const (
-	DetectionMethodSource           = "winget_list_source"
-	DetectionMethodNoSourceFallback = "winget_list_no_source_fallback"
+	DetectionMethodSource            = "winget_list_source"
+	DetectionMethodNoSourceFallback  = "winget_list_no_source_fallback"
+	DetectionMethodRegistryUninstall = "registry_uninstall"
 )
 
 // wingetExitUpdateNotApplicable (0x8A150061,
@@ -130,6 +134,10 @@ func isWingetAlreadyInstalledExit(code int) bool {
 const (
 	PostVerifyStatusSatisfied    = "SATISFIED"
 	PostVerifyStatusInconclusive = "INCONCLUSIVE"
+	// PostVerifyStatusNotSatisfied is an AUTHORITATIVE denial: a reliable
+	// detector (REGISTRY_UNINSTALL) ran and the package is NOT present →
+	// FAILED_VERIFICATION. Distinct from INCONCLUSIVE (CONFIRM_ONLY miss).
+	PostVerifyStatusNotSatisfied = "NOT_SATISFIED"
 )
 
 // postVerifyInconclusiveSession0 is the ReasonCode carried on an
@@ -276,19 +284,77 @@ type VersionPredicate struct {
 }
 
 // DetectionRuleType enumerates the rule types AG-027 can verify.
-// v1 ONLY supports WINGET_PACKAGE. Any other type is rejected
-// fail-closed BEFORE invoking winget install.
+//   - WINGET_PACKAGE   — `winget list` (CONFIRM_ONLY under Session-0;
+//     see §11.3b). A miss is INCONCLUSIVE, never a denial.
+//   - REGISTRY_UNINSTALL — ARP (Add/Remove Programs) registry match.
+//     Reliable under SYSTEM Session-0, so AUTHORITATIVE: a post-verify
+//     miss IS a denial. (FILE_EXISTS / FILE_VERSION / FILE_SHA256 are a
+//     planned follow-up; rejected fail-closed until implemented.)
+//
+// Any unrecognized / unimplemented type is rejected fail-closed BEFORE
+// invoking winget install.
 type DetectionRuleType string
 
-const DetectionRuleTypeWingetPackage DetectionRuleType = "WINGET_PACKAGE"
+const (
+	DetectionRuleTypeWingetPackage     DetectionRuleType = "WINGET_PACKAGE"
+	DetectionRuleTypeRegistryUninstall DetectionRuleType = "REGISTRY_UNINSTALL"
+)
 
-// DetectionRule v1 carries the package id to look for via
-// `winget list`. Future rule types (REGISTRY_UNINSTALL,
-// FILE_EXISTS, FILE_SHA256) gain their own fields without breaking
-// the wire.
+// String-match modes for REGISTRY_UNINSTALL displayName/publisher
+// matching. v1 uses bounded literal/glob matching — NO regex (Codex
+// 019e7d82: regex adds authoring risk + debug difficulty). All matches
+// are case-insensitive. GLOB honours only `*` and `?`.
+const (
+	MatchModeExact    = "EXACT"
+	MatchModePrefix   = "PREFIX"
+	MatchModeContains = "CONTAINS"
+	MatchModeGlob     = "GLOB"
+)
+
+// DetectionReliability records whether a rule type's detector can
+// authoritatively DENY installed-state under SYSTEM Session-0:
+//   - AUTHORITATIVE (REGISTRY_UNINSTALL): a post-verify miss → FAILED_VERIFICATION.
+//   - CONFIRM_ONLY  (WINGET_PACKAGE): a post-verify miss → INCONCLUSIVE,
+//     never downgrades a clean install exit (§11.3b).
+//
+// Surfaced on the result so audit/backend reads it explicitly rather
+// than inferring from ruleType (Codex 019e7d82).
+const (
+	DetectionReliabilityAuthoritative = "AUTHORITATIVE"
+	DetectionReliabilityConfirmOnly   = "CONFIRM_ONLY"
+)
+
+// detectionReliability maps a rule type to its post-verify authority.
+func detectionReliability(t DetectionRuleType) string {
+	switch t {
+	case DetectionRuleTypeRegistryUninstall:
+		return DetectionReliabilityAuthoritative
+	default:
+		return DetectionReliabilityConfirmOnly
+	}
+}
+
+// DetectionRule is the wire-safe detection contract. WINGET_PACKAGE uses
+// PackageID; REGISTRY_UNINSTALL uses ProductCode (MSI `{GUID}`, primary)
+// OR a DisplayName (+ Publisher) fallback. Fields are additive/omitempty
+// so the wire stays backward-compatible. The agent re-validates the rule
+// fail-closed before any mutation (matching the backend validator).
 type DetectionRule struct {
 	Type      DetectionRuleType `json:"type"`
 	PackageID string            `json:"packageId,omitempty"`
+
+	// REGISTRY_UNINSTALL — primary precise match.
+	ProductCode string `json:"productCode,omitempty"` // MSI `{GUID}`
+
+	// REGISTRY_UNINSTALL — DisplayName(+Publisher) fallback (used when
+	// ProductCode is absent). Publisher is REQUIRED for the fallback
+	// unless AllowPublisherMissing is set with an EXACT DisplayName
+	// (Codex 019e7d82: avoids "7-Zip"/"Zoom" false positives).
+	DisplayName           string `json:"displayName,omitempty"`
+	DisplayNameMatch      string `json:"displayNameMatch,omitempty"` // EXACT|PREFIX|CONTAINS|GLOB
+	Publisher             string `json:"publisher,omitempty"`
+	PublisherMatch        string `json:"publisherMatch,omitempty"` // EXACT|CONTAINS
+	AllowPublisherMissing bool   `json:"allowPublisherMissing,omitempty"`
 }
 
 // InstallRequest is the wire-safe payload AG-027 consumes.
@@ -345,9 +411,16 @@ type PostVerificationResult struct {
 	// paths. A clean install exit is NEVER downgraded by an INCONCLUSIVE
 	// post-verify (see §11.3b).
 	Status string `json:"status,omitempty"`
-	// ReasonCode explains an INCONCLUSIVE verdict
-	// (postVerifyInconclusiveSession0). Empty when SATISFIED.
-	ReasonCode       string            `json:"reasonCode,omitempty"`
+	// ReasonCode explains an INCONCLUSIVE / NOT_SATISFIED verdict. Empty
+	// when SATISFIED.
+	ReasonCode string `json:"reasonCode,omitempty"`
+	// Authority records whether this rule type's detector can
+	// authoritatively DENY installed-state under Session-0:
+	// DetectionReliabilityAuthoritative (REGISTRY_UNINSTALL — a miss is a
+	// real denial → FAILED_VERIFICATION) or DetectionReliabilityConfirmOnly
+	// (WINGET_PACKAGE — a miss is INCONCLUSIVE). Surfaced so audit/backend
+	// reads it explicitly rather than inferring from ruleType.
+	Authority        string            `json:"authority,omitempty"`
 	MatchedPackageID string            `json:"matchedPackageId,omitempty"`
 	MatchedVersion   string            `json:"matchedVersion,omitempty"`
 	RuleType         DetectionRuleType `json:"ruleType,omitempty"`
@@ -470,33 +543,29 @@ func RunInstall(parentCtx context.Context, req InstallRequest, opts InstallOptio
 		Supported:     true,
 	}
 
-	// 1. Detection rule supported? Fail-closed BEFORE mutation.
-	if req.DetectionRule.Type != DetectionRuleTypeWingetPackage {
+	// 1. Detection rule valid? Fail-closed BEFORE mutation (mirrors the
+	// backend DetectionRuleValidator). Covers WINGET_PACKAGE (packageId
+	// required) and REGISTRY_UNINSTALL (productCode or displayName+publisher).
+	if err := validateDetectionRule(req.DetectionRule); err != nil {
 		result.FinalStatus = FinalStatusFailedUnsupportedDetectionRule
-		result.FailedReasonCode = "detection_rule_type_unsupported"
-		return result
-	}
-	if strings.TrimSpace(req.DetectionRule.PackageID) == "" {
-		result.FinalStatus = FinalStatusFailedUnsupportedDetectionRule
-		result.FailedReasonCode = "detection_rule_package_id_missing"
+		result.FailedReasonCode = "detection_rule_invalid"
 		return result
 	}
 
 	// 1.5 Payload integrity — Codex 019e6c0d iter-1 P1#4 absorb.
-	// `provider`, `packageId`, and `detectionRule.packageId` must
-	// reference the same target; otherwise a malformed payload could
-	// install package A and verify package B (false success). All
-	// three checks are case-insensitive and fail-closed BEFORE any
-	// mutation runs.
+	// `provider` must be WINGET. For a WINGET_PACKAGE detection rule,
+	// `detectionRule.packageId` must equal the install `packageId`
+	// (else a malformed payload could install package A and verify
+	// package B — false success). This identity check applies ONLY to
+	// WINGET_PACKAGE; REGISTRY_UNINSTALL carries its own match criteria
+	// and intentionally does not reference packageId (Codex 019e7d82).
 	if !strings.EqualFold(strings.TrimSpace(req.Provider), "WINGET") {
 		result.FinalStatus = FinalStatusFailedUnsupportedArgsPolicy
 		result.FailedReasonCode = "provider_unsupported"
 		return result
 	}
-	if !strings.EqualFold(
-		strings.TrimSpace(req.PackageID),
-		strings.TrimSpace(req.DetectionRule.PackageID),
-	) {
+	if req.DetectionRule.Type == DetectionRuleTypeWingetPackage &&
+		!strings.EqualFold(strings.TrimSpace(req.PackageID), strings.TrimSpace(req.DetectionRule.PackageID)) {
 		result.FinalStatus = FinalStatusFailedUnsupportedDetectionRule
 		result.FailedReasonCode = "detection_rule_package_id_mismatch"
 		return result
@@ -555,25 +624,47 @@ func RunInstall(parentCtx context.Context, req InstallRequest, opts InstallOptio
 		result.DurationMs = elapsedMs(startedAt, opts.Now)
 		return result
 	}
+	reliability := detectionReliability(req.DetectionRule.Type)
+
 	preCtx, preCancel := context.WithTimeout(ctx, DetectionProbeTimeout)
 	pre, preErr := opts.DetectionProbe(preCtx, req.DetectionRule, wingetPath)
 	preCancel()
 	result.PreDetect = pre
-	// Pre-detect is a best-effort optimization (the NOOP short-circuit).
-	// A probe error or a miss is NOT fatal — `winget list` is unreliable
-	// under Session-0 and the install path is idempotent — so we proceed
-	// to install rather than fail the command. Only a POSITIVE pre-detect
+	// Pre-detect is the NOOP short-circuit. A POSITIVE pre-detect
 	// short-circuits (NOOP, or FAILED_PREEXISTING_VERSION_CONFLICT on a
-	// version-predicate mismatch).
-	if preErr == nil && pre.Satisfied {
-		// Pre-detect already proves the catalog package present.
-		// Check that the version predicate is also satisfied to
-		// decide NOOP vs FAILED_PREEXISTING_VERSION_CONFLICT.
+	// version mismatch); a clean MISS proceeds to the idempotent install.
+	//
+	// A pre-detect ERROR is keyed by detector reliability: for an
+	// AUTHORITATIVE detector (registry/file) the SAME detector drives the
+	// authoritative post-verify, so if it cannot run now (probe error /
+	// ambiguous rule) we fail-closed BEFORE mutating — installing a package
+	// we then could not verify is worse than not installing (Codex
+	// 019e7d82). For a CONFIRM_ONLY detector (`winget list`, unreliable
+	// under Session-0) a probe error is non-fatal — proceed to install.
+	if preErr != nil {
+		if reliability == DetectionReliabilityAuthoritative {
+			reason := "pre_detect_probe_error"
+			if errors.Is(preErr, ErrRegistryAmbiguous) {
+				reason = "detection_rule_ambiguous_match"
+			}
+			result.FinalStatus = FinalStatusFailedVerification
+			result.FailedReasonCode = reason
+			result.PostVerification = PostVerificationResult{
+				Satisfied: false, Status: PostVerifyStatusNotSatisfied,
+				ReasonCode: reason, Authority: reliability,
+				RuleType: req.DetectionRule.Type, DetectionMethod: pre.DetectionMethod,
+			}
+			result.DurationMs = elapsedMs(startedAt, opts.Now)
+			return result
+		}
+		// CONFIRM_ONLY: best-effort — proceed to the idempotent install.
+	} else if pre.Satisfied {
 		if versionPredicateSatisfied(req.VersionPredicate, req.ResolvedVersion, pre.MatchedVersion) {
 			result.FinalStatus = FinalStatusSucceededNoop
 			result.PostVerification = PostVerificationResult{
 				Satisfied:        true,
 				Status:           PostVerifyStatusSatisfied,
+				Authority:        reliability,
 				MatchedPackageID: pre.MatchedPackageID,
 				MatchedVersion:   pre.MatchedVersion,
 				RuleType:         req.DetectionRule.Type,
@@ -582,9 +673,8 @@ func RunInstall(parentCtx context.Context, req InstallRequest, opts InstallOptio
 			result.DurationMs = elapsedMs(startedAt, opts.Now)
 			return result
 		}
-		// Package present but version predicate fails — refuse to
-		// silently upgrade. Operator action required (remove + reinstall,
-		// or adjust catalog policy).
+		// Package present but version predicate fails — refuse to silently
+		// upgrade. Operator action required.
 		result.FinalStatus = FinalStatusFailedPreexistingVersionConflict
 		result.FailedReasonCode = "preexisting_version_conflict"
 		result.DurationMs = elapsedMs(startedAt, opts.Now)
@@ -655,12 +745,14 @@ func RunInstall(parentCtx context.Context, req InstallRequest, opts InstallOptio
 	}
 	result.DurationMs = runnerOutcome.DurationMs
 
-	// 9. Post-install verification — CONFIRM-ONLY. A `winget list` probe
-	// that POSITIVELY finds the package upgrades evidence (and a positive
-	// version-predicate mismatch is an authoritative contradiction that
-	// still downgrades). A miss / error / timeout is INCONCLUSIVE (the
-	// Session-0 enumeration limitation) and never downgrades a clean
-	// install exit.
+	// 9. Post-install verification — reliability-keyed (Codex 019e7d82).
+	// A POSITIVE probe (either reliability) confirms installed-state and a
+	// positive version mismatch downgrades. A non-positive result is then
+	// keyed by detector reliability:
+	//   AUTHORITATIVE (registry/file): the detector is reliable under
+	//     Session-0, so a miss/error IS a denial → FAILED_VERIFICATION.
+	//   CONFIRM_ONLY (`winget list`): a miss/error is INCONCLUSIVE — never
+	//     downgrades a clean install exit (§11.3b).
 	postCtx, postCancel := context.WithTimeout(ctx, DetectionProbeTimeout)
 	post, postErr := opts.DetectionProbe(postCtx, req.DetectionRule, wingetPath)
 	postCancel()
@@ -669,13 +761,14 @@ func RunInstall(parentCtx context.Context, req InstallRequest, opts InstallOptio
 		result.PostVerification = PostVerificationResult{
 			Satisfied:        true,
 			Status:           PostVerifyStatusSatisfied,
+			Authority:        reliability,
 			MatchedPackageID: post.MatchedPackageID,
 			MatchedVersion:   post.MatchedVersion,
 			RuleType:         req.DetectionRule.Type,
 			DetectionMethod:  post.DetectionMethod,
 		}
 		// A positive probe reporting a CONFLICTING version is an
-		// authoritative contradiction — downgrade.
+		// authoritative contradiction — downgrade (both reliabilities).
 		if !versionPredicateSatisfied(req.VersionPredicate, req.ResolvedVersion, post.MatchedVersion) {
 			result.FinalStatus = FinalStatusFailedVerification
 			result.FailedReasonCode = "post_verify_version_predicate_failed"
@@ -685,19 +778,42 @@ func RunInstall(parentCtx context.Context, req InstallRequest, opts InstallOptio
 		return result
 	}
 
-	// Inconclusive post-verify: `winget list` could neither confirm nor
-	// deny under this context. Carry the caveat on PostVerification — do
-	// NOT pollute a SUCCEEDED result with a FailedReasonCode.
+	if reliability == DetectionReliabilityAuthoritative {
+		// A reliable detector's miss/error is an authoritative denial: the
+		// install reported success but the package is not present (or the
+		// detector could not run). Downgrade. (A bounded retry to absorb
+		// installers that write ARP slightly after exit is a follow-up.)
+		reason := "post_verify_not_satisfied"
+		if postErr != nil {
+			reason = "post_verify_probe_error"
+			if errors.Is(postErr, ErrRegistryAmbiguous) {
+				reason = "detection_rule_ambiguous_match"
+			}
+		}
+		result.PostVerification = PostVerificationResult{
+			Satisfied: false, Status: PostVerifyStatusNotSatisfied,
+			ReasonCode: reason, Authority: reliability,
+			MatchedPackageID: post.MatchedPackageID, MatchedVersion: post.MatchedVersion,
+			RuleType: req.DetectionRule.Type, DetectionMethod: post.DetectionMethod,
+		}
+		result.FinalStatus = FinalStatusFailedVerification
+		result.FailedReasonCode = reason
+		return result
+	}
+
+	// CONFIRM_ONLY inconclusive: `winget list` could neither confirm nor
+	// deny under Session-0. Carry the caveat on PostVerification — do NOT
+	// pollute a SUCCEEDED result with a FailedReasonCode.
 	result.PostVerification = PostVerificationResult{
 		Satisfied:       false,
 		Status:          PostVerifyStatusInconclusive,
 		ReasonCode:      postVerifyInconclusiveSession0,
+		Authority:       reliability,
 		RuleType:        req.DetectionRule.Type,
 		DetectionMethod: post.DetectionMethod,
 	}
-	// A versioned predicate REQUIRES a concrete installed version to
-	// verify; with no version evidence we cannot assert it. Fail closed
-	// (strict v1) — never claim a versioned install we could not prove.
+	// A versioned predicate REQUIRES a concrete installed version to verify;
+	// with no version evidence we cannot assert it. Fail closed (strict v1).
 	if versionPredicateRequiresVersionProof(req.VersionPredicate) {
 		result.FinalStatus = FinalStatusFailedVerification
 		result.FailedReasonCode = "post_verify_inconclusive_version_required"
