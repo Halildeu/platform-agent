@@ -414,18 +414,27 @@ func TestRunInstall_InstallFailureExitCode(t *testing.T) {
 	}
 }
 
-func TestRunInstall_PostVerifyMissingFailsVerification(t *testing.T) {
+func TestRunInstall_PostVerifyMissInconclusiveKeepsSuccess(t *testing.T) {
+	// New contract: a post-verify MISS is INCONCLUSIVE under Session-0
+	// (`winget list` unreliable) and must NOT downgrade the clean install
+	// exit. LATEST predicate needs no version proof → stays SUCCEEDED.
 	req := baseRequest()
 	pre := PreDetectResult{Satisfied: false}
 	post := PreDetectResult{Satisfied: false}
 	callCounter := false
 	probe := &stubProbe{pre: pre, post: post, postCall: &callCounter}
 	res := RunInstall(context.Background(), req, baseOptions(probe.probe, happyRunner(), okEgress()))
-	if res.FinalStatus != FinalStatusFailedVerification {
-		t.Fatalf("got %s want FAILED_VERIFICATION", res.FinalStatus)
+	if res.FinalStatus != FinalStatusSucceeded {
+		t.Fatalf("got %s want SUCCEEDED (inconclusive post-verify must not downgrade)", res.FinalStatus)
 	}
-	if res.FailedReasonCode != "post_verify_not_satisfied" {
-		t.Fatalf("failedReasonCode=%q", res.FailedReasonCode)
+	if res.PostVerification.Status != PostVerifyStatusInconclusive {
+		t.Fatalf("postVerification.status = %q want INCONCLUSIVE", res.PostVerification.Status)
+	}
+	if res.PostVerification.ReasonCode != "winget_list_session0_enumeration_unreliable" {
+		t.Fatalf("postVerification.reasonCode = %q", res.PostVerification.ReasonCode)
+	}
+	if res.FailedReasonCode != "" {
+		t.Fatalf("SUCCEEDED result must not carry a FailedReasonCode, got %q", res.FailedReasonCode)
 	}
 }
 

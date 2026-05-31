@@ -153,6 +153,9 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		return err
 	}
 	r.logf("command %s finished with %s", command.CommandID, result.Status)
+	if result.Status != protocol.CommandStatusSucceeded {
+		r.logf("command %s detail: summary=%q details=%v", command.CommandID, result.Summary, result.Details)
+	}
 	return nil
 }
 
