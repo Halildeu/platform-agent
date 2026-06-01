@@ -252,6 +252,121 @@ func TestShouldRedactName_ValueLevelDenylist(t *testing.T) {
 	}
 }
 
+// TestBucketTaskPath_BoundaryEvasion: Codex 019e83a8 iter-2 P1 absorb —
+// the previous prefix check matched `\Microsoft\WindowsEvil\` as
+// MICROSOFT_WINDOWS bucket, hiding operator-created persistence under
+// the system bucket. Boundary check now requires exact path OR a
+// trailing separator.
+func TestBucketTaskPath_BoundaryEvasion(t *testing.T) {
+	cases := []struct {
+		path string
+		want StartupAppLocation
+	}{
+		// ROOT cases.
+		{"", StartupLocationTaskRoot},
+		{`\`, StartupLocationTaskRoot},
+		{` \ `, StartupLocationTaskRoot},
+		// MICROSOFT_WINDOWS — exact match.
+		{`\Microsoft\Windows`, StartupLocationTaskMicrosoft},
+		{`\Microsoft\Windows\`, StartupLocationTaskMicrosoft},
+		{`\MICROSOFT\WINDOWS\`, StartupLocationTaskMicrosoft},
+		// MICROSOFT_WINDOWS — sub-path.
+		{`\Microsoft\Windows\WindowsUpdate`, StartupLocationTaskMicrosoft},
+		{`\Microsoft\Windows\WindowsUpdate\`, StartupLocationTaskMicrosoft},
+		{`\Microsoft\Windows\Setup\AnyChild`, StartupLocationTaskMicrosoft},
+		// Boundary-evasion cases — these MUST be CUSTOM, not MICROSOFT_WINDOWS.
+		{`\Microsoft\WindowsEvil`, StartupLocationTaskCustom},
+		{`\Microsoft\WindowsEvil\Persistence`, StartupLocationTaskCustom},
+		{`\Microsoft\WindowsHax\`, StartupLocationTaskCustom},
+		{`\MicrosoftEvil\Windows`, StartupLocationTaskCustom},
+		// CUSTOM — unrelated top-level folders.
+		{`\Foo`, StartupLocationTaskCustom},
+		{`\Foo\Bar`, StartupLocationTaskCustom},
+		{`\MyTasks\Persistence`, StartupLocationTaskCustom},
+	}
+	for _, c := range cases {
+		got := bucketTaskPath(c.path)
+		if got != c.want {
+			t.Errorf("bucketTaskPath(%q) = %s; expected %s", c.path, got, c.want)
+		}
+	}
+}
+
+// TestBuildRedactionProbeErrors: per-source aggregation defends against
+// visibility DoS — N forbidden-named entries under one anchor emit
+// ONE probe error, not N. Codex 019e83a8 iter-2 P1 absorb.
+func TestBuildRedactionProbeErrors(t *testing.T) {
+	t.Run("empty input → nil", func(t *testing.T) {
+		got := buildRedactionProbeErrors(nil)
+		if got != nil {
+			t.Errorf("expected nil; got %v", got)
+		}
+	})
+	t.Run("zero-counter entry ignored", func(t *testing.T) {
+		got := buildRedactionProbeErrors(map[StartupAppLocation]int{
+			StartupLocationHKLMRun: 0,
+		})
+		if len(got) != 0 {
+			t.Errorf("expected 0 emissions; got %d", len(got))
+		}
+	})
+	t.Run("single source aggregates many entries to one", func(t *testing.T) {
+		got := buildRedactionProbeErrors(map[StartupAppLocation]int{
+			StartupLocationHKLMRun: 17,
+		})
+		if len(got) != 1 {
+			t.Fatalf("expected 1 emission; got %d", len(got))
+		}
+		if got[0].Source != StartupLocationHKLMRun {
+			t.Errorf("source mismatch: %s", got[0].Source)
+		}
+		if got[0].Code != StartupExposureErrNameValueRedacted {
+			t.Errorf("code mismatch: %s", got[0].Code)
+		}
+		// Cap defense: even with 17 redactions, only 1 emission
+		// per source — far under PROBE_ERRORS_MAX=16.
+	})
+	t.Run("multi-source emits deterministic sort", func(t *testing.T) {
+		got := buildRedactionProbeErrors(map[StartupAppLocation]int{
+			StartupLocationTaskCustom:    2,
+			StartupLocationHKLMRun:       5,
+			StartupLocationHKCURun:       3,
+			StartupLocationTaskMicrosoft: 1,
+		})
+		if len(got) != 4 {
+			t.Fatalf("expected 4 emissions; got %d", len(got))
+		}
+		// Sort: HKCU_RUN < HKLM_RUN < TASK_SCHEDULER:CUSTOM < TASK_SCHEDULER:MICROSOFT_WINDOWS
+		wantOrder := []StartupAppLocation{
+			StartupLocationHKCURun,
+			StartupLocationHKLMRun,
+			StartupLocationTaskCustom,
+			StartupLocationTaskMicrosoft,
+		}
+		for i, w := range wantOrder {
+			if got[i].Source != w {
+				t.Errorf("sort drift at index %d: got %s, want %s", i, got[i].Source, w)
+			}
+		}
+	})
+	t.Run("cap defense: 10 anchors × N entries each = max 10 emissions", func(t *testing.T) {
+		// Even if EVERY anchor has thousands of forbidden names, we
+		// emit at most 10 NAME_VALUE_REDACTED probe errors total.
+		// 16 - 10 = 6 slots left in PROBE_ERRORS_MAX for real errors.
+		counts := make(map[StartupAppLocation]int)
+		for _, loc := range CanonicalStartupLocations {
+			counts[loc] = 9999
+		}
+		got := buildRedactionProbeErrors(counts)
+		if len(got) > 10 {
+			t.Errorf("emission cap broken: %d (max 10 = len(CanonicalStartupLocations))", len(got))
+		}
+		if len(got) != len(CanonicalStartupLocations) {
+			t.Errorf("expected %d emissions; got %d", len(CanonicalStartupLocations), len(got))
+		}
+	})
+}
+
 // TestStartupExposureProbeErrorCodeEnum_AllListed: Codex 019e83a8 iter-1
 // pin the bounded code enum surface — including NAME_VALUE_REDACTED
 // added in this iter.

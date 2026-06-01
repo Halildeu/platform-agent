@@ -100,9 +100,21 @@ func ProbeStartupExposure(ctx context.Context, now func() time.Time) StartupExpo
 
 // runStartupExposureProbeBlocking is the synchronous registry +
 // filesystem + Task Scheduler enumeration body.
+//
+// Codex 019e83a8 iter-2 P1 absorb (visibility DoS): redaction probe
+// errors are aggregated per source location (NOT per redacted entry).
+// A misbehaving / hostile host with 17+ forbidden-named autorun
+// entries cannot otherwise exhaust the backend's PROBE_ERRORS_MAX=16
+// cap and break ingest entirely. Caps NAME_VALUE_REDACTED contributions
+// at 10 (one per autorun anchor enum) — leaving 6 of the 16 slots
+// for real probe errors.
 func runStartupExposureProbeBlocking(ctx context.Context) startupExposureAggregate {
 	var apps []StartupApp
 	var probeErrors []StartupExposureProbeError
+	// redactionCounts tracks per-source redaction tallies so we can
+	// emit ONE NAME_VALUE_REDACTED probe error per location with a
+	// non-PII count (not per redacted entry).
+	redactionCounts := make(map[StartupAppLocation]int)
 
 	// Registry enumerations.
 	for _, spec := range registryStartupSpecs() {
@@ -116,7 +128,7 @@ func runStartupExposureProbeBlocking(ctx context.Context) startupExposureAggrega
 			continue
 		}
 		apps = append(apps, entries...)
-		probeErrors = append(probeErrors, redactions...)
+		redactionCounts[spec.location] += len(redactions)
 	}
 
 	// Filesystem startup folders.
@@ -131,7 +143,7 @@ func runStartupExposureProbeBlocking(ctx context.Context) startupExposureAggrega
 			continue
 		}
 		apps = append(apps, entries...)
-		probeErrors = append(probeErrors, redactions...)
+		redactionCounts[spec.location] += len(redactions)
 	}
 
 	// Task Scheduler enumeration (filtered to startup/logon triggers
@@ -144,7 +156,17 @@ func runStartupExposureProbeBlocking(ctx context.Context) startupExposureAggrega
 		probeErrors = append(probeErrors, *taskErr)
 	}
 	apps = append(apps, taskApps...)
-	probeErrors = append(probeErrors, taskRedactions...)
+	for _, r := range taskRedactions {
+		// taskRedactions carry the bucket Location already; aggregate
+		// into the per-source counter.
+		redactionCounts[r.Source]++
+	}
+
+	// Emit aggregated NAME_VALUE_REDACTED probe errors (1 per
+	// affected source location, max 10 total).
+	probeErrors = append(probeErrors,
+		buildRedactionProbeErrors(redactionCounts)...,
+	)
 
 	// RDP scalar.
 	rdp, rdpErr := probeRdpEnabled()
@@ -440,30 +462,6 @@ try {
 	return apps, redactions, nil
 }
 
-// bucketTaskPath maps a Task Scheduler folder path to one of three
-// buckets. Codex 019e8387 plan iter-1 P1 #1 absorb: the wire MUST carry
-// only the bucket, never the full folder path.
-//
-//   - "\" or "" → ROOT (admin-installed or schtasks-created)
-//   - starts with "\Microsoft\Windows" → MICROSOFT_WINDOWS (system)
-//   - anything else under "\" → CUSTOM (operator-installed)
-func bucketTaskPath(taskPath string) StartupAppLocation {
-	p := strings.TrimSpace(taskPath)
-	if p == "" || p == `\` {
-		return StartupLocationTaskRoot
-	}
-	// PowerShell Get-ScheduledTask TaskPath comes back as "\Foo\Bar\"
-	// with leading and trailing backslashes. Normalize.
-	p = strings.TrimSuffix(p, `\`)
-	if p == "" || p == `\` {
-		return StartupLocationTaskRoot
-	}
-	upper := strings.ToUpper(p)
-	if strings.HasPrefix(upper, `\MICROSOFT\WINDOWS`) {
-		return StartupLocationTaskMicrosoft
-	}
-	return StartupLocationTaskCustom
-}
 
 // probeRdpEnabled reads
 // HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\

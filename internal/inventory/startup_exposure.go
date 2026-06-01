@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -311,11 +312,20 @@ func startupExposureElapsedMs(start time.Time, now func() time.Time) int {
 // nameValueDenylistPattern is the agent-side mirror of the backend
 // NAME_FULLPATH_DENYLIST_RE. Codex 019e83a8 iter-1 P1#2 absorb: a
 // registry value name / task name / startup-folder basename can be
-// attacker- or admin-controlled and may contain raw path or command
-// fragments (`C:\Users\Alice\...`, `cmd /c ...`, `\\server\share\foo`,
-// `OneDrive.exe`). The agent MUST omit such entries from the wire AND
-// emit a NAME_VALUE_REDACTED probe error — backend rejection alone
-// does not prevent the leak that already left the host.
+// attacker- or admin-controlled and may contain raw PATH or EXECUTABLE
+// FRAGMENT references (`C:\Users\Alice\...`, `\\server\share\foo`,
+// `OneDrive.exe`, `/etc/init.d/foo`) OR control characters. The agent
+// MUST omit such entries from the wire AND emit a NAME_VALUE_REDACTED
+// probe error — backend rejection alone does not prevent the leak that
+// already left the host.
+//
+// Codex 019e83a8 iter-2 P2 (contract narrowing): the policy is "path
+// fragment / executable extension / control char" redaction, NOT a
+// general "any command-ish name" denylist. Patterns like
+// `powershell -enc ...`, `cmd /c ...`, `token=...` are NOT caught
+// here — they would require an allowlist-shaped name policy which is
+// out of scope for v1. Operators who want stricter shapes can extend
+// at the backend policy layer.
 var nameValueDenylistPattern = regexp.MustCompile(
 	`(?i)([a-z]:\\|\\\\|/[a-z]+/[a-z]+|\.(exe|dll|bat|cmd|ps1|vbs)\b|[\x00-\x1F\x7F])`,
 )
@@ -328,4 +338,86 @@ func shouldRedactName(name string) bool {
 		return true
 	}
 	return nameValueDenylistPattern.MatchString(name)
+}
+
+// MaxStartupRedactionsPerSource caps the per-source NAME_VALUE_REDACTED
+// emit count so a misbehaving / hostile agent cannot exhaust the
+// backend probeErrors limit (16) via dozens of forbidden-named
+// startup entries. Codex 019e83a8 iter-2 P1 absorb (visibility DoS
+// defense): the agent emits AT MOST ONE probe error per source
+// location (10 anchors), with the redaction count interpolated into
+// the bounded summary. This caps NAME_VALUE_REDACTED contributions
+// at 10 total — well under PROBE_ERRORS_MAX=16, leaving 6 slots for
+// real probe errors.
+const MaxStartupRedactionsPerSource = 1
+
+// bucketTaskPath maps a Task Scheduler folder path to one of three
+// buckets. Codex 019e8387 plan iter-1 P1#1 absorb: the wire MUST carry
+// only the bucket, never the full folder path.
+//
+// Codex 019e83a8 iter-2 P1 absorb (boundary evasion): the previous
+// prefix check `strings.HasPrefix(upper, "\MICROSOFT\WINDOWS")`
+// matched custom paths like `\Microsoft\WindowsEvil\` as
+// TASK_SCHEDULER:MICROSOFT_WINDOWS, letting an operator hide a
+// persistence task under the "system" bucket. Fixed: only EXACT
+// `\Microsoft\Windows` OR prefix `\Microsoft\Windows\` (with trailing
+// separator) counts; anything else with shared root remains CUSTOM.
+//
+//   - "\" or "" → ROOT (admin-installed or schtasks-created)
+//   - "\Microsoft\Windows" exactly OR "\Microsoft\Windows\..." → MICROSOFT_WINDOWS (system)
+//   - anything else under "\" → CUSTOM (operator-installed; includes
+//     "\Microsoft\WindowsEvil" et al.)
+//
+// Exported as a pure-Go helper so the Linux CI host can unit-test
+// the boundary semantics without invoking real PowerShell.
+func bucketTaskPath(taskPath string) StartupAppLocation {
+	p := strings.TrimSpace(taskPath)
+	if p == "" || p == `\` {
+		return StartupLocationTaskRoot
+	}
+	// PowerShell Get-ScheduledTask TaskPath comes back as "\Foo\Bar\"
+	// with leading and trailing backslashes. Normalize the trailing
+	// separator so "\Microsoft\Windows\" and "\Microsoft\Windows"
+	// match the same boundary check.
+	p = strings.TrimSuffix(p, `\`)
+	if p == "" {
+		return StartupLocationTaskRoot
+	}
+	upper := strings.ToUpper(p)
+	if upper == `\MICROSOFT\WINDOWS` || strings.HasPrefix(upper, `\MICROSOFT\WINDOWS\`) {
+		return StartupLocationTaskMicrosoft
+	}
+	return StartupLocationTaskCustom
+}
+
+// buildRedactionProbeErrors converts a per-source redaction counter
+// map into a deterministic slice of NAME_VALUE_REDACTED probe errors
+// (one per affected source location). Codex 019e83a8 iter-2 P1
+// absorb: cap NAME_VALUE_REDACTED total contributions so a host with
+// many forbidden-named entries cannot exhaust the backend
+// PROBE_ERRORS_MAX cap and DoS ingest.
+//
+// Output order is deterministic (lexicographic on Location enum
+// string) so the backend canonical hash projection stays stable
+// across enumeration order variations.
+func buildRedactionProbeErrors(counts map[StartupAppLocation]int) []StartupExposureProbeError {
+	if len(counts) == 0 {
+		return nil
+	}
+	locs := make([]StartupAppLocation, 0, len(counts))
+	for loc, n := range counts {
+		if n > 0 {
+			locs = append(locs, loc)
+		}
+	}
+	sort.Slice(locs, func(i, j int) bool { return locs[i] < locs[j] })
+	out := make([]StartupExposureProbeError, 0, len(locs))
+	for _, loc := range locs {
+		out = append(out, StartupExposureProbeError{
+			Code:    StartupExposureErrNameValueRedacted,
+			Source:  loc,
+			Summary: "Autorun entry name(s) redacted under this anchor (path or executable fragment)",
+		})
+	}
+	return out
 }
