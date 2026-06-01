@@ -129,6 +129,24 @@ type Snapshot struct {
 	// services.go.
 	Services *ServicesResult `json:"services,omitempty"`
 
+	// StartupExposure is intentionally nil unless the caller opted
+	// into the AG-040 startup-apps / exposure summary probe via
+	// CollectOptions.IncludeStartupExposure. The JSON tag omitempty
+	// hides the field from the heartbeat / auto-enroll wire payload
+	// and from COLLECT_INVENTORY runs that did not request the probe.
+	// On non-Windows runtimes the probe returns Supported=false +
+	// UNSUPPORTED_PLATFORM. The probe is strictly read-only:
+	// registry enumeration (Run/RunOnce + WOW6432Node + HKCU
+	// mirrors), filesystem enumeration (Common/User Startup folders),
+	// pinned PowerShell Get-ScheduledTask projection (TaskName +
+	// TaskPath bucket only), and 2 scalar registry reads
+	// (fDenyTSConnections + firewall LogDroppedPackets). Per-entry
+	// wire shape exactly {name, location, enabled, probeOrigin}; the
+	// `location` field carries the autorun ANCHOR (bounded enum) NOT
+	// the full executable path or command line. Codex 019e8387 plan
+	// iter-1 AGREE.
+	StartupExposure *StartupExposureResult `json:"startupExposure,omitempty"`
+
 	// HotfixPosture is intentionally nil unless the caller opted into
 	// the AG-037 Windows Update / hotfix posture probe via
 	// CollectOptions.IncludeHotfixPosture. The JSON tag omitempty
@@ -366,6 +384,29 @@ type CollectOptions struct {
 	// command line, account, SID, or display name in wire shape. Codex
 	// 019e8302 iter-2 AGREE.
 	IncludeServices bool
+
+	// IncludeStartupExposure gates the AG-040 startup-apps + exposure
+	// summary probe. When true, CollectWithOptions invokes
+	// ProbeStartupExposure (registry + filesystem + Task Scheduler
+	// enumeration + RDP listener / firewall scalar reads on Windows;
+	// Supported=false stub on every other platform) and attaches the
+	// result to Snapshot.StartupExposure. When false (the default),
+	// the probe is not invoked and the wire payload omits the field.
+	//
+	// HARD BOUNDARY (Codex 019e8387 plan iter-1 AGREE):
+	//   - read-only. No registry SET / DELETE. No Set-ScheduledTask /
+	//     Enable-ScheduledTask / Disable-ScheduledTask. No
+	//     `wmic startup ...` or any mutating cmdlet.
+	//   - per-entry wire shape exactly {name, location, enabled,
+	//     probeOrigin}; `location` is the autorun ANCHOR enum, NEVER
+	//     the full executable path / command line / RunAs / working
+	//     directory.
+	//   - exposure scalars are SINGLE BOOLEANS: rdpEnabled
+	//     (fDenyTSConnections inverse), windowsFirewallEventLogEnabled
+	//     (LogDroppedPackets non-zero). NO active session count
+	//     (usage telemetry leak); NO per-rule firewall enum.
+	//   - cap=50 with ENTRY_CAP_APPLIED probe error when exceeded.
+	IncludeStartupExposure bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -441,6 +482,10 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		sv := collectServicesForSnapshot(now)
 		snapshot.Services = &sv
 	}
+	if opts.IncludeStartupExposure {
+		se := collectStartupExposureForSnapshot(now)
+		snapshot.StartupExposure = &se
+	}
 	return snapshot
 }
 
@@ -481,6 +526,16 @@ var collectHotfixPostureForSnapshot = func(_ time.Time) HotfixPostureResult {
 // behavior without enumerating real SCM services.
 var collectServicesForSnapshot = func(_ time.Time) ServicesResult {
 	return ProbeServices(context.Background(), time.Now)
+}
+
+// collectStartupExposureForSnapshot is the test seam for the AG-040
+// startup-apps + exposure summary probe. Production wires the real
+// ProbeStartupExposure (registry + filesystem + Task Scheduler +
+// scalar registry reads on Windows; cross-platform stub elsewhere);
+// tests override it to assert default-omit / opt-in / unsupported-stub
+// behavior without invoking real registry / PowerShell.
+var collectStartupExposureForSnapshot = func(_ time.Time) StartupExposureResult {
+	return ProbeStartupExposure(context.Background(), time.Now)
 }
 
 // collectLocalAdminGroupForSnapshot is the test seam for the
