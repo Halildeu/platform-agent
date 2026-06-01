@@ -141,6 +141,21 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// startupMode} — no raw description / command line /
 			// account / SID / display name.
 			IncludeServices: boolPayload(command.Payload, "includeServices"),
+			// AG-040 startup apps + exposure summary — opt-in only.
+			// Registry (Run/RunOnce + WOW6432 + HKCU mirrors) +
+			// filesystem (Common/User Startup folders) + pinned
+			// PowerShell Get-ScheduledTask projection (TaskName +
+			// TaskPath bucket only) + 2 scalar registry reads
+			// (fDenyTSConnections inverse → rdpEnabled, firewall
+			// LogDroppedPackets non-zero →
+			// windowsFirewallEventLogEnabled). HARD BOUNDARY:
+			// read-only; per-entry wire {name, location (autorun
+			// ANCHOR enum, NOT full path), enabled, probeOrigin
+			// (REGISTRY|SCHEDULED_TASK)}; cap=50 with
+			// ENTRY_CAP_APPLIED probe error when exceeded; NO active
+			// session count, NO per-rule firewall enum. Codex
+			// 019e8387 plan iter-1 AGREE.
+			IncludeStartupExposure: boolPayload(command.Payload, "includeStartupExposure"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"
