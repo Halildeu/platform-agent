@@ -642,15 +642,18 @@ func primaryCategoryFromGuids(guids []string) HotfixPostureCategory {
 		"68c5b0a3-d1a6-4553-ae49-01d3a7827828": HotfixPostureCategoryServicePack,
 		// Feature Packs (Codex iter-2 P1.1 fix — was misattributed to Optional).
 		"b54e7d24-7add-428f-8b75-90a396fa584f": HotfixPostureCategoryFeaturePack,
-		// Drivers — confirmed.
-		"ebfd1a04-94f6-4b29-8e90-d6c0c87baa5c": HotfixPostureCategoryDriver,
+		// Drivers — Codex 019e81eb iter-3 P1 fix: was 94f6-4b29-8e90-d6c0c87baa5c,
+		// official WUA classification is a2cc-49f1-9bce-6d93f0d5694b.
+		"ebfd1a04-a2cc-49f1-9bce-6d93f0d5694b": HotfixPostureCategoryDriver,
 		// Update Rollups — confirmed.
 		"28bc880e-0592-4cbf-8f95-c79b17911d5f": HotfixPostureCategoryUpdateRollup,
 		// Tools — confirmed.
 		"b4832bd8-e735-4761-8daf-37f882276dab": HotfixPostureCategoryTools,
-		// Updates (generic) — falls through to UNCATEGORIZED in v1; the
-		// MSRC severity axis carries the action signal for these.
-		"cd5ffd1e-79ee-471d-8c6d-aa8ec7b15c97": HotfixPostureCategoryUncategorized,
+		// Updates (generic) — Codex 019e81eb iter-3 P1 fix: was
+		// 79ee-471d-8c6d-aa8ec7b15c97, official classification is
+		// e932-4e3a-bf74-18bf0b1bbd83. Falls through to UNCATEGORIZED
+		// in v1; the MSRC severity axis carries the action signal.
+		"cd5ffd1e-e932-4e3a-bf74-18bf0b1bbd83": HotfixPostureCategoryUncategorized,
 	}
 	out := HotfixPostureCategoryUncategorized
 	bestRank := categoryRank(out)

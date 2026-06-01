@@ -37,10 +37,10 @@ func TestPrimaryCategoryFromGuids_KnownGUIDs(t *testing.T) {
 		{"definition", "e0789628-ce08-4437-be74-2495b842f43b", HotfixPostureCategoryDefinition},
 		{"servicePack", "68c5b0a3-d1a6-4553-ae49-01d3a7827828", HotfixPostureCategoryServicePack},
 		{"featurePack", "b54e7d24-7add-428f-8b75-90a396fa584f", HotfixPostureCategoryFeaturePack},
-		{"driver", "ebfd1a04-94f6-4b29-8e90-d6c0c87baa5c", HotfixPostureCategoryDriver},
+		{"driver", "ebfd1a04-a2cc-49f1-9bce-6d93f0d5694b", HotfixPostureCategoryDriver},
 		{"updateRollup", "28bc880e-0592-4cbf-8f95-c79b17911d5f", HotfixPostureCategoryUpdateRollup},
 		{"tools", "b4832bd8-e735-4761-8daf-37f882276dab", HotfixPostureCategoryTools},
-		{"updates-uncategorized", "cd5ffd1e-79ee-471d-8c6d-aa8ec7b15c97", HotfixPostureCategoryUncategorized},
+		{"updates-uncategorized", "cd5ffd1e-e932-4e3a-bf74-18bf0b1bbd83", HotfixPostureCategoryUncategorized},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,7 +64,7 @@ func TestPrimaryCategoryFromGuids_PrecedenceSecurityOverDriver(t *testing.T) {
 	// An update tagged as both Security and Driver must resolve to
 	// Security (rank 0 vs Driver rank 4).
 	got := primaryCategoryFromGuids([]string{
-		"ebfd1a04-94f6-4b29-8e90-d6c0c87baa5c", // Driver
+		"ebfd1a04-a2cc-49f1-9bce-6d93f0d5694b", // Driver (official WUA GUID)
 		"0fa1201d-4330-4fa8-8ae9-b877473b6441", // Security
 	})
 	if got != HotfixPostureCategorySecurity {
