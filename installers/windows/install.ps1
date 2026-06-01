@@ -438,13 +438,25 @@ function Invoke-VerifyDownloadedBinary {
         switch ($Tier) {
             "lab-only-evidence" {
                 # Lab self-signed cert chains to an ephemeral CA the
-                # runner creates per release; Windows reports it as
-                # `NotTrusted`. `Valid` is the surprise-but-fine case
-                # (operator imported the cert into LocalMachine\Root).
-                # Everything else — HashMismatch, NotSupportedFileFormat,
-                # UnknownError, IncompatibleSignature — is rejected.
-                if ($sig.Status -notin @("NotTrusted", "Valid")) {
-                    throw "lab-only Authenticode status '$($sig.Status)' rejected (expected NotTrusted or Valid; got $($sig.StatusMessage))"
+                # runner creates per release. Windows reports the chain
+                # state as one of:
+                #   - NotTrusted        — most common: untrusted root
+                #   - Valid             — operator pre-imported the cert
+                #                         into LocalMachine\Root
+                #   - UnknownError      — some Windows / PowerShell
+                #                         versions surface untrusted-root
+                #                         here instead of NotTrusted;
+                #                         allowed ONLY when the message
+                #                         describes a chain/trust issue.
+                # Everything else (HashMismatch, NotSupportedFileFormat,
+                # IncompatibleSignature, generic UnknownError) is
+                # rejected. (Codex 019e8284 iter-2 medium #2.)
+                $okStatus = @("NotTrusted","Valid") -contains $sig.Status
+                $msg = "$($sig.StatusMessage)"
+                $okUnknownTrustRoot = ($sig.Status -eq "UnknownError") -and `
+                    ($msg -match "trust|chain|root|UntrustedRoot")
+                if (-not ($okStatus -or $okUnknownTrustRoot)) {
+                    throw "lab-only Authenticode status '$($sig.Status)' rejected (expected NotTrusted/Valid; got '$msg')"
                 }
             }
             "trusted" {

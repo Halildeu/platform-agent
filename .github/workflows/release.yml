@@ -40,8 +40,13 @@ on:
         type: string
 
 permissions:
-  contents: write   # gh release create + asset upload
-  id-token: write   # reserved for future Azure Trusted Signing OIDC
+  # Codex 019e8284 iter-2 medium #3: principle-of-least-privilege per
+  # job. Workflow default is read-only; only the `publish` job below
+  # opts in to `contents: write` (needed for `gh release create`). The
+  # `id-token: write` line that 22.2 Azure Trusted Signing will need is
+  # NOT granted yet — it's added by the 22.2 PR alongside the OIDC
+  # signing job, not held idle here.
+  contents: read
 
 env:
   GO_VERSION: "1.25.0"
@@ -222,15 +227,50 @@ jobs:
           # mutates the PE timestamp/signature blob.
           $hash = (Get-FileHash -Algorithm SHA256 dist/endpoint-agent.exe).Hash
           $sig  = Get-AuthenticodeSignature dist/endpoint-agent.exe
-          # Codex 019e8284 iter-1 medium #4 (release side): the runner
-          # JUST imported the ephemeral self-signed cert into
-          # CurrentUser\My, so the chain validates locally → Status=Valid
-          # is the only acceptable post-sign outcome here. Anything else
-          # — NotSigned, HashMismatch, NotTrusted, UnknownError — means
-          # the signtool step produced an unreadable signature or the
-          # cert chain broke; refuse to publish.
-          if ($sig.Status -ne "Valid") {
-            throw "post-sign Authenticode status '$($sig.Status)' rejected (expected Valid; got $($sig.StatusMessage))"
+
+          # Codex 019e8284 iter-2 high #1: the ephemeral cert lives in
+          # CurrentUser\My on the runner, which does NOT make it a
+          # trusted root for Authenticode chain validation — `Valid` is
+          # the wrong invariant for lab tier here. Lab post-sign must
+          # mirror the installer's tier-aware allowlist: signer
+          # thumbprint matches AND status is one of the expected
+          # untrusted-but-parseable shapes for an ephemeral self-signed
+          # cert. Trusted tier (Faz 22.2+) still requires Valid.
+          if ($sig.Status -eq "NotSigned") {
+            throw "post-sign verify: signature unreadable (NotSigned). StatusMessage: $($sig.StatusMessage)"
+          }
+          if ($sig.SignerCertificate.Thumbprint -ne $thumb) {
+            throw "post-sign verify: signer thumbprint drift (expected $thumb, got $($sig.SignerCertificate.Thumbprint))"
+          }
+
+          $tier = "${{ needs.classify-release.outputs.signing_tier }}"
+          switch ($tier) {
+            "lab-only-evidence" {
+              # Expected for an ephemeral self-signed cert that was
+              # NOT imported into LocalMachine\Root: Windows reports
+              # either `NotTrusted` (most common) or `UnknownError`
+              # with a chain-trust message. We narrow `UnknownError`
+              # by StatusMessage to avoid masking unrelated PE
+              # corruption. `Valid` is also fine — the operator can
+              # have imported the cert manually in some test images.
+              $acceptable = @("NotTrusted","Valid")
+              if ($acceptable -notcontains $sig.Status) {
+                $msg = "$($sig.StatusMessage)"
+                $isTrustRoot = ($sig.Status -eq "UnknownError") -and `
+                    ($msg -match "trust|chain|root|UntrustedRoot")
+                if (-not $isTrustRoot) {
+                  throw "post-sign Authenticode status '$($sig.Status)' rejected for lab tier (expected NotTrusted/Valid; got '$msg')"
+                }
+              }
+            }
+            "trusted" {
+              if ($sig.Status -ne "Valid") {
+                throw "trusted-signing post-sign requires Status=Valid (got '$($sig.Status)': $($sig.StatusMessage))"
+              }
+            }
+            default {
+              throw "unknown signing_tier '$tier' from classify-release job"
+            }
           }
 
           "sha256=$hash" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
@@ -366,6 +406,11 @@ Tracked-by: platform-k8s-gitops Faz 22.5 §3 — agent distribution.
     needs: [classify-release, build-and-sign]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Codex 019e8284 iter-2 medium #3: only the publish job actually
+    # mutates the repo (creates the GitHub Release + uploads assets).
+    # Build + sign run with the workflow default (contents: read).
+    permissions:
+      contents: write
     steps:
       - name: Checkout (for repo path only)
         uses: actions/checkout@v4
