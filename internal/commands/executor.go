@@ -119,6 +119,20 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// visibility. HARD BOUNDARY: read-only — DNS lookup + TLS
 			// handshake only; no PII, credentials, or paths on wire.
 			IncludeDiagnostics: boolPayload(command.Payload, "includeDiagnostics"),
+			// AG-037 — opt-in Windows Update / hotfix posture probe.
+			// Defaults to false so the AG-025H lightweight contract
+			// stays cheap. Backend opts in via COLLECT_INVENTORY's
+			// includeHotfixPosture payload bit when a patch posture
+			// evaluation is being prepared. HARD BOUNDARY: read-only —
+			// pinned PowerShell + WUA COM Search/QueryHistory +
+			// Get-HotFix fallback + SCM service state + AU policy
+			// registry reads; NO Install-WindowsUpdate, NO
+			// `wuauclt /detectnow`, NO service/policy mutation. Wire
+			// is allowlist-projected: per-hotfix {kbId, installedOn,
+			// description} + per-pending-item {kbIds, primaryCategory,
+			// severity} — never raw update titles, account names,
+			// product codes, MSI GUIDs, or supersedence chains.
+			IncludeHotfixPosture: boolPayload(command.Payload, "includeHotfixPosture"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"

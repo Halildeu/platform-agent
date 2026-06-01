@@ -399,6 +399,39 @@ func TestLocalExecutorBoolPayloadIncludeOutdatedSoftware(t *testing.T) {
 	}
 }
 
+// AG-037 — boolPayload mapping for the includeHotfixPosture key. Mirrors
+// the AG-036 matrix above so a regression in the payload coercion is
+// caught at the executor surface, not just at the inventory opt-in test
+// seam (Codex 019e8167 iter-2 P2 gap absorb).
+func TestLocalExecutorBoolPayloadIncludeHotfixPosture(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]interface{}
+		wantOn  bool
+	}{
+		{"nil-payload", nil, false},
+		{"missing-key", map[string]interface{}{"includeSoftware": true}, false},
+		{"bool-true", map[string]interface{}{"includeHotfixPosture": true}, true},
+		{"bool-false", map[string]interface{}{"includeHotfixPosture": false}, false},
+		{"string-true", map[string]interface{}{"includeHotfixPosture": "true"}, true},
+		{"string-1", map[string]interface{}{"includeHotfixPosture": "1"}, true},
+		{"string-True", map[string]interface{}{"includeHotfixPosture": "True"}, true},
+		{"string-false", map[string]interface{}{"includeHotfixPosture": "false"}, false},
+		{"string-0", map[string]interface{}{"includeHotfixPosture": "0"}, false},
+		{"int-1", map[string]interface{}{"includeHotfixPosture": 1}, true},
+		{"int-0", map[string]interface{}{"includeHotfixPosture": 0}, false},
+		{"float64-1", map[string]interface{}{"includeHotfixPosture": float64(1)}, true},
+		{"float64-0", map[string]interface{}{"includeHotfixPosture": float64(0)}, false},
+		{"unknown-type", map[string]interface{}{"includeHotfixPosture": []string{"yes"}}, false},
+	}
+	for _, tc := range cases {
+		got := boolPayload(tc.payload, "includeHotfixPosture")
+		if got != tc.wantOn {
+			t.Errorf("%s: boolPayload(includeHotfixPosture) = %v, want %v", tc.name, got, tc.wantOn)
+		}
+	}
+}
+
 func TestLocalExecutorListLocalUsersUnsupportedOutsideWindows(t *testing.T) {
 	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandListLocalUsers}, "test")
 	command := protocol.AgentCommand{
