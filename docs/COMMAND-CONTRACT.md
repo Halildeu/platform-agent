@@ -1766,3 +1766,164 @@ a separate slice (V22 migration adding `endpoint_hotfix_posture_*`
 tables + `AdminEndpointHotfixPostureController` GET endpoints) that
 will be tracked under its own PR; the agent block above is the
 exact wire shape the backend will need to deserialize.
+
+
+## 20. AG-041 — Application Control / WDAC + AppLocker Policy State (Faz 22.5 Sprint C)
+
+### 20.1 Scope
+
+Read-only Application-Control posture probe. Reports two orthogonal facets:
+
+- **WDAC** (Windows Defender Application Control / kernel-mode)
+  — operational mode + bounded capability evidence + active CIP policy
+  count + legacy SIPolicy presence + multi-policy mode bit.
+- **AppLocker** (user-mode SrpV2 policy enforcement)
+  — per-rule-collection enforcement mode (Exe / Dll / Script / Msi / Appx)
+  + AppIDSvc state + startup mode + presence.
+
+Numbering disambiguation: AG-040 = startup-apps + exposure summary
+(NOT Application Control). Codex `019e83a6` iter-1 P0 #1 absorb: V25
++ AG-040 lane already taken by startup-exposure work; Application
+Control is AG-041 + V26 (backend migration).
+
+### 20.2 HARD BOUNDARY (do NOT widen)
+
+- NO PowerShell (`gpresult`, `Get-AppLockerPolicy`, etc.)
+- NO WMI/CIM (`Get-CimInstance -Namespace root/Microsoft/Windows/DeviceGuard`)
+- NO event log query (audit-log content is operator-policy data)
+- NO process / executable enumeration
+- NO policy file contents (XML / CIP)
+- NO policy file names / IDs / GUIDs / hashes
+- NO AppLocker rule lists / rule counts (single enforcement enum per collection)
+- NO publisher / signer thumbprint enumeration
+- NO full registry export — bounded to specific allowlisted keys + values
+- NO arbitrary filesystem scan — bounded to `CIPolicies\Active\*.cip` count + `SIPolicy.p7b` stat
+
+Source-of-truth scalars: registry under `HKLM\SYSTEM\CurrentControlSet\Control\CI`,
+`HKLM\SOFTWARE\Policies\Microsoft\Windows\SrpV2\<collection>\EnforcementMode`,
+SCM `AppIDSvc` query (same pattern as AG-039), and bounded filesystem
+metadata at `C:\Windows\System32\CodeIntegrity\`.
+
+### 20.3 WDAC Mode Derivation (Conservative — Codex 019e83ce iter-1 P0 #2)
+
+```
+OFF      ← Queryable=true AND no DecisionCriticalReadFailed AND
+            ExplicitAudit!=true AND ExplicitEnforce!=true AND
+            ActiveCipPolicyCount=0 AND LegacySipolicyPresent=false
+
+AUDIT    ← Queryable=true AND ExplicitAudit=true (explicit safe scalar)
+
+ENFORCE  ← Queryable=true AND ExplicitEnforce=true (highest priority;
+            safety-prioritised when both explicit somehow read true)
+
+UNKNOWN  ← all other cases (the DOMINANT return — capability evidence
+            like boot enforcement / multi-policy mode bits / driver
+            blocklist are NEVER used to infer AUDIT/ENFORCE)
+```
+
+v1 implementation MAY leave `ExplicitAudit` / `ExplicitEnforce` at nil
+and emit UNKNOWN dominant. Future iter that identifies a confirmed,
+version-defensible canonical registry scalar can land the explicit
+detection without contract changes.
+
+### 20.4 AppLocker per-collection mapping (Strict — Codex iter-1 P1 #5)
+
+For each collection `<C>` in {Exe, Dll, Script, Msi, Appx} at
+`HKLM\SOFTWARE\Policies\Microsoft\Windows\SrpV2\<C>\EnforcementMode`:
+
+| Registry state | Wire enum |
+|---|---|
+| Key/value missing OR DWORD 0 | `NOT_CONFIGURED` |
+| DWORD 1 | `AUDIT_ONLY` |
+| DWORD 2 | `ENFORCE` |
+| Non-DWORD type OR DWORD other | `UNKNOWN` + `APPLOCKER_KEY_UNREADABLE` probe error (source=`appLocker`) |
+| Permission denied | `UNKNOWN` + `REGISTRY_DENIED` probe error (source=`appLocker`) |
+
+`AppIDSvc` (the AppLocker enforcement service) is reported redundantly
+in this probe via SCM `OpenSCManagerW` + `OpenServiceW` (no PowerShell)
+because the AG-039 6-service allowlist intentionally excludes it. Reuses
+shared `ServiceState` + `StartupMode` enums from AG-039.
+
+### 20.5 Wire shape v1
+
+```json
+{
+  "schemaVersion": 1,
+  "supported": true,
+  "probeComplete": true,
+  "wdacQueryable": true,
+  "appLockerQueryable": true,
+  "wdacMode": "UNKNOWN",
+  "wdacBootEnforcementPresent": true,
+  "wdacActiveCipPolicyCount": 0,
+  "wdacLegacySipolicyPresent": false,
+  "wdacMultiPolicyMode": true,
+  "appLockerExeRule": "NOT_CONFIGURED",
+  "appLockerDllRule": "NOT_CONFIGURED",
+  "appLockerScriptRule": "NOT_CONFIGURED",
+  "appLockerMsiRule": "NOT_CONFIGURED",
+  "appLockerAppxRule": "NOT_CONFIGURED",
+  "appLockerAppIdSvcState": "STOPPED",
+  "appLockerAppIdSvcStartup": "MANUAL",
+  "appLockerAppIdSvcPresent": true,
+  "probeDurationMs": 47,
+  "probeErrors": []
+}
+```
+
+Wire key STABILITY (Codex iter-2 #2 absorb): pointer evidence fields
+(`wdacBootEnforcementPresent`, `wdacActiveCipPolicyCount`,
+`wdacLegacySipolicyPresent`, `wdacMultiPolicyMode`,
+`appLockerAppIdSvcPresent`) drop `omitempty` so the keys appear with
+explicit JSON `null` when evidence is unknown. `probeErrors` is
+initialized to `[]` (empty slice) rather than `null` for the same
+stability contract.
+
+### 20.6 ProbeErrors
+
+Bounded enum + bounded summary. Each entry:
+
+```json
+{
+  "code": "APPLOCKER_KEY_UNREADABLE",
+  "source": "appLocker",
+  "summary": "Exe: permission denied"
+}
+```
+
+**Codes** (allowlisted):
+- `NO_EVIDENCE` — overall probe failed (non-Windows runtime, or all reads denied)
+- `REGISTRY_DENIED` — registry key permission denied
+- `FILESYSTEM_DENIED` — filesystem metadata read denied (CIPolicies dir / SIPolicy stat)
+- `CIP_POLICIES_DIR_UNREADABLE` — `CIPolicies\Active` enumeration failed
+- `APPLOCKER_KEY_UNREADABLE` — SrpV2 collection EnforcementMode read failed
+- `APP_ID_SVC_QUERY_FAILED` — SCM query for AppIDSvc failed
+- `WDAC_SCALAR_UNREADABLE` — DeviceGuard / CI scalar read failed
+- `PROBE_ERRORS_TRUNCATED` — final sentinel emitted when MaxAppControlProbeErrors=16 cap is hit (so consumers KNOW data was dropped rather than silently inferring "no errors")
+
+**Source** enum (Codex iter-1 P1 #4): `wdac | appLocker | filesystem`.
+
+**Summary** ≤200 chars, CRLF-stripped.
+
+### 20.7 Operator trigger
+
+Payload bit: `includeAppControl: true`.
+
+```
+COLLECT_INVENTORY
+  payload:
+    includeAppControl: true
+```
+
+The agent executor reads via `boolPayload(command.Payload, "includeAppControl")`.
+The web `IslemlerTab` default COLLECT_INVENTORY payload should add this bit
+in the web PR (the agent PR doesn't touch it — agent-first land contract).
+
+### 20.8 Backend ingest path (separate PR — V26 migration)
+
+This contract describes the AGENT side. The backend ingest path is a
+separate slice (V26 migration adding `endpoint_app_control_snapshots` +
+`endpoint_app_control_probe_errors` tables + `AdminEndpointAppControlController`
+GET endpoint) that will be tracked under its own PR; the agent block above
+is the exact wire shape the backend will need to deserialize.
+
