@@ -147,6 +147,25 @@ type Snapshot struct {
 	// iter-1 AGREE.
 	StartupExposure *StartupExposureResult `json:"startupExposure,omitempty"`
 
+	// AppControl is intentionally nil unless the caller opted into the
+	// AG-041 Application Control / WDAC + AppLocker probe via
+	// CollectOptions.IncludeAppControl. The JSON tag omitempty hides
+	// the field from the heartbeat / auto-enroll wire payload and from
+	// COLLECT_INVENTORY runs that did not request the probe. On
+	// non-Windows runtimes the probe returns Supported=false +
+	// NO_EVIDENCE. The probe is strictly read-only: registry scalars
+	// under HKLM\SYSTEM CI + bounded filesystem metadata (CIPolicies\
+	// Active *.cip count + SIPolicy.p7b stat) + per-collection
+	// AppLocker SrpV2 DWORD reads + AppIDSvc SCM query. NO PowerShell,
+	// NO CIM/WMI, NO event log, NO process enumeration, NO policy file
+	// content / names / IDs / GUIDs / hashes, NO rule lists, NO
+	// publisher / signer thumbprints. Wire keys are STABLE even when
+	// facets / pointer evidence are nil (explicit JSON null) so
+	// downstream consumers (backend ingest, web view) can fail-closed
+	// safely. WDAC mode UNKNOWN is the dominant return per Codex
+	// 019e83ce iter-1 P0 #2.
+	AppControl *AppControlResult `json:"appControl,omitempty"`
+
 	// HotfixPosture is intentionally nil unless the caller opted into
 	// the AG-037 Windows Update / hotfix posture probe via
 	// CollectOptions.IncludeHotfixPosture. The JSON tag omitempty
@@ -407,6 +426,45 @@ type CollectOptions struct {
 	//     (usage telemetry leak); NO per-rule firewall enum.
 	//   - cap=50 with ENTRY_CAP_APPLIED probe error when exceeded.
 	IncludeStartupExposure bool
+
+	// IncludeAppControl gates the AG-041 Application Control / WDAC +
+	// AppLocker probe. When true, CollectWithOptions invokes
+	// ProbeAppControl (registry-only WDAC scalars + bounded filesystem
+	// metadata + per-collection AppLocker DWORD reads + AppIDSvc SCM
+	// query on Windows; Supported=false stub on every other platform)
+	// and attaches the result to Snapshot.AppControl. When false (the
+	// default), the probe is not invoked and the wire payload omits
+	// the field.
+	//
+	// HARD BOUNDARY (Codex 019e83ce 2-iter REVISE → PARTIAL → ready_for_
+	// impl absorb):
+	//   - read-only registry + bounded filesystem. NO PowerShell
+	//     (`gpresult`, `Get-AppLockerPolicy`), NO WMI/CIM
+	//     (`root/Microsoft/Windows/DeviceGuard`), NO event log query,
+	//     NO process / executable enumeration, NO arbitrary filesystem
+	//     scan.
+	//   - WDAC mode UNKNOWN dominant per Codex iter-1 P0 #2.
+	//     `AUDIT`/`ENFORCE` emitted ONLY when an implementation-verified,
+	//     version-defensible explicit scalar reads true; capability /
+	//     presence evidence (boot enforcement, multi-policy mode bits)
+	//     NEVER drive the mode derivation.
+	//   - filesystem reads bounded to CIPolicies\Active\*.cip COUNT
+	//     (no file names / GUIDs / hashes) + SIPolicy.p7b stat
+	//     (presence boolean only).
+	//   - AppLocker SrpV2 per-collection DWORD strict mapping
+	//     (missing/0=NOT_CONFIGURED, 1=AUDIT_ONLY, 2=ENFORCE,
+	//     other=UNKNOWN + typed probe error). NO rule subkey reads, NO
+	//     rule lists, NO publisher / signer thumbprints.
+	//   - AppIDSvc reported redundantly with AG-039 shared ServiceState
+	//     + StartupMode enums (AG-039 6-service allowlist excludes
+	//     AppIDSvc).
+	//   - probeErrors bounded: cap=MaxAppControlProbeErrors with
+	//     PROBE_ERRORS_TRUNCATED sentinel; source enum (wdac|appLocker|
+	//     filesystem); summary ≤200 chars CRLF-stripped.
+	//   - wire keys STABLE: nullable evidence fields drop `omitempty`
+	//     so consumers (backend, web) can rely on key presence with
+	//     explicit JSON null for unknown evidence.
+	IncludeAppControl bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -486,7 +544,24 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		se := collectStartupExposureForSnapshot(now)
 		snapshot.StartupExposure = &se
 	}
+	if opts.IncludeAppControl {
+		ac := collectAppControlForSnapshot(now)
+		snapshot.AppControl = &ac
+	}
 	return snapshot
+}
+
+// collectAppControlForSnapshot is the test seam for the AG-041
+// Application Control probe. Production wires ProbeAppControl with
+// time.Now (NOT the snapshot's frozen CollectedAt) so probeDurationMs
+// measures real elapsed wall-clock and the bounded-context timeout is
+// honoured even when the snapshot is older than the probe window.
+//
+// Mirrors the AG-039 / AG-040 wrapper pattern. The probe runs in its
+// own bounded context with AppControlProbeTimeout; callers do not need
+// to thread their own cancellation.
+func collectAppControlForSnapshot(_ time.Time) AppControlResult {
+	return ProbeAppControl(context.Background(), time.Now)
 }
 
 // collectDeviceHealthForSnapshot is the test seam for the AG-033

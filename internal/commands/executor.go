@@ -156,6 +156,22 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// session count, NO per-rule firewall enum. Codex
 			// 019e8387 plan iter-1 AGREE.
 			IncludeStartupExposure: boolPayload(command.Payload, "includeStartupExposure"),
+			// AG-041 Application Control / WDAC + AppLocker probe —
+			// opt-in only. Registry-only WDAC scalars under HKLM\
+			// SYSTEM CI + bounded filesystem metadata (CIPolicies\
+			// Active count + SIPolicy.p7b stat) + per-collection
+			// AppLocker SrpV2 DWORD reads + AppIDSvc SCM query.
+			// HARD BOUNDARY: NO PowerShell, NO CIM/WMI, NO event log,
+			// NO process / executable enumeration, NO policy file
+			// content / names / IDs / GUIDs / hashes, NO rule lists,
+			// NO publisher / signer thumbprints. Wire shape includes
+			// WDAC operational-mode enum (UNKNOWN dominant per Codex
+			// 019e83ce iter-1 P0 #2), per-facet queryable bools,
+			// nullable evidence pointers with STABLE keys (explicit
+			// JSON null, no omitempty), and probeErrors with bounded
+			// source enum (wdac|appLocker|filesystem). See
+			// docs/COMMAND-CONTRACT.md §20.
+			IncludeAppControl: boolPayload(command.Payload, "includeAppControl"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"
