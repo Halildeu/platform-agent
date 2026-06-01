@@ -23,10 +23,13 @@ import (
 //     opened with QUERY_VALUE | WOW64_64KEY; no SET / DELETE.
 //   - Filesystem: enumerate Common/User Startup folders for shortcut /
 //     script entries.
-//   - Task Scheduler: enumerate task FOLDERS (ROOT, MICROSOFT_WINDOWS,
-//     CUSTOM bucket) via the schtasks.exe /query /xml fallback — task
-//     NAME is shipped as Name; raw command line / executable path /
-//     working directory / RunAs account are NEVER surfaced.
+//   - Task Scheduler: enumerate autorun-triggered tasks (MSFT_TaskBootTrigger
+//     and MSFT_TaskLogonTrigger only) via a pinned PowerShell
+//     `Get-ScheduledTask | Where-Object | ForEach-Object | ConvertTo-Json`
+//     script — task NAME + folder PATH bucket are shipped; raw
+//     command line / executable path / Actions / Triggers details /
+//     RunAs account are NEVER surfaced. Folder paths are bucketed
+//     to ROOT, MICROSOFT_WINDOWS, or CUSTOM (see bucketTaskPath).
 //   - Win32 RDP exposure: registry read
 //     HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\
 //     fDenyTSConnections — Codex 019e8387 plan iter-1 P1 #3 absorb
@@ -339,17 +342,6 @@ func shouldRedactName(name string) bool {
 	}
 	return nameValueDenylistPattern.MatchString(name)
 }
-
-// MaxStartupRedactionsPerSource caps the per-source NAME_VALUE_REDACTED
-// emit count so a misbehaving / hostile agent cannot exhaust the
-// backend probeErrors limit (16) via dozens of forbidden-named
-// startup entries. Codex 019e83a8 iter-2 P1 absorb (visibility DoS
-// defense): the agent emits AT MOST ONE probe error per source
-// location (10 anchors), with the redaction count interpolated into
-// the bounded summary. This caps NAME_VALUE_REDACTED contributions
-// at 10 total — well under PROBE_ERRORS_MAX=16, leaving 6 slots for
-// real probe errors.
-const MaxStartupRedactionsPerSource = 1
 
 // bucketTaskPath maps a Task Scheduler folder path to one of three
 // buckets. Codex 019e8387 plan iter-1 P1#1 absorb: the wire MUST carry
