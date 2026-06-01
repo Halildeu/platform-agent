@@ -210,6 +210,71 @@ func TestOrchestrateStartupExposureCompleteFailClosed(t *testing.T) {
 	})
 }
 
+// TestShouldRedactName_ValueLevelDenylist: Codex 019e83a8 iter-1 P1#2
+// absorb — agent-side name redaction MUST mirror the backend
+// NAME_FULLPATH_DENYLIST_RE so attacker-controlled value names never
+// leave the host.
+func TestShouldRedactName_ValueLevelDenylist(t *testing.T) {
+	cases := []struct {
+		name    string
+		redact  bool
+		comment string
+	}{
+		{"", true, "empty rejected"},
+		{"OneDrive", false, "plain name accepted"},
+		{"Slack", false, "plain name accepted"},
+		{`C:\Users\Alice\OneDrive.exe`, true, "drive letter + exe rejected"},
+		{`c:\Users\bob\app`, true, "drive letter case-insensitive rejected"},
+		{`\\server\share\foo`, true, "UNC prefix rejected"},
+		{"/etc/passwd", true, "unix path rejected"},
+		{"foo.exe", true, "exe extension rejected"},
+		{"setup.bat", true, "bat extension rejected"},
+		{"loader.dll", true, "dll extension rejected"},
+		{"runner.cmd", true, "cmd extension rejected"},
+		{"task.ps1", true, "ps1 extension rejected"},
+		{"helper.vbs", true, "vbs extension rejected"},
+		{"OneDrive Sync", false, "spaces accepted"},
+		{"Update_Agent", false, "underscore accepted"},
+	}
+	for _, c := range cases {
+		got := shouldRedactName(c.name)
+		if got != c.redact {
+			t.Errorf("shouldRedactName(%q) = %v; expected %v (%s)",
+				c.name, got, c.redact, c.comment)
+		}
+	}
+	// Control char (BEL 0x07) embedded.
+	if !shouldRedactName("OneDriveBeep") {
+		t.Errorf("control char in name MUST be redacted")
+	}
+	if !shouldRedactName("name\x00with-null") {
+		t.Errorf("null byte in name MUST be redacted")
+	}
+}
+
+// TestStartupExposureProbeErrorCodeEnum_AllListed: Codex 019e83a8 iter-1
+// pin the bounded code enum surface — including NAME_VALUE_REDACTED
+// added in this iter.
+func TestStartupExposureProbeErrorCodeEnum_AllListed(t *testing.T) {
+	cases := map[string]string{
+		StartupExposureErrUnsupportedPlatform:     "UNSUPPORTED_PLATFORM",
+		StartupExposureErrRegistryQueryFailed:     "REGISTRY_QUERY_FAILED",
+		StartupExposureErrTaskSchedulerUnavail:    "TASK_SCHEDULER_UNAVAILABLE",
+		StartupExposureErrTaskSchedulerQuery:      "TASK_SCHEDULER_QUERY_FAILED",
+		StartupExposureErrStartupFolderUnreadable: "STARTUP_FOLDER_UNREADABLE",
+		StartupExposureErrRdpProbeFailed:          "RDP_PROBE_FAILED",
+		StartupExposureErrFirewallProbeFailed:     "FIREWALL_PROBE_FAILED",
+		StartupExposureErrEntryCapApplied:         "ENTRY_CAP_APPLIED",
+		StartupExposureErrNoEvidence:              "NO_EVIDENCE",
+		StartupExposureErrNameValueRedacted:       "NAME_VALUE_REDACTED",
+	}
+	for got, want := range cases {
+		if got != want {
+			t.Errorf("code %q != %q", got, want)
+		}
+	}
+}
+
 // TestStartupExposureNonWindowsStub: on non-Windows builds (the test
 // runs on linux CI), ProbeStartupExposure returns supported=false +
 // UNSUPPORTED_PLATFORM.

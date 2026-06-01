@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"regexp"
 	"sort"
 	"time"
 )
@@ -181,6 +182,14 @@ const (
 	StartupExposureErrFirewallProbeFailed    = "FIREWALL_PROBE_FAILED"
 	StartupExposureErrEntryCapApplied        = "ENTRY_CAP_APPLIED"
 	StartupExposureErrNoEvidence             = "NO_EVIDENCE"
+	// NAME_VALUE_REDACTED — Codex 019e83a8 iter-1 P1#2 absorb: when a
+	// registry value name / task name / startup-folder basename matches
+	// a forbidden value pattern (drive letter / UNC / unix path /
+	// executable extension / control char), the agent OMITS the entry
+	// from startupApps AND emits this typed probe error so the wire
+	// never carries the leak. Source carries the autorun anchor of
+	// the omitted entry; summary stays a bounded static phrasing.
+	StartupExposureErrNameValueRedacted = "NAME_VALUE_REDACTED"
 )
 
 // StartupExposureProbeTimeout bounds the full probe (registry +
@@ -297,4 +306,26 @@ func startupExposureElapsedMs(start time.Time, now func() time.Time) int {
 		now = time.Now
 	}
 	return int(now().Sub(start) / time.Millisecond)
+}
+
+// nameValueDenylistPattern is the agent-side mirror of the backend
+// NAME_FULLPATH_DENYLIST_RE. Codex 019e83a8 iter-1 P1#2 absorb: a
+// registry value name / task name / startup-folder basename can be
+// attacker- or admin-controlled and may contain raw path or command
+// fragments (`C:\Users\Alice\...`, `cmd /c ...`, `\\server\share\foo`,
+// `OneDrive.exe`). The agent MUST omit such entries from the wire AND
+// emit a NAME_VALUE_REDACTED probe error — backend rejection alone
+// does not prevent the leak that already left the host.
+var nameValueDenylistPattern = regexp.MustCompile(
+	`(?i)([a-z]:\\|\\\\|/[a-z]+/[a-z]+|\.(exe|dll|bat|cmd|ps1|vbs)\b|[\x00-\x1F\x7F])`,
+)
+
+// shouldRedactName reports whether a value/task/folder name carries a
+// forbidden value-level pattern that MUST never reach the wire. Empty
+// names are also redacted (the wire requires non-empty name).
+func shouldRedactName(name string) bool {
+	if name == "" {
+		return true
+	}
+	return nameValueDenylistPattern.MatchString(name)
 }

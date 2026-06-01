@@ -106,7 +106,7 @@ func runStartupExposureProbeBlocking(ctx context.Context) startupExposureAggrega
 
 	// Registry enumerations.
 	for _, spec := range registryStartupSpecs() {
-		entries, err := enumerateRegistryRun(spec.root, spec.path, spec.location)
+		entries, redactions, err := enumerateRegistryRun(spec.root, spec.path, spec.location)
 		if err != nil {
 			probeErrors = append(probeErrors, StartupExposureProbeError{
 				Code:    StartupExposureErrRegistryQueryFailed,
@@ -116,11 +116,12 @@ func runStartupExposureProbeBlocking(ctx context.Context) startupExposureAggrega
 			continue
 		}
 		apps = append(apps, entries...)
+		probeErrors = append(probeErrors, redactions...)
 	}
 
 	// Filesystem startup folders.
 	for _, spec := range filesystemStartupSpecs() {
-		entries, err := enumerateStartupFolder(spec.envExpand, spec.location)
+		entries, redactions, err := enumerateStartupFolder(spec.envExpand, spec.location)
 		if err != nil {
 			probeErrors = append(probeErrors, StartupExposureProbeError{
 				Code:    StartupExposureErrStartupFolderUnreadable,
@@ -130,14 +131,20 @@ func runStartupExposureProbeBlocking(ctx context.Context) startupExposureAggrega
 			continue
 		}
 		apps = append(apps, entries...)
+		probeErrors = append(probeErrors, redactions...)
 	}
 
-	// Task Scheduler enumeration.
-	taskApps, taskErr := enumerateScheduledTasks(ctx)
+	// Task Scheduler enumeration (filtered to startup/logon triggers
+	// only — Codex 019e83a8 iter-1 P1#1 absorb: an unfiltered
+	// Get-ScheduledTask sweep returns 100+ Microsoft system tasks on
+	// a stock Windows host, swamps the cap, and hides actual
+	// persistence signals).
+	taskApps, taskRedactions, taskErr := enumerateScheduledTasks(ctx)
 	if taskErr != nil {
 		probeErrors = append(probeErrors, *taskErr)
 	}
 	apps = append(apps, taskApps...)
+	probeErrors = append(probeErrors, taskRedactions...)
 
 	// RDP scalar.
 	rdp, rdpErr := probeRdpEnabled()
@@ -180,28 +187,40 @@ func registryStartupSpecs() []registryStartupSpec {
 // enumerateRegistryRun opens the Run/RunOnce key read-only and returns
 // the value NAMES (NOT the data). A registry value being PRESENT in
 // these keys means it is enabled by Windows definition — there is no
-// separate enabled flag.
-func enumerateRegistryRun(root registry.Key, path string, location StartupAppLocation) ([]StartupApp, error) {
+// separate enabled flag. Codex 019e83a8 iter-1 P1#2 absorb: every value
+// NAME is filtered through shouldRedactName() because the name field
+// itself is operator-controlled and can carry path/command fragments
+// (`C:\Users\Alice\...`, `cmd /c ...`, `\\server\share\foo`,
+// `OneDrive.exe`). Redacted entries are OMITTED and a NAME_VALUE_REDACTED
+// probe error is emitted with `source` = anchor enum + bounded summary.
+func enumerateRegistryRun(root registry.Key, path string, location StartupAppLocation) ([]StartupApp, []StartupExposureProbeError, error) {
 	key, err := registry.OpenKey(root, path, registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		// "Key does not exist" is NOT an error — it means no autorun
 		// entries in that slot. Distinguish from genuine read failures.
 		if err == registry.ErrNotExist {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	defer key.Close()
 
 	names, err := key.ReadValueNames(-1)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	apps := make([]StartupApp, 0, len(names))
+	var redactions []StartupExposureProbeError
 	for _, name := range names {
-		// HARD REDACTION: only the value NAME is captured. The data
-		// (executable path / command line) is NEVER read.
+		if shouldRedactName(name) {
+			redactions = append(redactions, StartupExposureProbeError{
+				Code:    StartupExposureErrNameValueRedacted,
+				Source:  location,
+				Summary: "Autorun entry name redacted (path or command fragment)",
+			})
+			continue
+		}
 		apps = append(apps, StartupApp{
 			Name:        name,
 			Location:    location,
@@ -209,7 +228,7 @@ func enumerateRegistryRun(root registry.Key, path string, location StartupAppLoc
 			ProbeOrigin: StartupProbeOriginRegistry,
 		})
 	}
-	return apps, nil
+	return apps, redactions, nil
 }
 
 // filesystemStartupSpec couples an env-var path expander with the wire
@@ -247,31 +266,43 @@ func filesystemStartupSpecs() []filesystemStartupSpec {
 // enumerateStartupFolder reads the startup folder and returns one
 // StartupApp per regular file. Only the basename WITHOUT the extension
 // is captured (e.g., "OneDrive.lnk" → "OneDrive"); the full path is
-// NEVER surfaced.
-func enumerateStartupFolder(envExpand func() string, location StartupAppLocation) ([]StartupApp, error) {
+// NEVER surfaced. Codex 019e83a8 iter-1 P1#2 absorb: shouldRedactName
+// filter applies to the basename too — a malicious operator could
+// create a shortcut named `C\Users\Alice\foo.lnk` which after extension
+// strip becomes `C\Users\Alice\foo`; that should be redacted.
+func enumerateStartupFolder(envExpand func() string, location StartupAppLocation) ([]StartupApp, []StartupExposureProbeError, error) {
 	dir := envExpand()
 	if dir == "" {
 		// Env var not set; treat as empty (NOT an error).
-		return nil, nil
+		return nil, nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Folder simply does not exist on this host; treat as empty.
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	apps := make([]StartupApp, 0, len(entries))
+	var redactions []StartupExposureProbeError
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
 		name := e.Name()
-		ext := filepath.Ext(name)
-		base := strings.TrimSuffix(name, ext)
 		// "desktop.ini" is a Windows metadata file — exclude.
 		if strings.EqualFold(name, "desktop.ini") {
+			continue
+		}
+		ext := filepath.Ext(name)
+		base := strings.TrimSuffix(name, ext)
+		if shouldRedactName(base) {
+			redactions = append(redactions, StartupExposureProbeError{
+				Code:    StartupExposureErrNameValueRedacted,
+				Source:  location,
+				Summary: "Startup-folder entry name redacted (path or command fragment)",
+			})
 			continue
 		}
 		apps = append(apps, StartupApp{
@@ -281,7 +312,7 @@ func enumerateStartupFolder(envExpand func() string, location StartupAppLocation
 			ProbeOrigin: StartupProbeOriginRegistry,
 		})
 	}
-	return apps, nil
+	return apps, redactions, nil
 }
 
 // scheduledTaskRow is the JSON shape produced by the pinned PowerShell
@@ -295,22 +326,35 @@ type scheduledTaskRow struct {
 }
 
 // enumerateScheduledTasks invokes PowerShell with a pinned script that
-// returns ONLY the bounded fields above. Codex 019e8387 plan absorb:
-// scheduled task enumeration uses a fixed argv (no payload-supplied
-// interpolation) and the script body never calls a mutating cmdlet.
+// returns ONLY the bounded fields above. Codex 019e8387 plan + 019e83a8
+// post-impl iter-1 P1#1 absorb: scheduled task enumeration uses a
+// fixed argv (no payload-supplied interpolation), the script body
+// never calls a mutating cmdlet, AND the result is FILTERED to tasks
+// with at least one Boot (MSFT_TaskBootTrigger) or Logon
+// (MSFT_TaskLogonTrigger) trigger — an unfiltered sweep returns
+// hundreds of Microsoft system tasks on a stock Windows host and
+// drowns the cap with noise.
 //
 // The script:
 //   1. Get-ScheduledTask returns all tasks (read-only).
-//   2. Where-Object filters to non-Disabled state.
+//   2. Where-Object filters to non-Disabled state AND at least one
+//      Boot/Logon trigger.
 //   3. ForEach-Object projects to the 3-field shape.
 //   4. ConvertTo-Json -Compress for compact transport.
 //
 // On any failure (powershell.exe missing, COM unavailable, JSON
 // decode), the function returns nil + a probe error.
-func enumerateScheduledTasks(ctx context.Context) ([]StartupApp, *StartupExposureProbeError) {
+func enumerateScheduledTasks(ctx context.Context) ([]StartupApp, []StartupExposureProbeError, *StartupExposureProbeError) {
 	const psScript = `$ErrorActionPreference = 'Stop'
 try {
-  $tasks = Get-ScheduledTask | Where-Object { $_.State -ne 'Disabled' } | ForEach-Object {
+  $autorunTriggerClasses = @('MSFT_TaskBootTrigger', 'MSFT_TaskLogonTrigger')
+  $tasks = Get-ScheduledTask | Where-Object {
+    $_.State -ne 'Disabled' -and (
+      $_.Triggers | Where-Object {
+        $_ -ne $null -and $_.CimClass -ne $null -and ($autorunTriggerClasses -contains $_.CimClass.CimClassName)
+      }
+    )
+  } | ForEach-Object {
     [PSCustomObject]@{
       TaskName = $_.TaskName
       TaskPath = $_.TaskPath
@@ -334,7 +378,7 @@ try {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, &StartupExposureProbeError{
+		return nil, nil, &StartupExposureProbeError{
 			Code:    StartupExposureErrTaskSchedulerUnavail,
 			Summary: "Task Scheduler enumeration failed",
 		}
@@ -344,7 +388,7 @@ try {
 	// tasks) or our literal "[]" string when none matched. Handle all.
 	out := bytes.TrimSpace(stdout.Bytes())
 	if len(out) == 0 || bytes.Equal(out, []byte("[]")) {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var rows []scheduledTaskRow
@@ -352,7 +396,7 @@ try {
 		// Single object — wrap in array for unified decode.
 		var row scheduledTaskRow
 		if err := json.Unmarshal(out, &row); err != nil {
-			return nil, &StartupExposureProbeError{
+			return nil, nil, &StartupExposureProbeError{
 				Code:    StartupExposureErrTaskSchedulerQuery,
 				Summary: "Task Scheduler JSON decode failed",
 			}
@@ -360,7 +404,7 @@ try {
 		rows = []scheduledTaskRow{row}
 	} else {
 		if err := json.Unmarshal(out, &rows); err != nil {
-			return nil, &StartupExposureProbeError{
+			return nil, nil, &StartupExposureProbeError{
 				Code:    StartupExposureErrTaskSchedulerQuery,
 				Summary: "Task Scheduler JSON decode failed",
 			}
@@ -368,20 +412,32 @@ try {
 	}
 
 	apps := make([]StartupApp, 0, len(rows))
+	var redactions []StartupExposureProbeError
 	for _, row := range rows {
 		name := strings.TrimSpace(row.TaskName)
 		if name == "" {
 			continue
 		}
-		// HARD REDACTION: only TaskName + bucketed TaskPath are kept.
+		bucket := bucketTaskPath(row.TaskPath)
+		// Codex 019e83a8 iter-1 P1#2 absorb: task name itself is
+		// operator-controllable and may carry path/command fragments;
+		// redact and emit a typed probe error rather than leaking.
+		if shouldRedactName(name) {
+			redactions = append(redactions, StartupExposureProbeError{
+				Code:    StartupExposureErrNameValueRedacted,
+				Source:  bucket,
+				Summary: "Scheduled task name redacted (path or command fragment)",
+			})
+			continue
+		}
 		apps = append(apps, StartupApp{
 			Name:        name,
-			Location:    bucketTaskPath(row.TaskPath),
+			Location:    bucket,
 			Enabled:     !strings.EqualFold(row.State, "Disabled"),
 			ProbeOrigin: StartupProbeOriginScheduledTask,
 		})
 	}
-	return apps, nil
+	return apps, redactions, nil
 }
 
 // bucketTaskPath maps a Task Scheduler folder path to one of three
