@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -16,11 +17,21 @@ import (
 // 019e8302 iter-2 implementation note absorb: no PowerShell — direct
 // `svc/mgr` SCM enumeration + `HKLM\SYSTEM\CurrentControlSet\Services\
 // <name>\DelayedAutoStart` registry read for AUTO_DELAYED disambiguation.
+//
+// Codex 019e8302 iter-3 P1 #3 absorb: ProbeServices owns its own
+// ServicesProbeTimeout bounded context so SCM enumeration cannot block
+// the heartbeat / inventory loop beyond the contract. Caller deadlines
+// still narrow the effective deadline via context.WithTimeout
+// propagation.
 func ProbeServices(ctx context.Context, now func() time.Time) ServicesResult {
 	if now == nil {
 		now = time.Now
 	}
 	startedAt := now()
+
+	// Bounded context — Codex 019e8302 iter-3 P1 #3 absorb.
+	probeCtx, cancel := context.WithTimeout(ctx, ServicesProbeTimeout)
+	defer cancel()
 
 	var probeErrors []ServicesProbeError
 	entries := make([]ServiceEntry, 0, len(CanonicalServiceAllowlist))
@@ -33,7 +44,7 @@ func ProbeServices(ctx context.Context, now func() time.Time) ServicesResult {
 		// emit empty services + SCM_UNAVAILABLE error so the consumer
 		// sees the global failure shape.
 		return orchestrateServicesProbe(
-			ctx,
+			probeCtx,
 			now,
 			true, // supported (Windows present), probe incomplete
 			[]ServiceEntry{},
@@ -48,7 +59,7 @@ func ProbeServices(ctx context.Context, now func() time.Time) ServicesResult {
 
 	for _, name := range CanonicalServiceAllowlist {
 		select {
-		case <-ctx.Done():
+		case <-probeCtx.Done():
 			probeErrors = append(probeErrors, ServicesProbeError{
 				Code:        ServicesErrNoEvidence,
 				ServiceName: name,
@@ -65,7 +76,7 @@ func ProbeServices(ctx context.Context, now func() time.Time) ServicesResult {
 	}
 
 	return orchestrateServicesProbe(
-		ctx, now, true, entries, probeErrors, startedAt,
+		probeCtx, now, true, entries, probeErrors, startedAt,
 	)
 }
 
@@ -107,22 +118,40 @@ func probeOneService(
 	entry.Present = true
 
 	// Service config (StartType + recovery actions etc.).
+	// Codex 019e8302 iter-3 P1 #2 absorb: config + query errors emit
+	// SERVICE_QUERY_FAILED probe error AND leave UNKNOWN values, so
+	// ProbeComplete fails closed instead of false-true.
+	var emitErr *ServicesProbeError
 	config, configErr := service.Config()
 	if configErr != nil {
-		// Config unreadable — keep StartupMode UNKNOWN.
 		entry.StartupMode = StartupModeUnknown
-		// State query may still work; fall through.
+		emitErr = &ServicesProbeError{
+			Code:        ServicesErrServiceQueryFailed,
+			ServiceName: name,
+			Summary:     "Service config read failed",
+		}
 	} else {
 		entry.StartupMode = mapStartupMode(name, config.StartType)
 	}
 
 	// Runtime state.
 	status, statusErr := service.Query()
-	if statusErr == nil {
+	if statusErr != nil {
+		// Already emitting config error; this is a second failure on
+		// the same service. Keep the first error code (don't multiply
+		// probe errors per-service); state stays UNKNOWN.
+		if emitErr == nil {
+			emitErr = &ServicesProbeError{
+				Code:        ServicesErrServiceQueryFailed,
+				ServiceName: name,
+				Summary:     "Service status read failed",
+			}
+		}
+	} else {
 		entry.State = mapServiceState(status.State)
 	}
 
-	return entry, nil
+	return entry, emitErr
 }
 
 // mapServiceState converts a Win32 SERVICE_STATUS_PROCESS state code into
@@ -182,75 +211,13 @@ func isDelayedAutoStart(serviceName string) bool {
 
 // isServiceNotFound reports whether the OpenService error is the well-
 // known "service does not exist" code (ERROR_SERVICE_DOES_NOT_EXIST =
-// 0x424 = 1060). We don't import syscall.Errno directly to keep the test
-// surface clean; string-match the error message which is stable on
-// Windows.
+// 0x424 = 1060). Codex 019e8302 iter-3 nit absorb: use numeric errno
+// instead of locale-dependent string match. errors.Is walks the wrapped
+// error chain and matches against the constant from
+// golang.org/x/sys/windows.
 func isServiceNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Heuristic match on the canonical Windows error message. We tested
-	// this against Windows 10 and 11 SCM error returns.
-	if matchErrnoCode(err, 1060) {
-		return true
-	}
-	return false
-}
-
-// matchErrnoCode reports whether the chained error contains a
-// syscall.Errno equal to code. Walks the error chain via errors.As.
-func matchErrnoCode(err error, code int) bool {
-	type errnoLike interface {
-		error
-		Error() string
-	}
-	var target errnoLike
-	if errors.As(err, &target) {
-		// Numeric match via reflective unwrap is brittle; fallback to
-		// substring match on canonical message. Windows OpenService
-		// returns "The specified service does not exist as an installed
-		// service." for code 1060.
-		_ = code
-		return containsServiceNotInstalled(target.Error())
-	}
-	return false
-}
-
-func containsServiceNotInstalled(s string) bool {
-	// Bounded substring match; both Windows EN-US message and locale-
-	// neutral wording variants accepted.
-	needles := []string{
-		"does not exist as an installed service",
-		"Specified service does not exist",
-		"service does not exist",
-	}
-	for _, n := range needles {
-		if indexFold(s, n) >= 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func indexFold(haystack, needle string) int {
-	hl := lowerASCII(haystack)
-	nl := lowerASCII(needle)
-	for i := 0; i+len(nl) <= len(hl); i++ {
-		if hl[i:i+len(nl)] == nl {
-			return i
-		}
-	}
-	return -1
-}
-
-func lowerASCII(s string) string {
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c = c + 32
-		}
-		b[i] = c
-	}
-	return string(b)
+	return errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST)
 }

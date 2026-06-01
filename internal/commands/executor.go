@@ -133,6 +133,14 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// severity} — never raw update titles, account names,
 			// product codes, MSI GUIDs, or supersedence chains.
 			IncludeHotfixPosture: boolPayload(command.Payload, "includeHotfixPosture"),
+			// AG-039 critical services inventory — opt-in only. SCM
+			// allowlist enum (WinDefend/wuauserv/BITS/EventLog/
+			// EndpointAgent/MpsSvc) + AUTO_DELAYED disambiguation via
+			// registry DelayedAutoStart. HARD BOUNDARY: read-only.
+			// Wire shape per-entry exactly {name, present, state,
+			// startupMode} — no raw description / command line /
+			// account / SID / display name.
+			IncludeServices: boolPayload(command.Payload, "includeServices"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"
