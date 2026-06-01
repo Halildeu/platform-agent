@@ -54,6 +54,44 @@ func TestAppLockerEnforcementModeEnumAllowlist(t *testing.T) {
 	}
 }
 
+// TestMapAppLockerDwordStrictMapping — Codex 019e83ce iter-1 P1 #5 +
+// iter-3 P1 #4 + P2 #7 absorb. The mapping was extracted from
+// readAppLockerCollectionMode into MapAppLockerDword so the strict
+// rule lives in a pure function table-testable on Linux CI without
+// registry access.
+func TestMapAppLockerDwordStrictMapping(t *testing.T) {
+	cases := []struct {
+		name        string
+		outcome     AppLockerReadOutcome
+		dwordValue  uint64
+		wantMode    AppLockerEnforcementMode
+		wantErrCode string
+	}{
+		{"key absent → NOT_CONFIGURED, no error", AppLockerReadKeyAbsent, 0, AppLockerNotConfigured, ""},
+		{"dword=0 → NOT_CONFIGURED, no error", AppLockerReadDwordValue, 0, AppLockerNotConfigured, ""},
+		{"dword=1 → AUDIT_ONLY, no error", AppLockerReadDwordValue, 1, AppLockerAuditOnly, ""},
+		{"dword=2 → ENFORCE, no error", AppLockerReadDwordValue, 2, AppLockerEnforce, ""},
+		{"dword=3 → UNKNOWN + APPLOCKER_KEY_UNREADABLE", AppLockerReadDwordValue, 3, AppLockerUnknown, AppControlErrAppLockerKeyUnreadable},
+		{"dword=999 → UNKNOWN + APPLOCKER_KEY_UNREADABLE", AppLockerReadDwordValue, 999, AppLockerUnknown, AppControlErrAppLockerKeyUnreadable},
+		{"wrong type → UNKNOWN + APPLOCKER_KEY_UNREADABLE", AppLockerReadWrongType, 0, AppLockerUnknown, AppControlErrAppLockerKeyUnreadable},
+		// Codex iter-3 P1 #4 absorb: REGISTRY_DENIED for permission-denied
+		// is DISTINCT from APPLOCKER_KEY_UNREADABLE (wrong type / unexpected DWORD).
+		{"permission denied → UNKNOWN + REGISTRY_DENIED", AppLockerReadPermissionDenied, 0, AppLockerUnknown, AppControlErrRegistryDenied},
+		{"other failure → UNKNOWN + APPLOCKER_KEY_UNREADABLE", AppLockerReadOtherFailure, 0, AppLockerUnknown, AppControlErrAppLockerKeyUnreadable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MapAppLockerDword(tc.outcome, tc.dwordValue)
+			if got.Mode != tc.wantMode {
+				t.Errorf("Mode = %q want %q", got.Mode, tc.wantMode)
+			}
+			if got.ErrorCode != tc.wantErrCode {
+				t.Errorf("ErrorCode = %q want %q", got.ErrorCode, tc.wantErrCode)
+			}
+		})
+	}
+}
+
 func TestAppControlProbeErrorSourceEnum(t *testing.T) {
 	allowed := []AppControlProbeErrorSource{
 		AppControlProbeErrSourceWdac,

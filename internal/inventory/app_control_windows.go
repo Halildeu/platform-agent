@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows/registry"
@@ -73,6 +75,15 @@ func probeAppControlImpl(ctx context.Context, now func() time.Time) AppControlRe
 		ProbeErrors: []AppControlProbeError{},
 	}
 
+	// Codex 019e83ce iter-3 P1 #5 absorb: the context is bounded with
+	// AppControlProbeTimeout but registry / filesystem / SCM Win32 APIs
+	// are synchronous and do NOT honour `ctx.Done()`. The timeout is
+	// best-effort: a hung Win32 call will still complete on its own;
+	// the context only short-circuits derivations between calls.
+	// Documented as a known limitation; tightening to a goroutine +
+	// select-based hard kill is a separate follow-up. v1 acceptable
+	// because registry/filesystem reads are sub-millisecond in
+	// practice and we have aggressive cap-16 probe-error bounding.
 	ctx, cancel := context.WithTimeout(ctx, AppControlProbeTimeout)
 	defer cancel()
 
@@ -137,7 +148,7 @@ func probeWdacFacet(ctx context.Context) (WdacEvidence, []AppControlProbeError) 
 			errs = append(errs, AppControlProbeError{
 				Code:    AppControlErrRegistryDenied,
 				Source:  errSourcePtr(AppControlProbeErrSourceWdac),
-				Summary: appControlSummaryPtr(boundSummary("CI\\Policy registry key unreadable: " + err.Error())),
+				Summary: appControlSummaryPtr(boundAppControlSummary("CI\\Policy registry key unreadable: " + err.Error())),
 			})
 		}
 	} else {
@@ -153,47 +164,45 @@ func probeWdacFacet(ctx context.Context) (WdacEvidence, []AppControlProbeError) 
 			errs = append(errs, AppControlProbeError{
 				Code:    AppControlErrRegistryDenied,
 				Source:  errSourcePtr(AppControlProbeErrSourceWdac),
-				Summary: appControlSummaryPtr(boundSummary("CI\\Config registry key unreadable: " + err.Error())),
+				Summary: appControlSummaryPtr(boundAppControlSummary("CI\\Config registry key unreadable: " + err.Error())),
 			})
 		}
 	} else {
 		_ = configKey.Close()
 	}
 
-	// DeviceGuard\AvailableSecurityProperties bit — capability evidence
-	// only (Codex iter-1 P1 #4 absorb: rename from "bootEnforcement").
+	// DeviceGuard\AvailableSecurityProperties — REG_MULTI_SZ capability
+	// evidence (Codex 019e83ce iter-3 P0 #2 absorb: switched from
+	// GetIntegerValue, which would have always failed with
+	// ErrUnexpectedType and falsely emitted BootEnforcementPresent=false).
+	// Non-empty array → capability is exposed.
 	dgKey, err := registry.OpenKey(registry.LOCAL_MACHINE, wdacDeviceGuardPath, registry.QUERY_VALUE|registry.READ)
 	if err == nil {
-		// Read AvailableSecurityProperties REG_MULTI_SZ; presence of
-		// any non-zero element implies the capability is exposed.
-		// Failure → keep BootEnforcementPresent=nil (unknown evidence,
-		// NOT a decision-critical failure).
-		_, _, valErr := dgKey.GetIntegerValue("AvailableSecurityProperties")
+		vals, _, valErr := dgKey.GetStringsValue("AvailableSecurityProperties")
 		_ = dgKey.Close()
 		if valErr == nil {
-			t := true
+			t := len(vals) > 0
 			ev.BootEnforcementPresent = &t
-		} else {
-			f := false
-			ev.BootEnforcementPresent = &f
 		}
+		// valErr (incl. ErrUnexpectedType / ErrNotExist on value) → keep
+		// BootEnforcementPresent=nil (explicit unknown). Codex iter-3 P0
+		// #2: do NOT emit `false` on read failure — that would be
+		// false-negative evidence.
 	} else if !errors.Is(err, registry.ErrNotExist) {
 		errs = append(errs, AppControlProbeError{
 			Code:    AppControlErrWdacScalarUnreadable,
 			Source:  errSourcePtr(AppControlProbeErrSourceWdac),
-			Summary: appControlSummaryPtr(boundSummary("DeviceGuard scalar unreadable: " + err.Error())),
+			Summary: appControlSummaryPtr(boundAppControlSummary("DeviceGuard scalar unreadable: " + err.Error())),
 		})
 	}
 
-	// Multi-policy mode bit — Windows 10 1903+ capability flag. Set
-	// from BootEnforcementPresent for v1 (proxy). Future iter MAY
-	// disambiguate via the explicit
-	// `CI\Config\DeployedSupported` scalar if it lands in the
-	// implementation-confirmed set.
-	if ev.BootEnforcementPresent != nil {
-		v := *ev.BootEnforcementPresent
-		ev.MultiPolicyMode = &v
-	}
+	// MultiPolicyMode — Codex 019e83ce iter-3 P1 #6 absorb: proxy from
+	// BootEnforcementPresent REMOVED. Without a confirmed dedicated
+	// scalar, MultiPolicyMode stays `nil` (explicit unknown) rather
+	// than mirroring capability evidence. Future iter that identifies
+	// a real multi-policy scalar can populate this without contract
+	// changes.
+	// ev.MultiPolicyMode = nil  // (implicit zero value)
 
 	// Filesystem evidence: CIPolicies\Active directory + SIPolicy.p7b
 	// stat. Bounded — no file names, GUIDs, hashes leak to the wire.
@@ -203,7 +212,7 @@ func probeWdacFacet(ctx context.Context) (WdacEvidence, []AppControlProbeError) 
 		errs = append(errs, AppControlProbeError{
 			Code:    AppControlErrCipPoliciesDirUnreadable,
 			Source:  errSourcePtr(AppControlProbeErrSourceFilesystem),
-			Summary: appControlSummaryPtr(boundSummary(cipErr.Error())),
+			Summary: appControlSummaryPtr(boundAppControlSummary(cipErr.Error())),
 		})
 	}
 
@@ -213,7 +222,7 @@ func probeWdacFacet(ctx context.Context) (WdacEvidence, []AppControlProbeError) 
 		errs = append(errs, AppControlProbeError{
 			Code:    AppControlErrFilesystemDenied,
 			Source:  errSourcePtr(AppControlProbeErrSourceFilesystem),
-			Summary: appControlSummaryPtr(boundSummary(legacyErr.Error())),
+			Summary: appControlSummaryPtr(boundAppControlSummary(legacyErr.Error())),
 		})
 	}
 
@@ -234,7 +243,10 @@ func probeCipPoliciesActiveCount(_ context.Context) (*int, error) {
 		if ent.IsDir() {
 			continue
 		}
-		if filepath.Ext(ent.Name()) == ".cip" {
+		// Codex 019e83ce iter-3 risk-area #1 absorb: EqualFold for case-
+		// insensitive .cip / .CIP / .Cip match (Windows filesystem is
+		// case-insensitive by default; defensive).
+		if strings.EqualFold(filepath.Ext(ent.Name()), ".cip") {
 			count++
 		}
 	}
@@ -298,32 +310,38 @@ func probeAppLockerFacet(ctx context.Context) (appLockerProbeResult, []AppContro
 			errs = append(errs, AppControlProbeError{
 				Code:    AppControlErrRegistryDenied,
 				Source:  errSourcePtr(AppControlProbeErrSourceAppLocker),
-				Summary: appControlSummaryPtr(boundSummary("SrpV2 root unreadable: " + err.Error())),
+				Summary: appControlSummaryPtr(boundAppControlSummary("SrpV2 root unreadable: " + err.Error())),
 			})
 		}
 	} else {
 		_ = rootKey.Close()
 
-		// Per-collection read (Codex iter-1 P1 #5 strict mapping).
+		// Per-collection read (Codex iter-1 P1 #5 + iter-3 P1 #4 strict
+		// mapping + REGISTRY_DENIED vs APPLOCKER_KEY_UNREADABLE
+		// distinction).
 		for _, c := range appLockerCollections {
-			mode, readErr := readAppLockerCollectionMode(c.keyPath)
+			res, readErr := readAppLockerCollectionMode(c.keyPath)
 			switch c.name {
 			case "Exe":
-				r.ExeRule = mode
+				r.ExeRule = res.Mode
 			case "Dll":
-				r.DllRule = mode
+				r.DllRule = res.Mode
 			case "Script":
-				r.ScriptRule = mode
+				r.ScriptRule = res.Mode
 			case "Msi":
-				r.MsiRule = mode
+				r.MsiRule = res.Mode
 			case "Appx":
-				r.AppxRule = mode
+				r.AppxRule = res.Mode
 			}
-			if readErr != nil {
+			if res.ErrorCode != "" {
+				summary := c.name
+				if readErr != nil {
+					summary = c.name + ": " + readErr.Error()
+				}
 				errs = append(errs, AppControlProbeError{
-					Code:    AppControlErrAppLockerKeyUnreadable,
+					Code:    res.ErrorCode,
 					Source:  errSourcePtr(AppControlProbeErrSourceAppLocker),
-					Summary: appControlSummaryPtr(boundSummary(c.name + ": " + readErr.Error())),
+					Summary: appControlSummaryPtr(boundAppControlSummary(summary)),
 				})
 			}
 		}
@@ -340,50 +358,63 @@ func probeAppLockerFacet(ctx context.Context) (appLockerProbeResult, []AppContro
 		errs = append(errs, AppControlProbeError{
 			Code:    AppControlErrAppIdSvcQueryFailed,
 			Source:  errSourcePtr(AppControlProbeErrSourceAppLocker),
-			Summary: appControlSummaryPtr(boundSummary(svcErr.Error())),
+			Summary: appControlSummaryPtr(boundAppControlSummary(svcErr.Error())),
 		})
 	}
 
 	return r, errs
 }
 
-// readAppLockerCollectionMode applies the Codex 019e83ce iter-1 P1 #5
-// strict mapping: missing/0 → NOT_CONFIGURED, 1 → AUDIT_ONLY, 2 →
-// ENFORCE, other → UNKNOWN + typed error.
-func readAppLockerCollectionMode(keyPath string) (AppLockerEnforcementMode, error) {
+// readAppLockerCollectionMode dispatches the registry read to the pure
+// MapAppLockerDword helper (cross-platform-testable). Codex 019e83ce
+// iter-3 P1 #4 absorb: error-code emission now distinguishes
+// REGISTRY_DENIED (permission-denied) from APPLOCKER_KEY_UNREADABLE
+// (wrong-type / unexpected-DWORD / corrupt). Returns the strict
+// AppLockerReadResult so the caller can attach the appropriate
+// probe-error code.
+func readAppLockerCollectionMode(keyPath string) (AppLockerReadResult, error) {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, keyPath, registry.QUERY_VALUE|registry.READ)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotExist) {
-			return AppLockerNotConfigured, nil
+			return MapAppLockerDword(AppLockerReadKeyAbsent, 0), nil
 		}
-		return AppLockerUnknown, fmt.Errorf("key open failed: %w", err)
+		if errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
+			return MapAppLockerDword(AppLockerReadPermissionDenied, 0), err
+		}
+		return MapAppLockerDword(AppLockerReadOtherFailure, 0), fmt.Errorf("key open failed: %w", err)
 	}
 	defer key.Close()
 
 	val, valType, err := key.GetIntegerValue(appLockerEnforcementMode)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotExist) {
-			return AppLockerNotConfigured, nil
+			return MapAppLockerDword(AppLockerReadKeyAbsent, 0), nil
 		}
-		return AppLockerUnknown, fmt.Errorf("EnforcementMode read failed: %w", err)
+		if errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
+			return MapAppLockerDword(AppLockerReadPermissionDenied, 0), err
+		}
+		return MapAppLockerDword(AppLockerReadOtherFailure, 0), fmt.Errorf("EnforcementMode read failed: %w", err)
 	}
 	if valType != registry.DWORD {
-		return AppLockerUnknown, fmt.Errorf("EnforcementMode wrong type: %d", valType)
+		return MapAppLockerDword(AppLockerReadWrongType, 0), fmt.Errorf("EnforcementMode wrong type: %d", valType)
 	}
-	switch val {
-	case 0:
-		return AppLockerNotConfigured, nil
-	case 1:
-		return AppLockerAuditOnly, nil
-	case 2:
-		return AppLockerEnforce, nil
-	default:
-		return AppLockerUnknown, fmt.Errorf("EnforcementMode unexpected DWORD: %d", val)
-	}
+	return MapAppLockerDword(AppLockerReadDwordValue, val), nil
 }
 
 // queryAppIdSvcWindows reuses the SCM client established by AG-039
 // services_windows.go. Returns shared ServiceState + StartupMode enums.
+//
+// Codex 019e83ce iter-3 P0 #3 absorb: error handling MUST distinguish
+// "service-not-found" from "permission denied / RPC failure". AG-039
+// uses `isServiceNotFound` (services_windows.go); we reuse the same
+// helper here so the OpenService error chain is mapped identically:
+//   - ERROR_SERVICE_DOES_NOT_EXIST → AppIdSvcPresent=false +
+//     state/startup UNKNOWN + no probe error (legitimate observation)
+//   - any other OpenService error → AppIdSvcPresent=nil (explicit
+//     unknown — NOT false; we can't assert absence on permission denied)
+//     + typed APP_ID_SVC_QUERY_FAILED error
+//   - s.Query() / s.Config() failure on a present service → state /
+//     startup stay UNKNOWN + typed error
 func queryAppIdSvcWindows(_ context.Context) (ServiceState, StartupMode, *bool, error) {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -393,15 +424,21 @@ func queryAppIdSvcWindows(_ context.Context) (ServiceState, StartupMode, *bool, 
 
 	s, err := m.OpenService(appLockerAppIdSvcName)
 	if err != nil {
-		// AppIDSvc not present — legitimate observation, not an error.
-		notPresent := false
-		return ServiceStateUnknown, StartupModeUnknown, &notPresent, nil
+		if isServiceNotFound(err) {
+			notPresent := false
+			return ServiceStateUnknown, StartupModeUnknown, &notPresent, nil
+		}
+		// Permission denied / RPC failure / other error — present-ness
+		// undetermined. Return nil pointer + typed error so the
+		// orchestrator emits APP_ID_SVC_QUERY_FAILED.
+		return ServiceStateUnknown, StartupModeUnknown, nil, fmt.Errorf("OpenService(AppIDSvc) failed: %w", err)
 	}
 	defer s.Close()
 
 	present := true
 	state := ServiceStateUnknown
 	startup := StartupModeUnknown
+	var queryErr, configErr error
 
 	if status, err := s.Query(); err == nil {
 		switch status.State {
@@ -410,6 +447,8 @@ func queryAppIdSvcWindows(_ context.Context) (ServiceState, StartupMode, *bool, 
 		case svc.Stopped:
 			state = ServiceStateStopped
 		}
+	} else {
+		queryErr = err
 	}
 
 	if cfg, err := s.Config(); err == nil {
@@ -425,13 +464,18 @@ func queryAppIdSvcWindows(_ context.Context) (ServiceState, StartupMode, *bool, 
 		case mgr.StartDisabled:
 			startup = StartupModeDisabled
 		}
+	} else {
+		configErr = err
 	}
 
+	if queryErr != nil || configErr != nil {
+		return state, startup, &present, fmt.Errorf("AppIDSvc query partial failure: query=%v config=%v", queryErr, configErr)
+	}
 	return state, startup, &present, nil
 }
 
 // boundSummary trims to ≤200 chars + strips CR/LF.
-func boundSummary(s string) string {
+func boundAppControlSummary(s string) string {
 	const cap = 200
 	out := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {

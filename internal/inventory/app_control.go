@@ -305,6 +305,81 @@ func errSourcePtr(s AppControlProbeErrorSource) *AppControlProbeErrorSource {
 	return &s
 }
 
+// AppLockerDwordValueType is the platform-independent representation of
+// the Windows registry value type for AppLocker EnforcementMode reads.
+// Extracted as a separate type so the mapping function below stays
+// cross-platform testable. On Windows, callers pass
+// `uint32(registry.DWORD)` (=4); test harnesses pass any non-`DwordType`
+// value to exercise the "wrong type" branch.
+type AppLockerDwordValueType uint32
+
+const AppLockerDwordType AppLockerDwordValueType = 4 // matches registry.DWORD constant
+
+// AppLockerReadResult is the platform-independent outcome of a single
+// AppLocker collection EnforcementMode read. Extracted from the
+// Windows-only readAppLockerCollectionMode so the strict mapping rule
+// (Codex 019e83ce iter-1 P1 #5 + iter-3 P1 #4 absorb) lives in a pure
+// function table-testable on Linux CI.
+type AppLockerReadResult struct {
+	Mode AppLockerEnforcementMode
+	// ErrorCode is non-empty when the read should emit a probe error
+	// (`REGISTRY_DENIED` for permission-denied, `APPLOCKER_KEY_UNREADABLE`
+	// for wrong type / unexpected DWORD).
+	ErrorCode string
+}
+
+// AppLockerReadOutcome enumerates the discrete cases the Windows reader
+// passes to MapAppLockerDword. Codex iter-3 P1 #4 absorb: each outcome
+// maps to a SPECIFIC probe-error code (or none).
+type AppLockerReadOutcome int
+
+const (
+	// KeyAbsent: registry key/value not present. Maps to NOT_CONFIGURED
+	// + no probe error (legitimate "no policy" observation).
+	AppLockerReadKeyAbsent AppLockerReadOutcome = iota
+	// PermissionDenied: registry access denied (ERROR_ACCESS_DENIED).
+	// Maps to UNKNOWN + REGISTRY_DENIED probe error.
+	AppLockerReadPermissionDenied
+	// DwordValue: DWORD value read successfully — interpret per strict
+	// table (0=NOT_CONFIGURED, 1=AUDIT_ONLY, 2=ENFORCE, other=UNKNOWN
+	// + APPLOCKER_KEY_UNREADABLE).
+	AppLockerReadDwordValue
+	// WrongType: value present but non-DWORD type. Maps to UNKNOWN +
+	// APPLOCKER_KEY_UNREADABLE probe error.
+	AppLockerReadWrongType
+	// OtherReadFailure: any other read error (corrupt registry, etc.).
+	// Maps to UNKNOWN + APPLOCKER_KEY_UNREADABLE probe error.
+	AppLockerReadOtherFailure
+)
+
+// MapAppLockerDword applies the strict Codex 019e83ce iter-1 P1 #5 +
+// iter-3 P1 #4 absorbed mapping. Pure function over (outcome, dword
+// value) — testable on Linux CI without registry access.
+func MapAppLockerDword(outcome AppLockerReadOutcome, dwordValue uint64) AppLockerReadResult {
+	switch outcome {
+	case AppLockerReadKeyAbsent:
+		return AppLockerReadResult{Mode: AppLockerNotConfigured}
+	case AppLockerReadPermissionDenied:
+		return AppLockerReadResult{Mode: AppLockerUnknown, ErrorCode: AppControlErrRegistryDenied}
+	case AppLockerReadWrongType, AppLockerReadOtherFailure:
+		return AppLockerReadResult{Mode: AppLockerUnknown, ErrorCode: AppControlErrAppLockerKeyUnreadable}
+	case AppLockerReadDwordValue:
+		switch dwordValue {
+		case 0:
+			return AppLockerReadResult{Mode: AppLockerNotConfigured}
+		case 1:
+			return AppLockerReadResult{Mode: AppLockerAuditOnly}
+		case 2:
+			return AppLockerReadResult{Mode: AppLockerEnforce}
+		default:
+			// Unexpected DWORD value (3+) — same UNKNOWN + APPLOCKER_KEY
+			// _UNREADABLE as wrong-type, distinct from REGISTRY_DENIED.
+			return AppLockerReadResult{Mode: AppLockerUnknown, ErrorCode: AppControlErrAppLockerKeyUnreadable}
+		}
+	}
+	return AppLockerReadResult{Mode: AppLockerUnknown, ErrorCode: AppControlErrAppLockerKeyUnreadable}
+}
+
 // stringPtr returns a bounded summary pointer — used by the platform
 // implementations when a probe-error needs a non-empty summary field.
 func appControlSummaryPtr(s string) *string {
