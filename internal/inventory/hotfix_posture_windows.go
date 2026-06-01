@@ -86,7 +86,19 @@ try {
     $installedSourceUsed = 'wua'
   }
 } catch {
-  $result.errors += [ordered]@{ source = 'wua'; code = 'COM_FAILED'; summary = ($_.Exception.Message | Out-String).Trim() }
+  # Codex 019e8167 iter-2 P1.4: classify exception type/HRESULT
+  # rather than collapsing all WUA failures to COM_FAILED.
+  $code = 'COM_FAILED'
+  $hr = $null
+  try { $hr = ('0x{0:X8}' -f $_.Exception.HResult) } catch {}
+  if ($_.Exception -is [System.UnauthorizedAccessException]) {
+    $code = 'ACCESS_DENIED'
+  } elseif ($hr -and $hr -match '^0x80070005$') {
+    $code = 'ACCESS_DENIED'
+  } elseif ($hr -and $hr -match '^0x80244[0-9A-F]{3}$') {
+    $code = 'WSUS_UNREACHABLE'
+  }
+  $result.errors += [ordered]@{ source = 'wua'; code = $code; summary = ($_.Exception.Message | Out-String).Trim() }
 }
 
 # ---- Get-HotFix fallback (installed-only) when WUA installed path empty/failed ----
@@ -116,10 +128,16 @@ if (-not $result.installed -or $result.installed.totalCount -eq 0) {
 }
 
 # ---- Pending updates via WUA Search (no fallback) ----
+# Codex 019e8167 iter-2 P1.2 absorb: removed Type=Software filter so
+# driver updates are visible. Per contract section 16.4, DRIVER
+# updates are in scope and surface via the category resolver.
+# WSUS/COM failure classification per iter-2 P1.4
+# (UnauthorizedAccessException -> ACCESS_DENIED; HRESULT 0x802440**
+# -> WSUS_UNREACHABLE; otherwise -> COM_FAILED).
 try {
   $sess2 = New-Object -ComObject Microsoft.Update.Session
   $searcher2 = $sess2.CreateUpdateSearcher()
-  $searchResult = $searcher2.Search("IsInstalled=0 AND IsHidden=0 AND Type='Software'")
+  $searchResult = $searcher2.Search("IsInstalled=0 AND IsHidden=0")
   $pendingItems = New-Object System.Collections.Generic.List[System.Collections.Hashtable]
   foreach ($update in $searchResult.Updates) {
     $kbIds = @()
@@ -138,7 +156,18 @@ try {
     totalCount = $searchResult.Updates.Count
   }
 } catch {
-  $result.errors += [ordered]@{ source = 'wua'; code = 'COM_FAILED'; summary = ($_.Exception.Message | Out-String).Trim() }
+  $code = 'COM_FAILED'
+  $hr = $null
+  try { $hr = ('0x{0:X8}' -f $_.Exception.HResult) } catch {}
+  if ($_.Exception -is [System.UnauthorizedAccessException]) {
+    $code = 'ACCESS_DENIED'
+  } elseif ($hr -and $hr -match '^0x80070005$') {
+    $code = 'ACCESS_DENIED'
+  } elseif ($hr -and $hr -match '^0x80244[0-9A-F]{3}$') {
+    # WU transport / WSUS HRESULT family.
+    $code = 'WSUS_UNREACHABLE'
+  }
+  $result.errors += [ordered]@{ source = 'wua'; code = $code; summary = ($_.Exception.Message | Out-String).Trim() }
 }
 
 # ---- Service health (wuauserv + bits) ----
@@ -153,16 +182,38 @@ try {
     autoUpdateEffectiveEnabled  = $null
     notificationLevel           = ''
   }
+  # Codex 019e8167 iter-2 P1.3 absorb: svc.StartType is not a safe
+  # Windows PowerShell 5.1 ServiceController contract -- query the
+  # CIM Win32_Service instance instead (StartMode property is the
+  # canonical RUNNING/STOPPED/DISABLED source). Failure to read a
+  # service appends SERVICE_QUERY_FAILED so probeComplete flips to
+  # false rather than silently reporting UNKNOWN as service health
+  # OK.
   function _state($name) {
     try {
-      $svc = Get-Service -Name $name -ErrorAction Stop
-      if ($svc.StartType -eq 'Disabled') { return 'DISABLED' }
-      if ($svc.Status -eq 'Running') { return 'RUNNING' }
+      $cim = Get-CimInstance -ClassName Win32_Service -Filter "Name='$name'" -ErrorAction Stop
+      if ($null -eq $cim) {
+        $script:_stateError = @{ source = 'service'; code = 'SERVICE_QUERY_FAILED'; summary = "Win32_Service $name not found" }
+        return 'UNKNOWN'
+      }
+      if ($cim.StartMode -eq 'Disabled') { return 'DISABLED' }
+      if ($cim.State -eq 'Running') { return 'RUNNING' }
       return 'STOPPED'
-    } catch { return 'UNKNOWN' }
+    } catch {
+      $script:_stateError = @{ source = 'service'; code = 'SERVICE_QUERY_FAILED'; summary = ($_.Exception.Message | Out-String).Trim() }
+      return 'UNKNOWN'
+    }
   }
   $health.wuaServiceState  = _state 'wuauserv'
+  if ($script:_stateError) {
+    $result.errors += $script:_stateError
+    $script:_stateError = $null
+  }
   $health.bitsServiceState = _state 'bits'
+  if ($script:_stateError) {
+    $result.errors += $script:_stateError
+    $script:_stateError = $null
+  }
 
   # Registry timestamps + AU policy
   try {
@@ -211,7 +262,17 @@ $result | ConvertTo-Json -Depth 6 -Compress
 // errors are reflected in `ProbeErrors` and `ProbeComplete=false`. The
 // caller MUST check `ProbeComplete` before treating the result as
 // authoritative evidence.
+//
+// Codex 019e8167 iter-2 P2.5 absorb: a nil `ctx` is normalised to
+// `context.Background()` rather than allowed to panic
+// `context.WithTimeout(nil, ...)` — mirrors the AG-030..033/036/038
+// probe pattern. Production wiring always passes
+// `context.Background()`, but the public function is reachable from
+// tests and orchestrator paths that could legitimately pass nil.
 func ProbeHotfixPosture(ctx context.Context, now func() time.Time) HotfixPostureResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if now == nil {
 		now = time.Now
 	}
@@ -554,20 +615,42 @@ func canonicalHotfixErrorCode(s string) HotfixPostureProbeErrorCode {
 // set to a single canonical bucket using deterministic precedence.
 // GUID mapping is a v1 subset; new GUIDs fall through to UNCATEGORIZED.
 func primaryCategoryFromGuids(guids []string) HotfixPostureCategory {
-	// Microsoft Update Classification GUIDs (canonical subset).
-	// Reference: docs.microsoft.com/en-us/windows/win32/wua_sdk/
-	//   determining-the-category-of-an-update
+	// Microsoft Update Classification GUIDs — canonical mapping per
+	// the official WUA classification list:
+	//   docs.microsoft.com/en-us/windows/win32/wua_sdk/
+	//     determining-the-category-of-an-update
+	//
+	// Codex 019e8167 iter-2 P1.1 absorb: prior draft had four GUIDs
+	// swapped (CRITICAL↔DEFINITION, FEATURE_PACK↔OPTIONAL,
+	// SERVICE_PACK↔IMPORTANT). The current list is the authoritative
+	// table, locked by TestPrimaryCategoryFromGuids_KnownGUIDs.
+	//
+	// NOTE: WUA does NOT publish a classification GUID for "Important"
+	// or "Optional" — those buckets are derived from MSRC severity at
+	// `severityFromMsrc`, NOT from a WUA category lookup. v1 preserves
+	// the bucket names in the enum so the wire shape stays stable
+	// post-mapping; updates that fall through here resolve to
+	// UNCATEGORIZED (and severity carries the orthogonal signal).
 	knownByGUID := map[string]HotfixPostureCategory{
+		// Security Updates — confirmed against WUA classification.
 		"0fa1201d-4330-4fa8-8ae9-b877473b6441": HotfixPostureCategorySecurity,
-		"e6cf1350-c01b-414d-a61f-263d14d133b4": HotfixPostureCategoryDefinition,
-		"e0789628-ce08-4437-be74-2495b842f43b": HotfixPostureCategoryCritical,
-		"68c5b0a3-d1a6-4553-ae49-01d3a7827828": HotfixPostureCategoryImportant,
-		"b54e7d24-7add-428f-8b75-90a396fa584f": HotfixPostureCategoryOptional,
+		// Critical Updates (Codex iter-2 P1.1 fix — was misattributed to Definition).
+		"e6cf1350-c01b-414d-a61f-263d14d133b4": HotfixPostureCategoryCritical,
+		// Definition Updates (Codex iter-2 P1.1 fix — was misattributed to Critical).
+		"e0789628-ce08-4437-be74-2495b842f43b": HotfixPostureCategoryDefinition,
+		// Service Packs (Codex iter-2 P1.1 fix — was misattributed to Important).
+		"68c5b0a3-d1a6-4553-ae49-01d3a7827828": HotfixPostureCategoryServicePack,
+		// Feature Packs (Codex iter-2 P1.1 fix — was misattributed to Optional).
+		"b54e7d24-7add-428f-8b75-90a396fa584f": HotfixPostureCategoryFeaturePack,
+		// Drivers — confirmed.
 		"ebfd1a04-94f6-4b29-8e90-d6c0c87baa5c": HotfixPostureCategoryDriver,
-		"b612e9ec-7f9b-4f81-94b9-7c40d3e8ac02": HotfixPostureCategoryFeaturePack,
-		"68c5b0a3-d1a6-4553-ae49-01d3a7827829": HotfixPostureCategoryServicePack,
+		// Update Rollups — confirmed.
 		"28bc880e-0592-4cbf-8f95-c79b17911d5f": HotfixPostureCategoryUpdateRollup,
+		// Tools — confirmed.
 		"b4832bd8-e735-4761-8daf-37f882276dab": HotfixPostureCategoryTools,
+		// Updates (generic) — falls through to UNCATEGORIZED in v1; the
+		// MSRC severity axis carries the action signal for these.
+		"cd5ffd1e-79ee-471d-8c6d-aa8ec7b15c97": HotfixPostureCategoryUncategorized,
 	}
 	out := HotfixPostureCategoryUncategorized
 	bestRank := categoryRank(out)
@@ -662,6 +745,13 @@ func firstStr(ss []string) string {
 // redactHotfixSummary scrubs operator-readable text for the wire-safe
 // `summary` field on probe errors. We aggressively drop anything that
 // might leak path / username / hostname / verbose stack dumps.
+//
+// Codex 019e8167 iter-2 P2.6 absorb: the path-prefix list is widened
+// past the original user-profile-only set so common Windows system
+// paths (Windows, Program Files, ProgramData) and forward-slash
+// variants are also redacted. The redactor is intentionally permissive
+// — false positives produce `<redacted>` operator-readable noise; a
+// missed leak produces a credential / hostname disclosure.
 func redactHotfixSummary(s string) string {
 	s = strings.TrimSpace(s)
 	// Strip CR/LF and tabs to keep summaries single-line.
@@ -670,14 +760,39 @@ func redactHotfixSummary(s string) string {
 	s = strings.ReplaceAll(s, "\t", " ")
 	// Cap length aggressively — the typed Code is the signal; summary
 	// is only operator-readable context.
-	const cap = 200
-	if len(s) > cap {
-		s = s[:cap]
+	const maxLen = 200
+	if len(s) > maxLen {
+		s = s[:maxLen]
 	}
-	// Defence in depth: redact \\server\share, C:\Users\..., etc.
-	for _, prefix := range []string{"\\\\", "C:\\Users\\", "D:\\Users\\"} {
-		if idx := strings.Index(s, prefix); idx >= 0 {
+	// Defence in depth: redact UNC + drive-letter Windows-system + any
+	// user-profile path on any drive letter. Both back-slash and
+	// forward-slash variants covered (PowerShell normalises but Go
+	// `errors.New` strings can carry either).
+	lower := strings.ToLower(s)
+	prefixes := []string{
+		"\\\\",                // UNC \\server\share
+		"//",                  // forward-slash UNC variant
+		"c:\\windows\\",       // OS root
+		"c:/windows/",
+		"c:\\program files",   // includes "Program Files (x86)"
+		"c:/program files",
+		"c:\\programdata\\",
+		"c:/programdata/",
+	}
+	for _, prefix := range prefixes {
+		if idx := strings.Index(lower, prefix); idx >= 0 {
 			s = s[:idx] + "<redacted>"
+			lower = strings.ToLower(s)
+		}
+	}
+	// Drive-letter user-profile match across A-Z (\users\ + /users/).
+	for letter := 'a'; letter <= 'z'; letter++ {
+		for _, sep := range []string{"\\", "/"} {
+			prefix := string(letter) + ":" + sep + "users" + sep
+			if idx := strings.Index(lower, prefix); idx >= 0 {
+				s = s[:idx] + "<redacted>"
+				lower = strings.ToLower(s)
+			}
 		}
 	}
 	return s
