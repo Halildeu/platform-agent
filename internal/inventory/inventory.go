@@ -113,6 +113,19 @@ type Snapshot struct {
 	// "agent does not support diagnostics here" instead of treating
 	// the absence as a failed ingest.
 	Diagnostics *DiagnosticsResult `json:"diagnostics,omitempty"`
+
+	// HotfixPosture is intentionally nil unless the caller opted into
+	// the AG-037 Windows Update / hotfix posture probe via
+	// CollectOptions.IncludeHotfixPosture. The JSON tag omitempty
+	// hides the field from the heartbeat / auto-enroll wire payload
+	// and from COLLECT_INVENTORY runs that did not request the probe.
+	// On non-Windows runtimes the probe returns Supported=false +
+	// UNSUPPORTED_PLATFORM. The probe is strictly read-only: pinned
+	// PowerShell + WUA COM (`Microsoft.Update.Session`) + `Get-HotFix`
+	// fallback (installed-only) + SCM service state + AU policy
+	// registry reads. NO install/reboot/service mutation is ever
+	// performed. See COMMAND-CONTRACT.md §17.
+	HotfixPosture *HotfixPostureResult `json:"hotfixPosture,omitempty"`
 }
 
 // CollectOptions controls which optional inventory blocks COLLECT_INVENTORY
@@ -294,6 +307,30 @@ type CollectOptions struct {
 	// in ConfigHash — only SHA-256(version|apiURL). DNS and TLS
 	// checks are fire-and-forget with 5s timeout; errors do not block.
 	IncludeDiagnostics bool
+
+	// IncludeHotfixPosture gates the AG-037 Windows Update / hotfix
+	// posture probe. When true, CollectWithOptions invokes
+	// ProbeHotfixPosture (pinned PowerShell + WUA COM
+	// `Microsoft.Update.Session` + `Get-HotFix` installed-only fallback
+	// + SCM service state + AU policy registry reads on Windows; a
+	// Supported=false stub on every other platform) and attaches the
+	// result to Snapshot.HotfixPosture. When false (the default), the
+	// probe is not invoked and the wire payload omits the field.
+	//
+	// The backend uses true via COLLECT_INVENTORY's
+	// includeHotfixPosture payload bit when a patch posture
+	// evaluation is being prepared. Heartbeat / auto-enroll /
+	// lightweight inventory never opt in.
+	//
+	// HARD BOUNDARY: read-only. NO `Install-WindowsUpdate`, NO
+	// `wuauclt /detectnow`, NO `sconfig` reboot trigger, NO service
+	// start/stop/enable/disable, NO policy mutation. Allowlist
+	// projection: per-hotfix `{kbId, installedOn, description}`;
+	// per-pending-item `{kbIds, primaryCategory, severity}`. NO raw
+	// stdout/stderr, NO account names, NO command lines, NO product
+	// codes, NO MSI GUIDs, NO supersedence chains, NO raw update
+	// titles in pending items.
+	IncludeHotfixPosture bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -361,6 +398,10 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		diag := collectDiagnosticsForSnapshot(now)
 		snapshot.Diagnostics = &diag
 	}
+	if opts.IncludeHotfixPosture {
+		hp := collectHotfixPostureForSnapshot(now)
+		snapshot.HotfixPosture = &hp
+	}
 	return snapshot
 }
 
@@ -381,6 +422,17 @@ var collectOutdatedSoftwareForSnapshot = func(_ time.Time) OutdatedSoftwareResul
 
 var collectDiagnosticsForSnapshot = func(_ time.Time) DiagnosticsResult {
 	return ProbeDiagnostics(context.Background(), time.Now)
+}
+
+// collectHotfixPostureForSnapshot is the test seam for the AG-037
+// Windows Update / hotfix posture probe. Production wires the real
+// ProbeHotfixPosture with time.Now (NOT the snapshot's frozen
+// CollectedAt) so ProbeDurationMs measures real elapsed wall-clock
+// and the LastDetect/Install registry timestamps reflect the moment
+// of probe. Tests override it to assert default-omit / opt-in /
+// non-Windows stub behavior without invoking real PowerShell.
+var collectHotfixPostureForSnapshot = func(_ time.Time) HotfixPostureResult {
+	return ProbeHotfixPosture(context.Background(), time.Now)
 }
 
 // collectLocalAdminGroupForSnapshot is the test seam for the

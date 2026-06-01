@@ -1578,3 +1578,191 @@ different thresholds without an agent change.
   free-space + utilization, not drive-failure prediction).
 - **Per-pagefile breakdown**: only the MEMORYSTATUSEX commit
   summary is surfaced, not per-pagefile detail.
+
+## 16. AG-037 — Windows Update / Hotfix Posture (Faz 22.5 quick-wins)
+
+### 16.1 Scope
+
+Read-only probe surfacing installed hotfix history + pending update
+queue counts + Windows Update agent health for a fleet-wide patch
+posture view. The probe NEVER triggers a `wuauclt /detectnow`,
+`Install-WindowsUpdate`, `sconfig` reboot, service start/stop/enable/
+disable, or any policy mutation. Authoritative source is WUA COM
+(`Microsoft.Update.Session.CreateUpdateSearcher`) with `Get-HotFix`
+as a deliberately narrow installed-only fallback when WUA's
+QueryHistory returns empty.
+
+Backend uses this via `COLLECT_INVENTORY{includeHotfixPosture:true}`
+when a patch posture evaluation is being prepared (the AG-025H
+lightweight default never opts in, so heartbeat / auto-enroll
+remain cheap).
+
+### 16.2 Payload opt-in
+
+```jsonc
+{
+  "type": "COLLECT_INVENTORY",
+  "payload": {
+    "includeHotfixPosture": true
+  }
+}
+```
+
+`includeHotfixPosture` is `bool`, default `false`. Default
+`COLLECT_INVENTORY` payload does NOT include hotfix posture data; the
+caller must explicitly request the probe.
+
+### 16.3 Result wire shape (`details.inventory.hotfixPosture`)
+
+Allowlist projection. Adding a field is a contract bump.
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "supported": true,
+  "probeComplete": true,
+  "collectedAt": "2026-06-01T12:34:56Z",
+  "probeDurationMs": 410,
+  "installedSourceUsed": "wua",
+  "installedHotfixes": [
+    {
+      "kbId": "KB5034122",
+      "installedOn": "2026-01-15T00:00:00Z",
+      "description": "Security Update for Microsoft Windows"
+    }
+  ],
+  "installedCount": 1,
+  "installedTruncated": false,
+  "pendingSourceUsed": "wua",
+  "pendingUpdates": [
+    {
+      "kbIds": ["KB5036899"],
+      "primaryCategory": "SECURITY",
+      "severity": "CRITICAL"
+    }
+  ],
+  "pendingByCategory": [
+    { "category": "SECURITY", "count": 1 }
+  ],
+  "pendingTotalCount": 1,
+  "pendingTruncated": false,
+  "healthSourceUsed": "service",
+  "agentHealth": {
+    "wuaServiceState": "RUNNING",
+    "bitsServiceState": "RUNNING",
+    "lastDetectAt": "2026-05-31T08:00:00Z",
+    "lastInstallAt": "2026-05-30T22:00:00Z",
+    "autoUpdatePolicyEnabled": true,
+    "autoUpdateEffectiveEnabled": true,
+    "notificationLevel": "4"
+  },
+  "probeErrors": []
+}
+```
+
+### 16.4 Hard boundaries
+
+- **Read-only.** No `Install-WindowsUpdate`, no `wuauclt /detectnow`,
+  no service mutation, no policy write.
+- **Pinned PowerShell + WUA COM.** Primary authority. Native Go COM
+  / `go-ole` is intentionally NOT used (binding complexity is too
+  high for the v1 surface).
+- **`Get-HotFix` fallback is installed-only.** It does NOT include
+  `Install-Module`, MSI-installed patches, or AppX — never use it as
+  a pending-update substitute. When WUA Search fails, pending
+  updates surface as `pendingSourceUsed="none"` + a typed probe
+  error; do NOT silently report `pendingTotalCount=0`.
+- **Service-state is a typed enum** (`RUNNING|STOPPED|DISABLED|
+  UNKNOWN`). A `*bool` would conflate Stopped vs Disabled and erase
+  the operator action ("re-enable service" vs "start service").
+- **Caps.** `MaxInstalledHotfixes=512`; `MaxPendingUpdates=20`. Pre-
+  truncation counts are surfaced (`installedCount`,
+  `pendingTotalCount`); category rollup (`pendingByCategory`) is
+  surfaced even when the per-item list is capped so the operator
+  sees the full distribution.
+- **Allowlist projection.** Per-hotfix exactly
+  `{kbId, installedOn, description}`. Per-pending-item exactly
+  `{kbIds, primaryCategory, severity}` — v1 deliberately does NOT
+  ship the raw update Title (operator-visible noise + leak vector).
+
+### 16.5 Wire field type contract
+
+- `installedOn` is `*time.Time` (RFC-3339 UTC) — `null` allowed when
+  the source did not provide a parseable date.
+- `kbIds` is `[]string` (empty array permitted when WUA reports no
+  `KBArticleIDs`).
+- `primaryCategory` is one of `SECURITY|DEFINITION|CRITICAL|
+  IMPORTANT|DRIVER|UPDATE_ROLLUP|FEATURE_PACK|SERVICE_PACK|OPTIONAL|
+  TOOLS|UNCATEGORIZED`. Multi-category updates are reduced via
+  deterministic precedence (security > definition > critical >
+  important > driver > rollup > feature pack > service pack >
+  optional > tools > uncategorized).
+- `severity` is one of `CRITICAL|IMPORTANT|MODERATE|LOW|UNSPECIFIED`
+  (MSRC ratings; `UNSPECIFIED` for non-security updates).
+- `wuaServiceState` and `bitsServiceState` are
+  `RUNNING|STOPPED|DISABLED|UNKNOWN`.
+- `autoUpdatePolicyEnabled`/`autoUpdateEffectiveEnabled` are `*bool`
+  — `null` allowed when the registry path is unreadable.
+- `notificationLevel` mirrors the `AUOptions` registry value
+  (`1`/`2`/`3`/`4`); empty string when registry absent.
+
+### 16.6 Probe error codes
+
+```
+UNSUPPORTED_PLATFORM     non-Windows runtime stub
+ACCESS_DENIED            elevation / token missing
+COM_FAILED               Microsoft.Update.Session.* failed
+WSUS_UNREACHABLE         remote WSUS server unreachable
+POWERSHELL_MISSING       powershell.exe not in PATH
+POWERSHELL_TIMEOUT       script exceeded 45s budget
+POWERSHELL_FAILED        non-zero exit / unexpected stderr
+POWERSHELL_EMPTY_OUTPUT  empty stdout (would mask "no data" as success)
+POWERSHELL_PARSE_ERROR   JSON unmarshal failed
+REGISTRY_UNAVAILABLE     WU registry keys absent
+SERVICE_QUERY_FAILED     SCM Get-Service failed
+NO_EVIDENCE              fallback path could not produce a snapshot
+```
+
+A `probeErrors[]` entry flips `probeComplete=false`. Partial paths
+(e.g. installed via Get-HotFix fallback while pending fails on COM)
+still surface what they could collect — the operator can render
+"evidence incomplete; installed-fallback OK; pending unknown".
+
+### 16.7 Source attribution (`sourceUsed`)
+
+Each section attributes the authoritative source it actually queried:
+
+- `installedSourceUsed`: `wua` (QueryHistory primary) | `getHotfix`
+  (PowerShell fallback) | `none` (probe failed before any source).
+- `pendingSourceUsed`: `wua` (Search; no fallback) | `none`.
+- `healthSourceUsed`: composite — typically `service` (SCM) +
+  `registry` (timestamps + AU policy); the dominant authority is
+  reported.
+
+A `getHotfix` installed list with a `none` pending list is a normal
+fail-closed shape that the operator can act on.
+
+### 16.8 Known v1 exclusions
+
+- **Product code / MSI GUID / supersedence chain**: never on wire.
+- **Account name / `InstalledBy` / install client app ID**: never
+  on wire.
+- **Raw update Title in pending items**: deliberately omitted in v1
+  (the `kbIds` correlation handle plus `primaryCategory`+`severity`
+  classification is enough for posture rendering).
+- **Driver-only hotfixes**: included if the category resolves to
+  `DRIVER`; AG-037 does NOT filter them out.
+- **Hot-patch (Hotpatch) update support**: out of scope; tracked
+  separately.
+- **Last reboot for update / pending reboot for update**:
+  cross-references with AG-030 pending-reboot; not duplicated here.
+- **CVE enrichment**: out of scope — backend MAY join `kbId` against
+  a CVE database; the agent does NOT ship CVE metadata.
+
+### 16.9 Backend ingest path (separate slice)
+
+This contract describes the AGENT side. The backend ingest path is
+a separate slice (V22 migration adding `endpoint_hotfix_posture_*`
+tables + `AdminEndpointHotfixPostureController` GET endpoints) that
+will be tracked under its own PR; the agent block above is the
+exact wire shape the backend will need to deserialize.
