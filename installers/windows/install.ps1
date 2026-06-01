@@ -56,7 +56,11 @@ param(
     [string]$BinaryUrl = "__INJECTED_BINARY_URL__",
     [string]$ExpectedSha256 = "__INJECTED_EXPECTED_SHA256__",
     [string]$ExpectedSignerThumbprint = "__INJECTED_EXPECTED_THUMBPRINT__",
-    [ValidateSet("", "lab-only-evidence", "trusted", "__INJECTED_SIGNING_TIER__")]
+    # ValidateSet intentionally NOT used here: the un-patched sentinel
+    # value (`__INJECTED_SIGNING_TIER__`) must be allowed at param-bind
+    # time so the script parses cleanly when sentinels are still in
+    # place. Tier semantics are enforced in the URL-download branch
+    # below via an explicit allowlist (Codex 019e8284 iter-1 Q1).
     [string]$SigningTier = "__INJECTED_SIGNING_TIER__",
     [string]$ReleaseTag = "__INJECTED_RELEASE_TAG__",
     # Explicit opt-in for lab-only-evidence (self-signed ephemeral
@@ -425,20 +429,30 @@ function Invoke-VerifyDownloadedBinary {
             throw "signer thumbprint mismatch: expected $ExpectedThumbprint, got $actualThumb"
         }
 
+        # Codex 019e8284 iter-1 medium #4: explicit Authenticode Status
+        # allowlist per tier, instead of "anything not NotSigned".
+        # `HashMismatch` (binary tampered after signing),
+        # `NotSupportedFileFormat` (corrupt PE), and bare `UnknownError`
+        # would otherwise pass once the thumbprint pin matched, which
+        # masks a broken signature blob.
         switch ($Tier) {
             "lab-only-evidence" {
-                # Lab self-signed cert never chains to a trusted root.
-                # Acceptance is the thumbprint-pin above + explicit
-                # operator opt-in (-AcceptLabOnlySigning), not the
-                # Get-AuthenticodeSignature.Status field. Treat any
-                # non-NotSigned status as parseable.
-                if ($sig.Status -eq "NotSigned") {
-                    throw "signature unreadable (status=NotSigned) — refusing lab-only install"
+                # Lab self-signed cert chains to an ephemeral CA the
+                # runner creates per release; Windows reports it as
+                # `NotTrusted`. `Valid` is the surprise-but-fine case
+                # (operator imported the cert into LocalMachine\Root).
+                # Everything else — HashMismatch, NotSupportedFileFormat,
+                # UnknownError, IncompatibleSignature — is rejected.
+                if ($sig.Status -notin @("NotTrusted", "Valid")) {
+                    throw "lab-only Authenticode status '$($sig.Status)' rejected (expected NotTrusted or Valid; got $($sig.StatusMessage))"
                 }
             }
             "trusted" {
+                # Trusted tier (Faz 22.2+ Azure Trusted Signing) MUST
+                # chain to a trusted root on the endpoint at install
+                # time. Anything but Valid is rejected.
                 if ($sig.Status -ne "Valid") {
-                    throw "trusted-signing tier requires Authenticode Status=Valid (got $($sig.Status))"
+                    throw "trusted-signing tier requires Authenticode Status=Valid (got $($sig.Status): $($sig.StatusMessage))"
                 }
             }
             default {

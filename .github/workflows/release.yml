@@ -110,16 +110,53 @@ jobs:
       sha256: ${{ steps.sign-and-hash.outputs.sha256 }}
       thumbprint: ${{ steps.sign-and-hash.outputs.thumbprint }}
     steps:
-      - name: Checkout
+      - name: Checkout (resolved tag)
+        # Codex 019e8284 iter-1 high #1: workflow_dispatch passes a tag
+        # input but the default checkout is the workflow ref. Resolve to
+        # the classified tag so the binary we sign is the one operators
+        # asked for. The post-checkout guard double-checks HEAD is the
+        # tag's commit before any build runs.
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # tag annotation reachable for RELEASE_NOTES
+          ref: ${{ needs.classify-release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify checkout is on classified tag
+        shell: bash
+        env:
+          TAG: ${{ needs.classify-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD)
+          expected=$(git rev-list -n1 "$TAG")
+          if [ "$head" != "$expected" ]; then
+            echo "::error::HEAD ($head) is not the tag commit ($expected) for $TAG"
+            exit 1
+          fi
+          echo "checkout verified — HEAD=$head matches tag=$TAG"
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+
+      - name: Go test (pre-release regression)
+        # Codex 019e8284 iter-1 medium #5: do not publish a release whose
+        # tests fail. Cheap pre-build gate.
+        shell: pwsh
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go test ./...
+          if ($LASTEXITCODE -ne 0) { throw "go test failed" }
+
+      - name: Prepare dist directory
+        # Codex 019e8284 iter-1 high #2: `go build -o dist/...` fails on
+        # a fresh runner if dist/ does not exist yet.
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
 
       - name: Build Windows amd64 binary
         shell: pwsh
@@ -155,8 +192,24 @@ jobs:
               -NotAfter (Get-Date).AddDays(30)
           $thumb = $cert.Thumbprint
 
-          $signtool = Get-Command signtool.exe -ErrorAction Stop
-          & $signtool.Source sign `
+          # Codex 019e8284 iter-1 high #3: `Get-Command signtool.exe` is
+          # unreliable on windows-2022 runners (PATH does not include the
+          # Windows SDK by default). Reuse the dynamic glob pattern
+          # already established in ci-build-test.yml.
+          $sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          if (-not (Test-Path $sdkRoot)) {
+            throw "Windows SDK root not found: $sdkRoot"
+          }
+          $signtool = Get-ChildItem -Path $sdkRoot -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue `
+            | Where-Object { $_.FullName -match '\\x64\\' -and $_.FullName -notmatch 'arm' } `
+            | Sort-Object FullName -Descending `
+            | Select-Object -First 1
+          if (-not $signtool) {
+            Write-Host "Available SDK contents:"
+            Get-ChildItem -Path $sdkRoot -Directory | ForEach-Object { Write-Host "  $($_.Name)" }
+            throw "signtool.exe not found via glob in $sdkRoot"
+          }
+          & $signtool.FullName sign `
               /sha1 $thumb /fd SHA256 /td SHA256 `
               /tr "http://timestamp.digicert.com" `
               dist/endpoint-agent.exe
@@ -169,8 +222,15 @@ jobs:
           # mutates the PE timestamp/signature blob.
           $hash = (Get-FileHash -Algorithm SHA256 dist/endpoint-agent.exe).Hash
           $sig  = Get-AuthenticodeSignature dist/endpoint-agent.exe
-          if ($sig.Status -eq "NotSigned") {
-            throw "post-sign verify failed: signature unreadable"
+          # Codex 019e8284 iter-1 medium #4 (release side): the runner
+          # JUST imported the ephemeral self-signed cert into
+          # CurrentUser\My, so the chain validates locally → Status=Valid
+          # is the only acceptable post-sign outcome here. Anything else
+          # — NotSigned, HashMismatch, NotTrusted, UnknownError — means
+          # the signtool step produced an unreadable signature or the
+          # cert chain broke; refuse to publish.
+          if ($sig.Status -ne "Valid") {
+            throw "post-sign Authenticode status '$($sig.Status)' rejected (expected Valid; got $($sig.StatusMessage))"
           }
 
           "sha256=$hash" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
@@ -197,6 +257,28 @@ jobs:
               -SigningTier $env:TIER `
               -ReleaseTag $env:TAG
           Copy-Item installers/windows/uninstall.ps1 dist/uninstall.ps1
+
+      - name: Validate patched install.ps1 parses cleanly
+        # Codex 019e8284 iter-1 medium #5: a bad sentinel substitution
+        # (e.g. an unescaped quote, an extra `__INJECTED_*__` left
+        # behind, or a ValidateSet mismatch) would publish a broken
+        # script and bake the failure into the release. Parse the
+        # patched copy with PowerShell's own AST tokenizer + a
+        # post-patch sentinel sweep before any asset is uploaded.
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              "dist/install.ps1", [ref]$null, [ref]$errors)
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            throw "patched install.ps1 has $($errors.Count) parse error(s)"
+          }
+          $content = Get-Content -Raw -LiteralPath "dist/install.ps1"
+          if ($content -match '__INJECTED_[A-Z_]+__') {
+            throw "patched install.ps1 still contains a `__INJECTED_*__` sentinel"
+          }
+          Write-Host "patched install.ps1 parses cleanly; no leftover sentinels"
 
       - name: SHA256SUMS + release-manifest.json
         shell: pwsh
