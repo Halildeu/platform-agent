@@ -8,21 +8,32 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
-	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
+// probeAggregate is the channel payload from the SCM/registry worker.
+type probeAggregate struct {
+	entries     []ServiceEntry
+	probeErrors []ServicesProbeError
+}
+
 // ProbeServices is the Windows SCM + registry implementation. Codex
 // 019e8302 iter-2 implementation note absorb: no PowerShell — direct
-// `svc/mgr` SCM enumeration + `HKLM\SYSTEM\CurrentControlSet\Services\
-// <name>\DelayedAutoStart` registry read for AUTO_DELAYED disambiguation.
+// `svc/mgr` SCM enumeration + `mgr.Config.DelayedAutoStart` field for
+// AUTO_DELAYED disambiguation (Codex iter-4 non-blocker absorb:
+// registry-read fallback secondary, primary uses the Win32
+// SERVICE_DELAYED_AUTO_START_INFO field already surfaced by x/sys/windows/svc/mgr).
 //
-// Codex 019e8302 iter-3 P1 #3 absorb: ProbeServices owns its own
-// ServicesProbeTimeout bounded context so SCM enumeration cannot block
-// the heartbeat / inventory loop beyond the contract. Caller deadlines
-// still narrow the effective deadline via context.WithTimeout
-// propagation.
+// Codex 019e8302 iter-3 P1 #3 + iter-4 P1 absorb: ProbeServices owns
+// its own ServicesProbeTimeout bounded context AND runs the blocking
+// SCM/registry work in a background goroutine so the contract is
+// actually enforced (Win32 svc.mgr / OpenService / Config / Query
+// calls do NOT accept context). A timeout-fired result returns
+// supported=true + empty services + NO_EVIDENCE probe error +
+// probeComplete=false. The orphan goroutine is allowed to drain its
+// own SCM work and exit naturally; we never hold references that
+// would leak.
 func ProbeServices(ctx context.Context, now func() time.Time) ServicesResult {
 	if now == nil {
 		now = time.Now
@@ -33,9 +44,40 @@ func ProbeServices(ctx context.Context, now func() time.Time) ServicesResult {
 	probeCtx, cancel := context.WithTimeout(ctx, ServicesProbeTimeout)
 	defer cancel()
 
-	var probeErrors []ServicesProbeError
-	entries := make([]ServiceEntry, 0, len(CanonicalServiceAllowlist))
+	done := make(chan probeAggregate, 1)
+	go func() {
+		done <- runServicesProbeBlocking()
+	}()
 
+	select {
+	case agg := <-done:
+		return orchestrateServicesProbe(
+			probeCtx, now, true, agg.entries, agg.probeErrors, startedAt,
+		)
+	case <-probeCtx.Done():
+		// Timeout / caller cancel — Codex iter-4 P1 absorb: the worker
+		// may still be blocked in mgr.Connect()/OpenService(); we
+		// abandon it (goroutine drains itself) and return fail-closed
+		// no-evidence shape rather than waiting indefinitely.
+		return orchestrateServicesProbe(
+			probeCtx, now, true,
+			[]ServiceEntry{},
+			[]ServicesProbeError{{
+				Code:    ServicesErrNoEvidence,
+				Summary: "Service probe deadline exceeded",
+			}},
+			startedAt,
+		)
+	}
+}
+
+// runServicesProbeBlocking is the synchronous SCM/registry enumeration
+// body. Returns the (entries, probeErrors) aggregate so the caller can
+// flow it through the deterministic post-projection. The Windows SCM
+// API does NOT accept a context.Context, so this function blocks
+// natively — the timeout is enforced at the ProbeServices select
+// boundary above (Codex iter-4 P1 absorb).
+func runServicesProbeBlocking() probeAggregate {
 	scmManager, err := mgr.Connect()
 	if err != nil {
 		// SCM unreachable globally — entire probe fails closed.
@@ -43,41 +85,26 @@ func ProbeServices(ctx context.Context, now func() time.Time) ServicesResult {
 		// service (would imply "services exist but query failed");
 		// emit empty services + SCM_UNAVAILABLE error so the consumer
 		// sees the global failure shape.
-		return orchestrateServicesProbe(
-			probeCtx,
-			now,
-			true, // supported (Windows present), probe incomplete
-			[]ServiceEntry{},
-			[]ServicesProbeError{{
+		return probeAggregate{
+			entries: []ServiceEntry{},
+			probeErrors: []ServicesProbeError{{
 				Code:    ServicesErrSCMUnavailable,
 				Summary: "Service Control Manager connection failed",
 			}},
-			startedAt,
-		)
+		}
 	}
 	defer scmManager.Disconnect()
 
+	entries := make([]ServiceEntry, 0, len(CanonicalServiceAllowlist))
+	var probeErrors []ServicesProbeError
 	for _, name := range CanonicalServiceAllowlist {
-		select {
-		case <-probeCtx.Done():
-			probeErrors = append(probeErrors, ServicesProbeError{
-				Code:        ServicesErrNoEvidence,
-				ServiceName: name,
-				Summary:     "Probe deadline exceeded mid-enumeration",
-			})
-			continue
-		default:
-		}
 		entry, perServiceErr := probeOneService(scmManager, name)
 		if perServiceErr != nil {
 			probeErrors = append(probeErrors, *perServiceErr)
 		}
 		entries = append(entries, entry)
 	}
-
-	return orchestrateServicesProbe(
-		probeCtx, now, true, entries, probeErrors, startedAt,
-	)
+	return probeAggregate{entries: entries, probeErrors: probeErrors}
 }
 
 // probeOneService reads the SCM service config + registry DelayedAutoStart
@@ -121,6 +148,13 @@ func probeOneService(
 	// Codex 019e8302 iter-3 P1 #2 absorb: config + query errors emit
 	// SERVICE_QUERY_FAILED probe error AND leave UNKNOWN values, so
 	// ProbeComplete fails closed instead of false-true.
+	//
+	// Codex iter-4 non-blocker absorb: mgr.Config.DelayedAutoStart
+	// is the authoritative SERVICE_DELAYED_AUTO_START_INFO field
+	// from the Win32 SCM API. We pass it directly to mapStartupMode
+	// rather than reading the HKLM\...\<name>\DelayedAutoStart
+	// registry key (which can be unreadable even when SCM has the
+	// flag set, leading to a false AUTO instead of AUTO_DELAYED).
 	var emitErr *ServicesProbeError
 	config, configErr := service.Config()
 	if configErr != nil {
@@ -131,7 +165,7 @@ func probeOneService(
 			Summary:     "Service config read failed",
 		}
 	} else {
-		entry.StartupMode = mapStartupMode(name, config.StartType)
+		entry.StartupMode = mapStartupMode(config.StartType, config.DelayedAutoStart)
 	}
 
 	// Runtime state.
@@ -169,16 +203,21 @@ func mapServiceState(state svc.State) ServiceState {
 	}
 }
 
-// mapStartupMode reads SCM StartType + (when StartType==AUTO) the
-// registry DelayedAutoStart flag to disambiguate AUTO vs AUTO_DELAYED.
-// Codex 019e8302 iter-2 #3 absorb:
-//   - StartType=2 (SERVICE_AUTO_START) + DelayedAutoStart=1 → AUTO_DELAYED
-//   - StartType=2 + DelayedAutoStart=0 or absent → AUTO
+// mapStartupMode maps SCM StartType + DelayedAutoStart to the wire
+// enum. Codex 019e8302 iter-2 #3 + iter-4 non-blocker absorb:
+//   - StartType=2 (SERVICE_AUTO_START) + DelayedAutoStart=true → AUTO_DELAYED
+//   - StartType=2 + DelayedAutoStart=false → AUTO
 //   - StartType=3 → MANUAL; 4 → DISABLED; other → UNKNOWN
-func mapStartupMode(serviceName string, startType uint32) StartupMode {
+//
+// DelayedAutoStart is the authoritative Win32
+// SERVICE_DELAYED_AUTO_START_INFO field surfaced by mgr.Config;
+// reading the HKLM\...\DelayedAutoStart registry key would be a
+// secondary fallback and can disagree with SCM (registry-unreadable
+// would falsely report AUTO).
+func mapStartupMode(startType uint32, delayedAutoStart bool) StartupMode {
 	switch startType {
 	case uint32(mgr.StartAutomatic):
-		if isDelayedAutoStart(serviceName) {
+		if delayedAutoStart {
 			return StartupModeAutoDelayed
 		}
 		return StartupModeAuto
@@ -189,24 +228,6 @@ func mapStartupMode(serviceName string, startType uint32) StartupMode {
 	default:
 		return StartupModeUnknown
 	}
-}
-
-// isDelayedAutoStart reads HKLM\SYSTEM\CurrentControlSet\Services\<name>\
-// DelayedAutoStart. Absent / unreadable / 0 → false; 1 → true. Per
-// Microsoft service convention.
-func isDelayedAutoStart(serviceName string) bool {
-	keyPath := `SYSTEM\CurrentControlSet\Services\` + serviceName
-	k, err := registry.OpenKey(registry.LOCAL_MACHINE, keyPath, registry.QUERY_VALUE)
-	if err != nil {
-		return false
-	}
-	defer k.Close()
-	val, _, err := k.GetIntegerValue("DelayedAutoStart")
-	if err != nil {
-		// ERROR_FILE_NOT_FOUND → DelayedAutoStart absent → not delayed.
-		return false
-	}
-	return val == 1
 }
 
 // isServiceNotFound reports whether the OpenService error is the well-
