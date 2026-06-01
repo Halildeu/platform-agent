@@ -1,0 +1,445 @@
+# Faz 22.1.0 release foundation (Codex 019e8284 PARTIAL→AGREE plan).
+#
+# Tag-driven release pipeline that produces a one-line-install GitHub
+# Release for the Windows endpoint agent. Faz 22.1 stays on lab-only
+# ephemeral signing (per ADR-0012-EA §22.1 Lab); the trusted-signing tier
+# is gated to `v*.*.*` (no `-lab.N` suffix) and stays parked until Faz
+# 22.2 Azure Trusted Signing is wired up.
+#
+# Tag conventions:
+#   v0.1.0-lab.1   — Faz 22.1 lab-only-evidence (this PR's target)
+#   v0.1.0         — Faz 22.2 trusted-signing release (parked)
+#
+# What this workflow does NOT do (yet):
+#   - Authenticode trusted signing — Faz 22.2 via Azure Trusted Signing
+#   - MSI packaging — out of scope for the one-line PowerShell install
+#   - cosign manifest signing — covered by gate-sbom.yml at PR time
+#
+# Outputs (per release):
+#   - endpoint-agent.exe    : signed Windows amd64 binary
+#   - install.ps1           : patched copy with embedded release manifest
+#   - uninstall.ps1         : unchanged copy from installers/windows/
+#   - SHA256SUMS            : post-sign hashes (audit secondary evidence)
+#   - release-manifest.json : machine-readable release contract
+#   - RELEASE_NOTES.md      : auto-generated from tag annotation
+#
+# Tracked-by: platform-k8s-gitops Faz 22.5 §3 — agent distribution.
+
+name: Release (Faz 22.1 lab / 22.2 trusted)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'v*.*.*-lab.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must already exist as a git tag)"
+        required: true
+        type: string
+
+permissions:
+  # Codex 019e8284 iter-2 medium #3: principle-of-least-privilege per
+  # job. Workflow default is read-only; only the `publish` job below
+  # opts in to `contents: write` (needed for `gh release create`). The
+  # `id-token: write` line that 22.2 Azure Trusted Signing will need is
+  # NOT granted yet — it's added by the 22.2 PR alongside the OIDC
+  # signing job, not held idle here.
+  contents: read
+
+env:
+  GO_VERSION: "1.25.0"
+
+jobs:
+  # =========================================================================
+  # Job 1: classify the tag, decide the signing tier + prerelease flag,
+  # block trusted-signing tier until Faz 22.2 lands.
+  # =========================================================================
+  classify-release:
+    name: Classify tag → signing tier
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.classify.outputs.tag }}
+      signing_tier: ${{ steps.classify.outputs.signing_tier }}
+      prerelease: ${{ steps.classify.outputs.prerelease }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-lab\.[0-9]+)?$'; then
+            echo "::error::tag '$TAG' does not match v*.*.* or v*.*.*-lab.N"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Classify
+        id: classify
+        run: |
+          TAG='${{ steps.tag.outputs.tag }}'
+          if printf '%s' "$TAG" | grep -Eq -- '-lab\.[0-9]+$'; then
+            TIER="lab-only-evidence"
+            PRE="true"
+          else
+            TIER="trusted"
+            PRE="false"
+          fi
+          if [ "$TIER" = "trusted" ]; then
+            # Faz 22.1 boundary guard — do NOT publish a "trusted"
+            # release until Azure Trusted Signing OIDC is wired up
+            # (separate PR, Faz 22.2). The lab branch can still ship.
+            echo "::error::trusted-signing tier is parked until Faz 22.2 — use a -lab.N tag for now"
+            exit 1
+          fi
+          echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
+          echo "signing_tier=$TIER" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE"    >> "$GITHUB_OUTPUT"
+          echo "Classified $TAG as tier=$TIER prerelease=$PRE"
+
+  # =========================================================================
+  # Job 2: Windows amd64 build + ephemeral lab signing + post-sign hash
+  # + install.ps1 patch + SHA256SUMS + release-manifest.json.
+  # Windows runner is required for signtool + Get-AuthenticodeSignature.
+  # =========================================================================
+  build-and-sign:
+    name: Windows build + lab sign + manifest patch
+    needs: classify-release
+    runs-on: windows-2022
+    timeout-minutes: 30
+    outputs:
+      sha256: ${{ steps.sign-and-hash.outputs.sha256 }}
+      thumbprint: ${{ steps.sign-and-hash.outputs.thumbprint }}
+    steps:
+      - name: Checkout (resolved tag)
+        # Codex 019e8284 iter-1 high #1: workflow_dispatch passes a tag
+        # input but the default checkout is the workflow ref. Resolve to
+        # the classified tag so the binary we sign is the one operators
+        # asked for. The post-checkout guard double-checks HEAD is the
+        # tag's commit before any build runs.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.classify-release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify checkout is on classified tag
+        shell: bash
+        env:
+          TAG: ${{ needs.classify-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD)
+          expected=$(git rev-list -n1 "$TAG")
+          if [ "$head" != "$expected" ]; then
+            echo "::error::HEAD ($head) is not the tag commit ($expected) for $TAG"
+            exit 1
+          fi
+          echo "checkout verified — HEAD=$head matches tag=$TAG"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Go test (pre-release regression)
+        # Codex 019e8284 iter-1 medium #5: do not publish a release whose
+        # tests fail. Cheap pre-build gate.
+        shell: pwsh
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go test ./...
+          if ($LASTEXITCODE -ne 0) { throw "go test failed" }
+
+      - name: Prepare dist directory
+        # Codex 019e8284 iter-1 high #2: `go build -o dist/...` fails on
+        # a fresh runner if dist/ does not exist yet.
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+
+      - name: Build Windows amd64 binary
+        shell: pwsh
+        env:
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: amd64
+          TAG: ${{ needs.classify-release.outputs.tag }}
+        run: |
+          $LDFLAGS = "-s -w -X platform-agent/internal/config.BuildVersion=$env:TAG"
+          go build -trimpath -ldflags "$LDFLAGS" `
+              -o dist/endpoint-agent.exe ./cmd/endpoint-agent
+          if (-not (Test-Path dist/endpoint-agent.exe)) {
+            throw "build did not produce dist/endpoint-agent.exe"
+          }
+
+      - name: Sign with ephemeral lab cert + post-sign hash
+        id: sign-and-hash
+        shell: pwsh
+        env:
+          TAG: ${{ needs.classify-release.outputs.tag }}
+        run: |
+          # Faz 22.1 invariant — ephemeral self-signed cert per release.
+          # Pattern reused from ci-build-test.yml; the cert never leaves
+          # this runner and the public thumbprint becomes the embedded
+          # pin in install.ps1.
+          $cert = New-SelfSignedCertificate `
+              -Subject "CN=platform-agent lab-only-evidence $env:TAG" `
+              -CertStoreLocation Cert:\CurrentUser\My `
+              -Type CodeSigningCert `
+              -KeyUsage DigitalSignature `
+              -KeyAlgorithm RSA -KeyLength 2048 `
+              -NotAfter (Get-Date).AddDays(30)
+          $thumb = $cert.Thumbprint
+
+          # Codex 019e8284 iter-1 high #3: `Get-Command signtool.exe` is
+          # unreliable on windows-2022 runners (PATH does not include the
+          # Windows SDK by default). Reuse the dynamic glob pattern
+          # already established in ci-build-test.yml.
+          $sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          if (-not (Test-Path $sdkRoot)) {
+            throw "Windows SDK root not found: $sdkRoot"
+          }
+          $signtool = Get-ChildItem -Path $sdkRoot -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue `
+            | Where-Object { $_.FullName -match '\\x64\\' -and $_.FullName -notmatch 'arm' } `
+            | Sort-Object FullName -Descending `
+            | Select-Object -First 1
+          if (-not $signtool) {
+            Write-Host "Available SDK contents:"
+            Get-ChildItem -Path $sdkRoot -Directory | ForEach-Object { Write-Host "  $($_.Name)" }
+            throw "signtool.exe not found via glob in $sdkRoot"
+          }
+          & $signtool.FullName sign `
+              /sha1 $thumb /fd SHA256 /td SHA256 `
+              /tr "http://timestamp.digicert.com" `
+              dist/endpoint-agent.exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "signtool sign failed (exit $LASTEXITCODE)"
+          }
+
+          # Post-sign hash (Codex 019e8284 must_fix #3): SHA256SUMS and
+          # the embedded ExpectedSha256 MUST be computed AFTER signtool
+          # mutates the PE timestamp/signature blob.
+          $hash = (Get-FileHash -Algorithm SHA256 dist/endpoint-agent.exe).Hash
+          $sig  = Get-AuthenticodeSignature dist/endpoint-agent.exe
+
+          # Codex 019e8284 iter-2 high #1: the ephemeral cert lives in
+          # CurrentUser\My on the runner, which does NOT make it a
+          # trusted root for Authenticode chain validation — `Valid` is
+          # the wrong invariant for lab tier here. Lab post-sign must
+          # mirror the installer's tier-aware allowlist: signer
+          # thumbprint matches AND status is one of the expected
+          # untrusted-but-parseable shapes for an ephemeral self-signed
+          # cert. Trusted tier (Faz 22.2+) still requires Valid.
+          if ($sig.Status -eq "NotSigned") {
+            throw "post-sign verify: signature unreadable (NotSigned). StatusMessage: $($sig.StatusMessage)"
+          }
+          if ($sig.SignerCertificate.Thumbprint -ne $thumb) {
+            throw "post-sign verify: signer thumbprint drift (expected $thumb, got $($sig.SignerCertificate.Thumbprint))"
+          }
+
+          $tier = "${{ needs.classify-release.outputs.signing_tier }}"
+          switch ($tier) {
+            "lab-only-evidence" {
+              # Expected for an ephemeral self-signed cert that was
+              # NOT imported into LocalMachine\Root: Windows reports
+              # either `NotTrusted` (most common) or `UnknownError`
+              # with a chain-trust message. We narrow `UnknownError`
+              # by StatusMessage to avoid masking unrelated PE
+              # corruption. `Valid` is also fine — the operator can
+              # have imported the cert manually in some test images.
+              $acceptable = @("NotTrusted","Valid")
+              if ($acceptable -notcontains $sig.Status) {
+                $msg = "$($sig.StatusMessage)"
+                $isTrustRoot = ($sig.Status -eq "UnknownError") -and `
+                    ($msg -match "trust|chain|root|UntrustedRoot")
+                if (-not $isTrustRoot) {
+                  throw "post-sign Authenticode status '$($sig.Status)' rejected for lab tier (expected NotTrusted/Valid; got '$msg')"
+                }
+              }
+            }
+            "trusted" {
+              if ($sig.Status -ne "Valid") {
+                throw "trusted-signing post-sign requires Status=Valid (got '$($sig.Status)': $($sig.StatusMessage))"
+              }
+            }
+            default {
+              throw "unknown signing_tier '$tier' from classify-release job"
+            }
+          }
+
+          "sha256=$hash" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
+          "thumbprint=$thumb" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
+          Write-Host "post-sign sha256 = $hash"
+          Write-Host "signer thumbprint = $thumb"
+
+      - name: Patch installer manifest
+        shell: pwsh
+        env:
+          TAG: ${{ needs.classify-release.outputs.tag }}
+          TIER: ${{ needs.classify-release.outputs.signing_tier }}
+          SHA256: ${{ steps.sign-and-hash.outputs.sha256 }}
+          THUMB: ${{ steps.sign-and-hash.outputs.thumbprint }}
+        run: |
+          $repo = "${{ github.repository }}"
+          $binaryUrl = "https://github.com/$repo/releases/download/$env:TAG/endpoint-agent.exe"
+          pwsh scripts/release/patch-installer-manifest.ps1 `
+              -InputPath installers/windows/install.ps1 `
+              -OutputPath dist/install.ps1 `
+              -BinaryUrl $binaryUrl `
+              -ExpectedSha256 $env:SHA256 `
+              -ExpectedSignerThumbprint $env:THUMB `
+              -SigningTier $env:TIER `
+              -ReleaseTag $env:TAG
+          Copy-Item installers/windows/uninstall.ps1 dist/uninstall.ps1
+
+      - name: Validate patched install.ps1 parses cleanly
+        # Codex 019e8284 iter-1 medium #5: a bad sentinel substitution
+        # (e.g. an unescaped quote, an extra `__INJECTED_*__` left
+        # behind, or a ValidateSet mismatch) would publish a broken
+        # script and bake the failure into the release. Parse the
+        # patched copy with PowerShell's own AST tokenizer + a
+        # post-patch sentinel sweep before any asset is uploaded.
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              "dist/install.ps1", [ref]$null, [ref]$errors)
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            throw "patched install.ps1 has $($errors.Count) parse error(s)"
+          }
+          $content = Get-Content -Raw -LiteralPath "dist/install.ps1"
+          if ($content -match '__INJECTED_[A-Z_]+__') {
+            throw "patched install.ps1 still contains a `__INJECTED_*__` sentinel"
+          }
+          Write-Host "patched install.ps1 parses cleanly; no leftover sentinels"
+
+      - name: SHA256SUMS + release-manifest.json
+        shell: pwsh
+        env:
+          TAG: ${{ needs.classify-release.outputs.tag }}
+          TIER: ${{ needs.classify-release.outputs.signing_tier }}
+          SHA256: ${{ steps.sign-and-hash.outputs.sha256 }}
+          THUMB: ${{ steps.sign-and-hash.outputs.thumbprint }}
+        run: |
+          $assets = @(
+            "endpoint-agent.exe",
+            "install.ps1",
+            "uninstall.ps1"
+          )
+          $sumLines = @()
+          foreach ($a in $assets) {
+            $h = (Get-FileHash -Algorithm SHA256 "dist/$a").Hash.ToLowerInvariant()
+            $sumLines += "$h  $a"
+          }
+          $sumLines -join "`n" | Out-File -Encoding ascii dist/SHA256SUMS
+
+          $manifest = [ordered]@{
+            schema_version = 1
+            release_tag    = $env:TAG
+            signing_tier   = $env:TIER
+            signer_thumbprint = $env:THUMB
+            endpoint_agent_sha256 = $env:SHA256
+            phase = "22.1.0"
+            assets = @(
+              [ordered]@{ name = "endpoint-agent.exe"; sha256 = $env:SHA256 }
+              [ordered]@{ name = "install.ps1";        sha256 = (Get-FileHash -Algorithm SHA256 dist/install.ps1).Hash.ToLowerInvariant() }
+              [ordered]@{ name = "uninstall.ps1";      sha256 = (Get-FileHash -Algorithm SHA256 dist/uninstall.ps1).Hash.ToLowerInvariant() }
+            )
+          }
+          ($manifest | ConvertTo-Json -Depth 6) `
+            | Out-File -Encoding utf8 dist/release-manifest.json
+
+      - name: Emit RELEASE_NOTES.md
+        shell: pwsh
+        env:
+          TAG: ${{ needs.classify-release.outputs.tag }}
+          TIER: ${{ needs.classify-release.outputs.signing_tier }}
+          SHA256: ${{ steps.sign-and-hash.outputs.sha256 }}
+        run: |
+          $notes = @"
+# platform-agent $env:TAG
+
+> **Signing tier**: ``$env:TIER`` — lab-only-evidence releases use an ephemeral self-signed certificate generated on the release runner. They are **not** trusted by Windows out of the box; the install path requires explicit ``-AcceptLabOnlySigning`` opt-in. **Do not install on production endpoints**. Trusted-signing releases (``v*.*.*`` without ``-lab.N``) are parked until Faz 22.2 Azure Trusted Signing.
+
+## One-line lab install
+
+``````powershell
+& ([scriptblock]::Create((iwr -useb "https://github.com/${{ github.repository }}/releases/download/$env:TAG/install.ps1").Content)) ``
+    -ApiUrl "https://api.acik.com" ``
+    -EnrollmentToken `$env:ENROLLMENT_TOKEN ``
+    -AcceptLabOnlySigning ``
+    -Start
+``````
+
+## Artifacts
+
+| Asset | SHA-256 |
+|---|---|
+| ``endpoint-agent.exe`` | ``$env:SHA256`` |
+
+The ``SHA256SUMS`` and ``release-manifest.json`` assets carry the full set of post-sign hashes for audit. The installer itself embeds the same ``ExpectedSha256`` and ``ExpectedSignerThumbprint`` as its defaults, so a tampered ``install.ps1`` cannot point the operator at a different binary without the operator overriding the values on the command line.
+
+Tracked-by: platform-k8s-gitops Faz 22.5 §3 — agent distribution.
+"@
+          $notes | Out-File -Encoding utf8 dist/RELEASE_NOTES.md
+
+      - name: Upload release dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+          retention-days: 30
+
+  # =========================================================================
+  # Job 3: publish the GitHub Release. Separated from build-and-sign so the
+  # signing runner does not need contents:write at the OS layer.
+  # =========================================================================
+  publish:
+    name: Publish GitHub Release
+    needs: [classify-release, build-and-sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Codex 019e8284 iter-2 medium #3: only the publish job actually
+    # mutates the repo (creates the GitHub Release + uploads assets).
+    # Build + sign run with the workflow default (contents: read).
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (for repo path only)
+        uses: actions/checkout@v4
+
+      - name: Download release dist
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.classify-release.outputs.tag }}
+          PRE: ${{ needs.classify-release.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          PRE_FLAG=""
+          if [ "$PRE" = "true" ]; then PRE_FLAG="--prerelease"; fi
+          # --verify-tag refuses to overwrite an existing release on the
+          # same tag — re-publish is a deliberate operator action, not a
+          # silent CI overwrite. (Codex 019e8284 must_fix-adjacent
+          # guardrail.)
+          gh release create "$TAG" $PRE_FLAG \
+              --verify-tag \
+              --title "platform-agent $TAG" \
+              --notes-file dist/RELEASE_NOTES.md \
+              dist/endpoint-agent.exe \
+              dist/install.ps1 \
+              dist/uninstall.ps1 \
+              dist/SHA256SUMS \
+              dist/release-manifest.json

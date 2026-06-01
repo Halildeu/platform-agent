@@ -6,6 +6,40 @@
 > **License**: Apache License 2.0 (bkz `LICENSE`).
 > **Status**: Faz 22.1 Lab tier hazirligi. Detaylar `docs/TRACKING-ROADMAP.md`.
 
+## Lab kurulum — tek satır (Faz 22.1 lab-only-evidence)
+
+> Bu kanal **sadece lab** içindir: agent binary, release runner'da her tag için yeni bir self-signed `lab-only-evidence` cert ile imzalanır, Windows out-of-the-box trust etmez. Production endpoint'ine kurmayın. Trusted-signing release (Azure Trusted Signing) **Faz 22.2** ile gelir; o tarihe kadar `v*.*.*` (lab suffix'siz) tag'leri `release.yml` reddeder.
+
+Explicit lab tag (`v0.1.0-lab.1`) ile kur (`/releases/latest/download/...` 22.2 stable kanalına ayrıldı, prerelease lab'i hedef almaz):
+
+```powershell
+# Token komut satırına literal yazılmaz; ortam değişkeni tercih edilir.
+$env:ENROLLMENT_TOKEN = "..."
+
+& ([scriptblock]::Create(
+    (iwr -useb "https://github.com/Halildeu/platform-agent/releases/download/v0.1.0-lab.1/install.ps1").Content
+)) `
+    -ApiUrl "https://api.acik.com" `
+    -EnrollmentToken $env:ENROLLMENT_TOKEN `
+    -AcceptLabOnlySigning `
+    -Start
+```
+
+Ne yapar:
+
+1. Release asset'inden `install.ps1`'i çeker. Script, `release.yml` tarafından patch'lenmiş `BinaryUrl` + `ExpectedSha256` + `ExpectedSignerThumbprint` + `SigningTier` defaultları taşır (her `__INJECTED_*__` sentinel release-time'da gerçek değerle değiştirildi; un-patched script tek başına çalışmaz).
+2. `endpoint-agent.exe`'yi indirir, SHA-256 ve Authenticode signer thumbprint'i embedded defaults ile karşılaştırır. Mismatch → temp dosya silinir + abort.
+3. Lab guardrail: `-AcceptLabOnlySigning` yoksa, **veya** makine domain-joined (varsayılan davranış) ise abort. Parallels VM veya workgroup makinelerde `-AllowLabOnDomainJoined` ile override edilebilir (lab kendisi domain'de ise).
+4. Mevcut `installers/windows/install.ps1` Windows servis + DPAPI + tamper-protection akışı (PR #20-#33 chain) binary'yi `Program Files\EndpointAgent\` altına kurar, servisi oluşturur ve `-Start` ile başlatır.
+
+Yerel binary (release artifact'sız, hand-test/dev) — geri uyumlu:
+
+```powershell
+.\install.ps1 -BinaryPath .\endpoint-agent.exe -ApiUrl "..." -EnrollmentToken "..." -Start
+```
+
+Pipeline + signing tier detayı: `.github/workflows/release.yml`, `scripts/release/patch-installer-manifest.ps1`. Tier kararları: `docs/adr/0012-EA-endpoint-admin-governance-charter.md` §22.1 Lab / §22.2 IT-owned pilot.
+
 Ana platform yerlesimi (4-component, 4 repo — `Halildeu/platform-k8s-gitops` `docs/adr/0012-EA-endpoint-admin-governance-charter.md`):
 
 ```text

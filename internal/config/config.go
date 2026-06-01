@@ -59,11 +59,25 @@ type Config struct {
 	AutoEnrollCertSANURIPrefix string
 }
 
+// BuildVersion is overridden at build time via
+// `-ldflags "-X platform-agent/internal/config.BuildVersion=v0.1.0-lab.1"`
+// by the release workflow. Working-tree builds keep the "dev" sentinel
+// so the env override path (ENDPOINT_AGENT_VERSION) still wins for
+// hand-testing. (Codex 019e8284 must_fix: build-time var + env override.)
+var BuildVersion = "dev"
+
+func defaultAgentVersion() string {
+	if BuildVersion != "" && BuildVersion != "dev" {
+		return BuildVersion
+	}
+	return "0.1.0-dev"
+}
+
 func Default() Config {
 	return Config{
 		AgentName:              "endpoint-agent",
 		APIURL:                 "https://localhost/api/v1/endpoint-agent",
-		AgentVersion:           "0.1.0-dev",
+		AgentVersion:           defaultAgentVersion(),
 		HeartbeatInterval:      60 * time.Second,
 		CommandPollInterval:    30 * time.Second,
 		InventoryInterval:      60 * time.Minute,

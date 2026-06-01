@@ -26,7 +26,55 @@ param(
     [string]$ServiceSddl = "D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;AU)",
     [switch]$Start,
     [switch]$Force,
-    [switch]$DisableTamperProtection
+    [switch]$DisableTamperProtection,
+    # ------------------------------------------------------------------
+    # Faz 22.1.0 release-foundation (Codex 019e8284 PARTIAL→AGREE plan):
+    # URL-download path lets one PowerShell command fetch the agent
+    # binary straight from a GitHub Release. When -BinaryUrl is set the
+    # local -BinaryPath default is ignored; the binary is downloaded to
+    # a temp file, SHA256-verified against -ExpectedSha256, signature-
+    # checked against -ExpectedSignerThumbprint, and only then becomes
+    # $sourceBinary for the existing install flow below.
+    #
+    # The four "__INJECTED_*__" defaults are PATCHED at release-publish
+    # time by `.github/workflows/release.yml` + `scripts/release/
+    # patch-installer-manifest.ps1`. When this script ships UN-patched
+    # (working tree, ad-hoc download, non-release artifact) the
+    # defaults stay literal sentinel strings — the URL path refuses to
+    # run unless every field is overridden on the command line. The
+    # original local -BinaryPath workflow is unchanged.
+    #
+    # Why not just trust /releases/latest/download/install.ps1 + a
+    # SHA256SUMS fetch: explicit-tag URL is the only way to pin a
+    # Faz 22.1 prerelease deterministically (GitHub `latest` skips
+    # prereleases), and embedding the post-sign hash + signer
+    # thumbprint into the script itself eliminates an extra network
+    # round-trip on every install while keeping the trust chain
+    # release-workflow-controlled. SHA256SUMS still ships as a
+    # secondary evidence artifact for audit.
+    # ------------------------------------------------------------------
+    [string]$BinaryUrl = "__INJECTED_BINARY_URL__",
+    [string]$ExpectedSha256 = "__INJECTED_EXPECTED_SHA256__",
+    [string]$ExpectedSignerThumbprint = "__INJECTED_EXPECTED_THUMBPRINT__",
+    # ValidateSet intentionally NOT used here: the un-patched sentinel
+    # value (`__INJECTED_SIGNING_TIER__`) must be allowed at param-bind
+    # time so the script parses cleanly when sentinels are still in
+    # place. Tier semantics are enforced in the URL-download branch
+    # below via an explicit allowlist (Codex 019e8284 iter-1 Q1).
+    [string]$SigningTier = "__INJECTED_SIGNING_TIER__",
+    [string]$ReleaseTag = "__INJECTED_RELEASE_TAG__",
+    # Explicit opt-in for lab-only-evidence (self-signed ephemeral
+    # cert) binaries. Without this switch a SigningTier=lab-only-
+    # evidence release ABORTs the install: the README primary command
+    # must not silently install an ephemeral-signed binary on an
+    # unprepared endpoint. (Codex 019e8284 must_fix #1.)
+    [switch]$AcceptLabOnlySigning,
+    # Tighten the lab boundary: by default lab-only-evidence signing
+    # is REFUSED on domain-joined machines (the most common production
+    # environment). Parallels VMs and workgroup machines are the
+    # explicit lab target. Override only when the lab itself is
+    # domain-joined.
+    [switch]$AllowLabOnDomainJoined
 )
 
 Set-StrictMode -Version Latest
@@ -330,6 +378,158 @@ function Remove-ServiceBestEffort {
 }
 
 Assert-Administrator
+
+# ----------------------------------------------------------------------
+# Faz 22.1.0 release-foundation — URL download + signature verify
+# (Codex 019e8284 PARTIAL→AGREE plan). Runs ONLY when -BinaryUrl is
+# set to a non-sentinel value (so the local -BinaryPath workflow stays
+# byte-identical when this script ships un-patched or a developer runs
+# from the working tree). Every guardrail is fail-closed: a single
+# mismatch ABORTs before any service or registry mutation.
+# ----------------------------------------------------------------------
+
+$injectedSentinel = "__INJECTED_BINARY_URL__"
+$useUrlDownload = ($BinaryUrl -and $BinaryUrl -ne $injectedSentinel)
+$downloadTempPath = ""
+
+function Get-IsDomainJoined {
+    try {
+        return [bool](Get-CimInstance -ClassName Win32_ComputerSystem `
+            -ErrorAction Stop).PartOfDomain
+    } catch {
+        # If WMI is unreachable, refuse the lab path on this machine
+        # rather than guessing. Operator can pass -AllowLabOnDomainJoined
+        # to explicitly override.
+        return $true
+    }
+}
+
+function Invoke-VerifyDownloadedBinary {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$ExpectedHash,
+        [string]$ExpectedThumbprint,
+        [string]$Tier
+    )
+
+    Write-Step "verifying SHA256 (expected $($ExpectedHash.Substring(0,16))...)"
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    if ($actual -ne $ExpectedHash.ToUpperInvariant()) {
+        throw "SHA256 mismatch: expected $ExpectedHash, got $actual"
+    }
+
+    if ($ExpectedThumbprint) {
+        Write-Step "verifying Authenticode signer thumbprint"
+        $sig = Get-AuthenticodeSignature -LiteralPath $Path
+        if (-not $sig.SignerCertificate) {
+            throw "binary is unsigned (tier=$Tier requires a signature)"
+        }
+        $actualThumb = $sig.SignerCertificate.Thumbprint
+        if ($actualThumb -ne $ExpectedThumbprint.ToUpperInvariant()) {
+            throw "signer thumbprint mismatch: expected $ExpectedThumbprint, got $actualThumb"
+        }
+
+        # Codex 019e8284 iter-1 medium #4: explicit Authenticode Status
+        # allowlist per tier, instead of "anything not NotSigned".
+        # `HashMismatch` (binary tampered after signing),
+        # `NotSupportedFileFormat` (corrupt PE), and bare `UnknownError`
+        # would otherwise pass once the thumbprint pin matched, which
+        # masks a broken signature blob.
+        switch ($Tier) {
+            "lab-only-evidence" {
+                # Lab self-signed cert chains to an ephemeral CA the
+                # runner creates per release. Windows reports the chain
+                # state as one of:
+                #   - NotTrusted        — most common: untrusted root
+                #   - Valid             — operator pre-imported the cert
+                #                         into LocalMachine\Root
+                #   - UnknownError      — some Windows / PowerShell
+                #                         versions surface untrusted-root
+                #                         here instead of NotTrusted;
+                #                         allowed ONLY when the message
+                #                         describes a chain/trust issue.
+                # Everything else (HashMismatch, NotSupportedFileFormat,
+                # IncompatibleSignature, generic UnknownError) is
+                # rejected. (Codex 019e8284 iter-2 medium #2.)
+                $okStatus = @("NotTrusted","Valid") -contains $sig.Status
+                $msg = "$($sig.StatusMessage)"
+                $okUnknownTrustRoot = ($sig.Status -eq "UnknownError") -and `
+                    ($msg -match "trust|chain|root|UntrustedRoot")
+                if (-not ($okStatus -or $okUnknownTrustRoot)) {
+                    throw "lab-only Authenticode status '$($sig.Status)' rejected (expected NotTrusted/Valid; got '$msg')"
+                }
+            }
+            "trusted" {
+                # Trusted tier (Faz 22.2+ Azure Trusted Signing) MUST
+                # chain to a trusted root on the endpoint at install
+                # time. Anything but Valid is rejected.
+                if ($sig.Status -ne "Valid") {
+                    throw "trusted-signing tier requires Authenticode Status=Valid (got $($sig.Status): $($sig.StatusMessage))"
+                }
+            }
+            default {
+                throw "unknown SigningTier '$Tier' — refusing install"
+            }
+        }
+    }
+}
+
+if ($useUrlDownload) {
+    # Reject if any injected field is still a sentinel — this happens
+    # when an unpatched install.ps1 is fetched but -BinaryUrl alone is
+    # passed. We need the full quartet to be either real values or
+    # explicit command-line overrides.
+    foreach ($pair in @(
+        @{Name="ExpectedSha256";           Value=$ExpectedSha256;           Sentinel="__INJECTED_EXPECTED_SHA256__"},
+        @{Name="ExpectedSignerThumbprint"; Value=$ExpectedSignerThumbprint; Sentinel="__INJECTED_EXPECTED_THUMBPRINT__"},
+        @{Name="SigningTier";              Value=$SigningTier;              Sentinel="__INJECTED_SIGNING_TIER__"},
+        @{Name="ReleaseTag";               Value=$ReleaseTag;               Sentinel="__INJECTED_RELEASE_TAG__"}
+    )) {
+        if (-not $pair.Value -or $pair.Value -eq $pair.Sentinel) {
+            throw "-$($pair.Name) is required when -BinaryUrl is set (still at sentinel value)"
+        }
+    }
+
+    # Lab guardrail: require explicit operator opt-in, AND by default
+    # refuse on domain-joined machines.
+    if ($SigningTier -eq "lab-only-evidence") {
+        if (-not $AcceptLabOnlySigning) {
+            throw "release '$ReleaseTag' is lab-only-evidence (self-signed ephemeral cert). Pass -AcceptLabOnlySigning to install. Production endpoints must wait for trusted-signing releases (Faz 22.2+)."
+        }
+        if (-not $AllowLabOnDomainJoined -and (Get-IsDomainJoined)) {
+            throw "release '$ReleaseTag' is lab-only-evidence and this machine is domain-joined. Pass -AllowLabOnDomainJoined to override (lab self-hosted on a domain) or use a workgroup/Parallels lab VM."
+        }
+    }
+
+    $downloadTempPath = Join-Path $env:TEMP ("endpoint-agent-{0}.exe" -f ([System.Guid]::NewGuid().ToString("N")))
+    Write-Step "downloading agent binary from $BinaryUrl"
+    try {
+        $oldProgress = $ProgressPreference
+        $ProgressPreference = "SilentlyContinue"
+        Invoke-WebRequest -Uri $BinaryUrl `
+            -OutFile $downloadTempPath -UseBasicParsing `
+            -MaximumRedirection 5 -ErrorAction Stop
+    } finally {
+        if ($null -ne $oldProgress) { $ProgressPreference = $oldProgress }
+    }
+
+    try {
+        Invoke-VerifyDownloadedBinary `
+            -Path $downloadTempPath `
+            -ExpectedHash $ExpectedSha256 `
+            -ExpectedThumbprint $ExpectedSignerThumbprint `
+            -Tier $SigningTier
+    } catch {
+        # Wipe the unverified file before throwing — never leave a
+        # tampered or mismatched binary on disk for a curious operator
+        # to later double-click.
+        try { Remove-Item -LiteralPath $downloadTempPath -Force -ErrorAction Stop } catch {}
+        throw
+    }
+
+    # The verified download is now the binary the existing flow installs.
+    $BinaryPath = $downloadTempPath
+}
 
 $sourceBinary = Resolve-Path -LiteralPath $BinaryPath -ErrorAction Stop
 $targetBinary = Join-Path $InstallDir "endpoint-agent.exe"
