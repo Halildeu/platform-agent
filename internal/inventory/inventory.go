@@ -114,6 +114,21 @@ type Snapshot struct {
 	// the absence as a failed ingest.
 	Diagnostics *DiagnosticsResult `json:"diagnostics,omitempty"`
 
+	// Services is intentionally nil unless the caller opted into the
+	// AG-039 critical services inventory probe via
+	// CollectOptions.IncludeServices. The JSON tag omitempty hides the
+	// field from the heartbeat / auto-enroll wire payload and from
+	// COLLECT_INVENTORY runs that did not request the probe. On non-
+	// Windows runtimes the probe returns Supported=false +
+	// UNSUPPORTED_PLATFORM. The probe is strictly read-only: SCM
+	// (`x/sys/windows/svc/mgr`) enumerates the v1 service allowlist +
+	// `HKLM\SYSTEM\CurrentControlSet\Services\<name>\DelayedAutoStart`
+	// disambiguates AUTO vs AUTO_DELAYED. NO PowerShell — lower
+	// attack surface. Wire shape per-entry exactly
+	// {name, present, state, startupMode}; redaction boundary in
+	// services.go.
+	Services *ServicesResult `json:"services,omitempty"`
+
 	// HotfixPosture is intentionally nil unless the caller opted into
 	// the AG-037 Windows Update / hotfix posture probe via
 	// CollectOptions.IncludeHotfixPosture. The JSON tag omitempty
@@ -331,6 +346,26 @@ type CollectOptions struct {
 	// codes, NO MSI GUIDs, NO supersedence chains, NO raw update
 	// titles in pending items.
 	IncludeHotfixPosture bool
+
+	// IncludeServices gates the AG-039 critical services inventory
+	// probe. When true, CollectWithOptions invokes ProbeServices (SCM
+	// enumeration of the v1 6-service allowlist + registry read for
+	// DelayedAutoStart on Windows; Supported=false stub on every other
+	// platform) and attaches the result to Snapshot.Services. When false
+	// (the default), the probe is not invoked and the wire payload omits
+	// the field.
+	//
+	// The backend uses true via COLLECT_INVENTORY's includeServices
+	// payload bit when an operational service-state visibility
+	// evaluation is being prepared. Heartbeat / auto-enroll /
+	// lightweight inventory never opt in.
+	//
+	// HARD BOUNDARY: read-only. NO service start/stop/enable/disable,
+	// NO config mutation. Allowlist projection per-entry exactly
+	// {name, present, state, startupMode}. NO raw description,
+	// command line, account, SID, or display name in wire shape. Codex
+	// 019e8302 iter-2 AGREE.
+	IncludeServices bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -402,6 +437,10 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		hp := collectHotfixPostureForSnapshot(now)
 		snapshot.HotfixPosture = &hp
 	}
+	if opts.IncludeServices {
+		sv := collectServicesForSnapshot(now)
+		snapshot.Services = &sv
+	}
 	return snapshot
 }
 
@@ -433,6 +472,15 @@ var collectDiagnosticsForSnapshot = func(_ time.Time) DiagnosticsResult {
 // non-Windows stub behavior without invoking real PowerShell.
 var collectHotfixPostureForSnapshot = func(_ time.Time) HotfixPostureResult {
 	return ProbeHotfixPosture(context.Background(), time.Now)
+}
+
+// collectServicesForSnapshot is the test seam for the AG-039 critical
+// services inventory probe. Production wires the real ProbeServices
+// (SCM + registry on Windows; cross-platform stub elsewhere); tests
+// override it to assert default-omit / opt-in / unsupported-stub
+// behavior without enumerating real SCM services.
+var collectServicesForSnapshot = func(_ time.Time) ServicesResult {
+	return ProbeServices(context.Background(), time.Now)
 }
 
 // collectLocalAdminGroupForSnapshot is the test seam for the
