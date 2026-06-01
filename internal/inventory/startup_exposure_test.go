@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -392,8 +393,14 @@ func TestStartupExposureProbeErrorCodeEnum_AllListed(t *testing.T) {
 
 // TestStartupExposureNonWindowsStub: on non-Windows builds (the test
 // runs on linux CI), ProbeStartupExposure returns supported=false +
-// UNSUPPORTED_PLATFORM.
+// UNSUPPORTED_PLATFORM. On Windows runners this test is skipped — the
+// real probe runs there and the supported=false invariant doesn't
+// apply (see startup_exposure_windows.go for the implementation
+// already exercised by the Windows runner Go test).
 func TestStartupExposureNonWindowsStub(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ProbeStartupExposure is the real Windows implementation here, not the stub — skip")
+	}
 	r := ProbeStartupExposure(context.Background(), func() time.Time {
 		return time.Unix(2000000000, 0)
 	})
