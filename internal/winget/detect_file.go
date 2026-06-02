@@ -131,15 +131,26 @@ func ValidateFileRule(rule DetectionRule) error {
 					ErrFileSha256Empty, c)
 			}
 		}
+		// Codex 019e893a iter-2 P1: MaxHashBytes must NOT exceed the
+		// agent's hard cap. A payload sending a 1 TiB cap would let
+		// the agent stall on attacker-controlled data even if the
+		// backend validator was misconfigured.
+		if rule.MaxHashBytes < 0 {
+			return fmt.Errorf("%w: MaxHashBytes must be >= 0", ErrFileSha256Empty)
+		}
+		if rule.MaxHashBytes > FileMaxHashBytes {
+			return fmt.Errorf("%w: MaxHashBytes %d exceeds agent hard cap %d",
+				ErrFileSha256Empty, rule.MaxHashBytes, FileMaxHashBytes)
+		}
 		return nil
 	case DetectionRuleTypeFileVersion:
 		if rule.VersionPredicate == nil {
 			return fmt.Errorf("%w: FILE_VERSION rule missing VersionPredicate",
 				ErrFilePathInvalid)
 		}
-		// VersionPredicate.Spec validation reuses the WinGet predicate
-		// contract — empty allowed for LATEST, required for EXACT/MIN/RANGE.
-		// FileVersionField defaults to FileVersion when empty.
+		if err := validateVersionPredicateForFileVersion(*rule.VersionPredicate); err != nil {
+			return err
+		}
 		if rule.FileVersionField != "" &&
 			rule.FileVersionField != FileVersionFieldFileVersion &&
 			rule.FileVersionField != FileVersionFieldProductVersion {
@@ -153,12 +164,60 @@ func ValidateFileRule(rule DetectionRule) error {
 	}
 }
 
+// validateVersionPredicateForFileVersion enforces the predicate shape
+// expected by FILE_VERSION rules. Codex 019e893a iter-2 P1: empty
+// VersionPredicate.Spec is allowed only for LATEST / empty Type;
+// EXACT and MINIMUM require a non-empty Spec; RANGE requires the
+// canonical `[a,b]` / `(a,b)` / `[a,)` / `(,b]` syntax; unknown Type
+// is rejected fail-closed (so backend C2 validator gap can't ship a
+// malformed predicate that downgrades to silent false).
+func validateVersionPredicateForFileVersion(p VersionPredicate) error {
+	switch p.Type {
+	case "", VersionPredicateLatest:
+		return nil
+	case VersionPredicateExact, VersionPredicateMinimum:
+		if strings.TrimSpace(p.Spec) == "" {
+			return fmt.Errorf("%w: %s predicate requires non-empty Spec",
+				ErrFilePathInvalid, p.Type)
+		}
+		return nil
+	case VersionPredicateRange:
+		// Reuse the rangeSatisfied parser shape — must look like
+		// `[a,b]` / `[a,b)` / `(a,b]` / `(a,b)` / `[a,)` / `(,b]`.
+		s := strings.TrimSpace(p.Spec)
+		if len(s) < 3 {
+			return fmt.Errorf("%w: RANGE predicate Spec too short",
+				ErrFilePathInvalid)
+		}
+		open := s[0]
+		close := s[len(s)-1]
+		if (open != '[' && open != '(') || (close != ']' && close != ')') {
+			return fmt.Errorf("%w: RANGE predicate Spec must be bracket-form",
+				ErrFilePathInvalid)
+		}
+		inner := s[1 : len(s)-1]
+		if !strings.Contains(inner, ",") {
+			return fmt.Errorf("%w: RANGE predicate Spec missing comma",
+				ErrFilePathInvalid)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: unknown VersionPredicate.Type %q",
+			ErrFilePathInvalid, p.Type)
+	}
+}
+
 // validateFilePathSafety rejects every documented Windows-path
 // injection vector. The agent only ever reads (never writes) the
 // target file, but a rule that points at `\\?\GLOBALROOT\Device\...`
 // or `%PROGRAMDATA%\..\..\..\Windows\System32\config\SAM` could leak
 // arbitrary content via hash echo or be used to wedge the agent on
 // special handles. Fail-closed.
+//
+// Codex 019e893a iter-2 P1 absorb: also reject forward slash + ADS
+// (`C:\foo.exe:bar`, `C:\foo.exe::$DATA`) since the contract restricts
+// the canonical form to `<DRIVE>:\...` with backslash separators only
+// and a single drive-colon at index 1.
 func validateFilePathSafety(path string) error {
 	if strings.ContainsRune(path, 0) {
 		return fmt.Errorf("%w: NUL byte in path", ErrFilePathInvalid)
@@ -181,26 +240,37 @@ func validateFilePathSafety(path string) error {
 		return fmt.Errorf("%w: UNC path not allowed",
 			ErrFilePathInvalid)
 	}
+	// Reject any forward slash — contract enforces backslash-only
+	// canonical Windows form. Forward-slash paths could route around
+	// the dotdot guard below (Windows accepts `C:/foo/../bar`).
+	if strings.ContainsRune(path, '/') {
+		return fmt.Errorf("%w: forward slash not allowed in canonical Windows path",
+			ErrFilePathInvalid)
+	}
 	// Reject relative segments. `..` either at the start, embedded
 	// (e.g. `C:\Program Files\..\Windows`) or as a sole component.
-	// (forward and backward separators both checked because Windows
-	// accepts both.)
-	for _, sep := range []string{`\`, `/`} {
-		parts := strings.Split(path, sep)
-		for _, p := range parts {
-			if p == ".." || p == "." {
-				return fmt.Errorf("%w: relative segment %q not allowed",
-					ErrFilePathInvalid, p)
-			}
+	parts := strings.Split(path, `\`)
+	for _, p := range parts {
+		if p == ".." || p == "." {
+			return fmt.Errorf("%w: relative segment %q not allowed",
+				ErrFilePathInvalid, p)
 		}
 	}
-	// Reject embedded NUL-like control characters (CR/LF/TAB) that
+	// Reject embedded control characters (CR/LF/TAB/NUL/etc) that
 	// could be used to inject log lines or smuggle commands.
 	for _, r := range path {
 		if r < 0x20 {
 			return fmt.Errorf("%w: control char %d not allowed",
 				ErrFilePathInvalid, r)
 		}
+	}
+	// Reject Alternate Data Stream / extra colon syntax — only the
+	// drive-colon at index 1 is allowed (Codex 019e893a iter-2 P1).
+	// `C:\foo.exe:bar`, `C:\foo.exe::$DATA`, etc. open NTFS ADS handles
+	// that the contract does not intend to hash or version-check.
+	if len(path) > 2 && strings.ContainsRune(path[2:], ':') {
+		return fmt.Errorf("%w: extra colon (ADS) not allowed after drive letter",
+			ErrFilePathInvalid)
 	}
 	// Windows-only absoluteness check: must look like `<DRIVE>:\...` —
 	// non-Windows platforms hit the FILE_VERSION cross-platform stub
@@ -216,7 +286,8 @@ func validateFilePathSafety(path string) error {
 // `<letter>:\...`. This is the canonical form a SYSTEM-level agent on
 // Windows would see; non-Windows test runs use the same form because
 // rules are authored against Windows endpoints regardless of where
-// they happen to be unit-tested.
+// they happen to be unit-tested. Codex 019e893a iter-2 P1: only
+// backslash separator accepted (forward slash rejected upstream).
 func looksLikeAbsoluteWindowsPath(path string) bool {
 	if len(path) < 3 {
 		return false
@@ -228,7 +299,7 @@ func looksLikeAbsoluteWindowsPath(path string) bool {
 	if path[1] != ':' {
 		return false
 	}
-	if path[2] != '\\' && path[2] != '/' {
+	if path[2] != '\\' {
 		return false
 	}
 	return true
@@ -236,10 +307,13 @@ func looksLikeAbsoluteWindowsPath(path string) bool {
 
 // probeFileExists is the FILE_EXISTS probe. It returns Satisfied=true
 // when the path resolves to an existing regular file (not a directory,
-// not a symlink to a directory, not a special device). Path safety has
-// already gated the input.
+// not a symlink, not a special device). Path safety has already gated
+// the input. Codex 019e893a iter-2 P1 absorb: Lstat used so a symlink
+// (Windows reparse / junction) is rejected fail-loud — a hostile
+// symlink to a multi-GB device could otherwise stall the agent below
+// the deadline.
 func probeFileExists(_ context.Context, rule DetectionRule) (PreDetectResult, error) {
-	info, err := os.Stat(rule.Path)
+	info, err := os.Lstat(rule.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return PreDetectResult{
@@ -257,6 +331,17 @@ func probeFileExists(_ context.Context, rule DetectionRule) (PreDetectResult, er
 			fmt.Errorf("%w: path is a directory, not a file",
 				ErrFilePathInvalid)
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return PreDetectResult{DetectionMethod: DetectionMethodFileExists},
+			fmt.Errorf("%w: path is a symlink/reparse point",
+				ErrFilePathInvalid)
+	}
+	if info.Mode()&os.ModeType != 0 {
+		// device/socket/named-pipe etc.
+		return PreDetectResult{DetectionMethod: DetectionMethodFileExists},
+			fmt.Errorf("%w: path is a special file type",
+				ErrFilePathInvalid)
+	}
 	return PreDetectResult{
 		Satisfied:       true,
 		DetectionMethod: DetectionMethodFileExists,
@@ -266,9 +351,10 @@ func probeFileExists(_ context.Context, rule DetectionRule) (PreDetectResult, er
 
 // probeFileSha256 streams the file content through SHA-256 with a
 // hard size cap. Returns Satisfied=true only when the lowercase-hex
-// digest equals ExpectedSha256.
+// digest equals ExpectedSha256. Codex 019e893a iter-2 P1 absorb: Lstat
+// + symlink/special-file reject for the same reasons as FILE_EXISTS.
 func probeFileSha256(ctx context.Context, rule DetectionRule) (PreDetectResult, error) {
-	info, err := os.Stat(rule.Path)
+	info, err := os.Lstat(rule.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return PreDetectResult{
@@ -281,6 +367,16 @@ func probeFileSha256(ctx context.Context, rule DetectionRule) (PreDetectResult, 
 	if info.IsDir() {
 		return PreDetectResult{DetectionMethod: DetectionMethodFileSha256},
 			fmt.Errorf("%w: path is a directory, not a file",
+				ErrFilePathInvalid)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return PreDetectResult{DetectionMethod: DetectionMethodFileSha256},
+			fmt.Errorf("%w: path is a symlink/reparse point",
+				ErrFilePathInvalid)
+	}
+	if info.Mode()&os.ModeType != 0 {
+		return PreDetectResult{DetectionMethod: DetectionMethodFileSha256},
+			fmt.Errorf("%w: path is a special file type",
 				ErrFilePathInvalid)
 	}
 
@@ -326,11 +422,18 @@ func probeFileSha256(ctx context.Context, rule DetectionRule) (PreDetectResult, 
 // copyCancellable copies up to `limit` bytes from src to dst,
 // observing ctx cancellation between chunks. This bounds the per-read
 // blocking time so a slow / hostile filesystem cannot starve the
-// detector deadline.
+// detector deadline. Codex 019e893a iter-2 P3 absorb: zero-read
+// guard returns io.ErrNoProgress after maxNoProgressReads consecutive
+// empty reads — a generic safety net against a degenerate Reader that
+// returns n=0, err=nil forever.
 func copyCancellable(ctx context.Context, dst io.Writer, src io.Reader, limit int64) (int64, error) {
-	const chunk = 256 * 1024
+	const (
+		chunk               = 256 * 1024
+		maxNoProgressReads  = 32
+	)
 	buf := make([]byte, chunk)
 	var total int64
+	noProgress := 0
 	for total < limit {
 		select {
 		case <-ctx.Done():
@@ -347,6 +450,12 @@ func copyCancellable(ctx context.Context, dst io.Writer, src io.Reader, limit in
 				return total, werr
 			}
 			total += int64(n)
+			noProgress = 0
+		} else {
+			noProgress++
+			if noProgress >= maxNoProgressReads && err == nil {
+				return total, io.ErrNoProgress
+			}
 		}
 		if err == io.EOF {
 			return total, nil
@@ -362,7 +471,40 @@ func copyCancellable(ctx context.Context, dst io.Writer, src io.Reader, limit in
 // On Windows it reads PE VersionInfo and compares against the
 // VersionPredicate. On non-Windows it returns the
 // FAILED_UNSUPPORTED_PLATFORM-style stub.
+//
+// Codex 019e893a iter-2 P0 absorb: pre-check the path with Lstat so a
+// missing file returns Satisfied=false (not an error). Without this
+// guard FILE_VERSION authoritative detector would block install at
+// FAILED_VERIFICATION when the binary is simply not yet installed —
+// the exact opposite of what an install pre-detect needs to do.
+// Symlinks/special files are rejected for the same DoS reasons as the
+// other FILE_* probes.
 func probeFileVersion(ctx context.Context, rule DetectionRule) (PreDetectResult, error) {
+	info, err := os.Lstat(rule.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return PreDetectResult{
+				Satisfied:       false,
+				DetectionMethod: DetectionMethodFileVersion,
+			}, nil
+		}
+		return PreDetectResult{DetectionMethod: DetectionMethodFileVersion}, err
+	}
+	if info.IsDir() {
+		return PreDetectResult{DetectionMethod: DetectionMethodFileVersion},
+			fmt.Errorf("%w: path is a directory, not a file",
+				ErrFilePathInvalid)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return PreDetectResult{DetectionMethod: DetectionMethodFileVersion},
+			fmt.Errorf("%w: path is a symlink/reparse point",
+				ErrFilePathInvalid)
+	}
+	if info.Mode()&os.ModeType != 0 {
+		return PreDetectResult{DetectionMethod: DetectionMethodFileVersion},
+			fmt.Errorf("%w: path is a special file type",
+				ErrFilePathInvalid)
+	}
 	return probeFileVersionPlatform(ctx, rule)
 }
 

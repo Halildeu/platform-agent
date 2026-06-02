@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -341,3 +342,182 @@ func TestValidateDetectionRule_FileTypesGoThroughValidateFileRule(t *testing.T) 
 		t.Fatalf("expected ErrFilePathInvalid, got %v", err)
 	}
 }
+
+// ── Codex 019e893a iter-2 P1 absorb tests ──────────────────────────
+
+func TestValidateFileRule_PathSafetyRejectsForwardSlash(t *testing.T) {
+	err := ValidateFileRule(DetectionRule{
+		Type: DetectionRuleTypeFileExists,
+		Path: `C:/Windows/notepad.exe`, // forward slashes
+	})
+	if !errors.Is(err, ErrFilePathInvalid) {
+		t.Fatalf("forward slash should be rejected, got %v", err)
+	}
+}
+
+func TestValidateFileRule_PathSafetyRejectsADS(t *testing.T) {
+	cases := []string{
+		`C:\foo.exe:bar`,
+		`C:\foo.exe::$DATA`,
+		`C:\Program Files\7-Zip\7z.exe:hiddenstream`,
+	}
+	for _, p := range cases {
+		t.Run(p, func(t *testing.T) {
+			err := ValidateFileRule(DetectionRule{
+				Type: DetectionRuleTypeFileExists,
+				Path: p,
+			})
+			if !errors.Is(err, ErrFilePathInvalid) {
+				t.Fatalf("ADS path %q should be rejected, got %v", p, err)
+			}
+		})
+	}
+}
+
+func TestValidateFileRule_MaxHashBytesRejectedAboveCap(t *testing.T) {
+	rule := DetectionRule{
+		Type:           DetectionRuleTypeFileSha256,
+		Path:           `C:\foo\bar.exe`,
+		ExpectedSha256: strings.Repeat("a", 64),
+		MaxHashBytes:   FileMaxHashBytes + 1,
+	}
+	err := ValidateFileRule(rule)
+	if !errors.Is(err, ErrFileSha256Empty) {
+		t.Fatalf("MaxHashBytes > cap expected ErrFileSha256Empty, got %v", err)
+	}
+
+	rule.MaxHashBytes = -1
+	err = ValidateFileRule(rule)
+	if !errors.Is(err, ErrFileSha256Empty) {
+		t.Fatalf("negative MaxHashBytes expected ErrFileSha256Empty, got %v", err)
+	}
+}
+
+func TestValidateFileRule_VersionPredicateShape(t *testing.T) {
+	cases := []struct {
+		name    string
+		pred    VersionPredicate
+		wantErr bool
+	}{
+		{"latest_ok", VersionPredicate{Type: VersionPredicateLatest}, false},
+		{"empty_ok", VersionPredicate{}, false},
+		{"exact_with_spec_ok", VersionPredicate{Type: VersionPredicateExact, Spec: "1.0"}, false},
+		{"exact_no_spec_rejected", VersionPredicate{Type: VersionPredicateExact, Spec: ""}, true},
+		{"minimum_no_spec_rejected", VersionPredicate{Type: VersionPredicateMinimum, Spec: " "}, true},
+		{"range_brackets_ok", VersionPredicate{Type: VersionPredicateRange, Spec: "[1.0,2.0)"}, false},
+		{"range_missing_comma_rejected", VersionPredicate{Type: VersionPredicateRange, Spec: "[1.0]"}, true},
+		{"range_no_brackets_rejected", VersionPredicate{Type: VersionPredicateRange, Spec: "1.0,2.0"}, true},
+		{"unknown_type_rejected", VersionPredicate{Type: "REGEX", Spec: ".*"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateFileRule(DetectionRule{
+				Type:             DetectionRuleTypeFileVersion,
+				Path:             `C:\foo\bar.exe`,
+				VersionPredicate: &tc.pred,
+			})
+			if tc.wantErr {
+				if !errors.Is(err, ErrFilePathInvalid) {
+					t.Fatalf("expected ErrFilePathInvalid, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("good predicate rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestProbeFileExists_SymlinkRejected(t *testing.T) {
+	// Create a regular target + a symlink pointing to it. The probe
+	// should reject the symlink fail-loud (Codex 019e893a P1).
+	target := writeTempFile(t, []byte("content"))
+	link := target + ".lnk"
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink not supported on this filesystem: %v", err)
+	}
+	defer os.Remove(link)
+
+	_, err := probeFileExists(context.Background(), DetectionRule{Path: link})
+	if !errors.Is(err, ErrFilePathInvalid) {
+		t.Fatalf("symlink expected ErrFilePathInvalid, got %v", err)
+	}
+}
+
+func TestProbeFileSha256_SymlinkRejected(t *testing.T) {
+	target := writeTempFile(t, []byte("content"))
+	link := target + ".lnk"
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink not supported on this filesystem: %v", err)
+	}
+	defer os.Remove(link)
+
+	_, err := probeFileSha256(context.Background(), DetectionRule{
+		Path:           link,
+		ExpectedSha256: strings.Repeat("0", 64),
+	})
+	if !errors.Is(err, ErrFilePathInvalid) {
+		t.Fatalf("symlink expected ErrFilePathInvalid, got %v", err)
+	}
+}
+
+// ProbeViaFile FILE_VERSION missing-file scenario. The cross-platform
+// dispatcher pre-checks with Lstat so a missing path returns
+// Satisfied=false + nil error (NOT FAILED_VERIFICATION). This is the
+// Codex 019e893a P0 absorb. Use ProbeViaFile so validation + Lstat
+// pre-check both run; the Windows-tag readPeVersion is not reached.
+func TestProbeViaFile_FileVersionMissingReturnsNotSatisfied(t *testing.T) {
+	// Need a path that passes validation but does not exist. On
+	// non-Windows test runs the validator still requires the
+	// `<DRIVE>:\` form, but Lstat will fail with IsNotExist there too.
+	missing := writeTempFile(t, []byte("seed")) + ".does-not-exist"
+	// We can't put this through ProbeViaFile because validation
+	// requires a Windows-shaped path. Test the probeFileVersion entry
+	// point directly (validation already covered separately).
+	res, err := probeFileVersion(context.Background(), DetectionRule{
+		Type:             DetectionRuleTypeFileVersion,
+		Path:             missing,
+		VersionPredicate: &VersionPredicate{Type: VersionPredicateLatest},
+	})
+	if err != nil {
+		t.Fatalf("missing file should not error, got %v", err)
+	}
+	if res.Satisfied {
+		t.Fatalf("missing file must be not-satisfied")
+	}
+	if res.DetectionMethod != DetectionMethodFileVersion {
+		t.Fatalf("method label = %q want %q", res.DetectionMethod, DetectionMethodFileVersion)
+	}
+}
+
+func TestProbeFileVersion_DirectoryRejected(t *testing.T) {
+	dir := t.TempDir()
+	_, err := probeFileVersion(context.Background(), DetectionRule{
+		Path:             dir,
+		VersionPredicate: &VersionPredicate{Type: VersionPredicateLatest},
+	})
+	if !errors.Is(err, ErrFilePathInvalid) {
+		t.Fatalf("directory expected ErrFilePathInvalid, got %v", err)
+	}
+}
+
+func TestCopyCancellable_ZeroReadGuard(t *testing.T) {
+	// A reader that always returns (0, nil) — generic safety net. The
+	// helper must surface io.ErrNoProgress after maxNoProgressReads.
+	r := &zeroReader{}
+	var sink bytesSink
+	_, err := copyCancellable(context.Background(), &sink, r, 1024*1024)
+	if err == nil {
+		t.Fatalf("zero-read should return io.ErrNoProgress")
+	}
+	if !errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("expected io.ErrNoProgress, got %v", err)
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) { return 0, nil }
+
+type bytesSink struct{}
+
+func (bytesSink) Write(p []byte) (int, error) { return len(p), nil }
