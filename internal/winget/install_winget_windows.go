@@ -27,12 +27,19 @@ func InstallWinGet(ctx context.Context, req InstallRequest) InstallResult {
 			return DetectSourceEgress(time.Now())
 		},
 		DetectionProbe: func(probeCtx context.Context, rule DetectionRule, wingetPath string) (PreDetectResult, error) {
-			// Dispatch by rule type. REGISTRY_UNINSTALL uses the ARP
-			// registry (Session-0-reliable, AUTHORITATIVE); WINGET_PACKAGE
-			// uses `winget list` (CONFIRM_ONLY under Session-0 — §11.3b).
+			// Dispatch by rule type.
+			//   REGISTRY_UNINSTALL  → ARP registry (Session-0-reliable, AUTHORITATIVE)
+			//   FILE_EXISTS / FILE_SHA256 / FILE_VERSION → filesystem probe
+			//     (Session-0-reliable; FILE_VERSION reads PE VersionInfo
+			//     via Win32 API — see detect_file_windows.go).
+			//   WINGET_PACKAGE      → `winget list` (CONFIRM_ONLY — §11.3b)
 			switch rule.Type {
 			case DetectionRuleTypeRegistryUninstall:
 				return ProbeViaRegistry(probeCtx, defaultArpReader(), rule)
+			case DetectionRuleTypeFileExists,
+				DetectionRuleTypeFileSha256,
+				DetectionRuleTypeFileVersion:
+				return ProbeViaFile(probeCtx, rule)
 			default:
 				return ProbeViaWingetList(probeCtx, defaultExecutor, rule, wingetPath)
 			}

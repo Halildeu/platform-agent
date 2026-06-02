@@ -235,6 +235,13 @@ func validateDetectionRule(rule DetectionRule) error {
 		return nil
 	case DetectionRuleTypeRegistryUninstall:
 		return validateRegistryRule(rule)
+	case DetectionRuleTypeFileExists,
+		DetectionRuleTypeFileSha256,
+		DetectionRuleTypeFileVersion:
+		// Path C1 (Codex 019e893a): FILE_* validation lives in
+		// detect_file.go so the path-safety helper is shared with the
+		// probe itself.
+		return ValidateFileRule(rule)
 	default:
 		return fmt.Errorf("unsupported detection rule type %q", rule.Type)
 	}

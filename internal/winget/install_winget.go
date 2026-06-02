@@ -288,8 +288,19 @@ type VersionPredicate struct {
 //     see §11.3b). A miss is INCONCLUSIVE, never a denial.
 //   - REGISTRY_UNINSTALL — ARP (Add/Remove Programs) registry match.
 //     Reliable under SYSTEM Session-0, so AUTHORITATIVE: a post-verify
-//     miss IS a denial. (FILE_EXISTS / FILE_VERSION / FILE_SHA256 are a
-//     planned follow-up; rejected fail-closed until implemented.)
+//     miss IS a denial.
+//   - FILE_EXISTS — absolute path existence check on the device. Path
+//     traversal / UNC / env / device paths rejected fail-closed at
+//     validation time. AUTHORITATIVE under Session-0 (filesystem read
+//     under LocalSystem is reliable).
+//   - FILE_SHA256 — file content hash match. Streams the file with
+//     a hard size cap (defaults to FileMaxHashBytes) and a deadline so
+//     a malicious or accidentally huge file cannot stall the agent.
+//     AUTHORITATIVE.
+//   - FILE_VERSION — Windows PE VersionInfo (FileVersion / ProductVersion)
+//     compared with the same VersionPredicate semantics used for WinGet
+//     post-verify (EXACT / MINIMUM / RANGE / LATEST). Windows-only;
+//     other platforms return FAILED_UNSUPPORTED_PLATFORM. AUTHORITATIVE.
 //
 // Any unrecognized / unimplemented type is rejected fail-closed BEFORE
 // invoking winget install.
@@ -298,6 +309,9 @@ type DetectionRuleType string
 const (
 	DetectionRuleTypeWingetPackage     DetectionRuleType = "WINGET_PACKAGE"
 	DetectionRuleTypeRegistryUninstall DetectionRuleType = "REGISTRY_UNINSTALL"
+	DetectionRuleTypeFileExists        DetectionRuleType = "FILE_EXISTS"
+	DetectionRuleTypeFileSha256        DetectionRuleType = "FILE_SHA256"
+	DetectionRuleTypeFileVersion       DetectionRuleType = "FILE_VERSION"
 )
 
 // String-match modes for REGISTRY_UNINSTALL displayName/publisher
@@ -325,9 +339,15 @@ const (
 )
 
 // detectionReliability maps a rule type to its post-verify authority.
+// FILE_* detectors read the device filesystem under LocalSystem, which
+// is reliable in Session-0 (no UAC interception, no per-user view),
+// so they are AUTHORITATIVE — a post-verify miss IS a denial.
 func detectionReliability(t DetectionRuleType) string {
 	switch t {
-	case DetectionRuleTypeRegistryUninstall:
+	case DetectionRuleTypeRegistryUninstall,
+		DetectionRuleTypeFileExists,
+		DetectionRuleTypeFileSha256,
+		DetectionRuleTypeFileVersion:
 		return DetectionReliabilityAuthoritative
 	default:
 		return DetectionReliabilityConfirmOnly
@@ -355,7 +375,62 @@ type DetectionRule struct {
 	Publisher             string `json:"publisher,omitempty"`
 	PublisherMatch        string `json:"publisherMatch,omitempty"` // EXACT|CONTAINS
 	AllowPublisherMissing bool   `json:"allowPublisherMissing,omitempty"`
+
+	// FILE_EXISTS / FILE_SHA256 / FILE_VERSION — absolute local path on
+	// the device. Codex 019e893a P1 absorb: path safety guards reject
+	// relative segments (`..`), env var expansion (`%FOO%`, `$env:`),
+	// Windows device namespaces (`\\?\`, `\\.\`), UNC paths (`\\server\`),
+	// and forward-slash mixed casing inconsistent with the Windows
+	// canonical form. Validation runs BEFORE any IO.
+	Path string `json:"path,omitempty"`
+
+	// FILE_SHA256 — lowercase hex SHA-256 of the file content. Empty
+	// → validator rejects fail-closed.
+	ExpectedSha256 string `json:"expectedSha256,omitempty"`
+
+	// FILE_SHA256 — optional override for the hash size cap. Zero means
+	// FileMaxHashBytes (default ~512MB). A file larger than this cap
+	// returns Satisfied=false + a redacted DetectionError so the agent
+	// cannot be wedged hashing an attacker-controlled multi-GB file.
+	MaxHashBytes int64 `json:"maxHashBytes,omitempty"`
+
+	// FILE_VERSION — VersionPredicate (EXACT / MINIMUM / RANGE / LATEST).
+	// Re-uses the WinGet post-verify predicate semantics so the catalog
+	// authoring contract is uniform across all detectors.
+	VersionPredicate *VersionPredicate `json:"versionPredicate,omitempty"`
+
+	// FILE_VERSION — which PE version field to read. Defaults to
+	// `FileVersion` (the canonical product binary identifier). Operators
+	// may pin `ProductVersion` for installers that intentionally keep
+	// FileVersion lagging (Codex 019e893a P1: contract lock).
+	FileVersionField string `json:"fileVersionField,omitempty"` // FILE_VERSION|PRODUCT_VERSION (default FILE_VERSION)
 }
+
+// File-detector size caps (Codex 019e893a P2: SHA256 performance + DoS guard).
+const (
+	// FileMaxHashBytes caps SHA-256 stream hashing at 512 MiB by default.
+	// Files larger than this are rejected fail-closed at the streamer.
+	// Operators may lower the cap per-rule via MaxHashBytes; raising it
+	// requires a backend authoring change so prod can't accidentally
+	// ship an unbounded value.
+	FileMaxHashBytes int64 = 512 * 1024 * 1024
+	// FileDetectorDeadline bounds a single file detector probe.
+	FileDetectorDeadline = 30 * time.Second
+)
+
+// File-detector method labels for PreDetectResult/PostVerificationResult
+// DetectionMethod audit field.
+const (
+	DetectionMethodFileExists  = "file_exists"
+	DetectionMethodFileSha256  = "file_sha256"
+	DetectionMethodFileVersion = "file_version"
+)
+
+// FileVersionField wire constants — Codex 019e893a P1 contract lock.
+const (
+	FileVersionFieldFileVersion    = "FILE_VERSION"
+	FileVersionFieldProductVersion = "PRODUCT_VERSION"
+)
 
 // InstallRequest is the wire-safe payload AG-027 consumes.
 // BE-022 issues this verbatim; AG-027 does not transform the

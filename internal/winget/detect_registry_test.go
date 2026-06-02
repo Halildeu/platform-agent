@@ -216,7 +216,7 @@ func TestValidateDetectionRule(t *testing.T) {
 	}
 	bad := []DetectionRule{
 		{Type: DetectionRuleTypeWingetPackage},     // no packageId
-		{Type: "FILE_EXISTS"},                      // unimplemented type
+		{Type: DetectionRuleTypeFileExists}, // FILE_EXISTS needs Path (Path C1)
 		{Type: DetectionRuleTypeRegistryUninstall}, // no productCode/displayName
 		{Type: DetectionRuleTypeRegistryUninstall, DisplayName: "7-Zip", DisplayNameMatch: MatchModeExact},                                         // fallback needs publisher
 		{Type: DetectionRuleTypeRegistryUninstall, DisplayName: "7-Zip*", DisplayNameMatch: MatchModeGlob, AllowPublisherMissing: true},            // allowPublisherMissing needs EXACT

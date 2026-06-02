@@ -766,9 +766,12 @@ a clean install exit on a winget-list miss:
 for audit / debug.
 
 **Durable Session-0 detection:** `REGISTRY_UNINSTALL` (§11.3c) is the
-AUTHORITATIVE, Session-0-reliable detector — a winget package id alone is
-not a reliable installed-state detector under Session-0. `FILE_EXISTS` /
-`FILE_VERSION` / `FILE_SHA256` remain follow-ups (§11.5).
+AUTHORITATIVE, Session-0-reliable detector for ARP/registry-shaped state;
+`FILE_EXISTS` / `FILE_SHA256` / `FILE_VERSION` (§11.3d, Path C1 — Codex
+019e893a) are AUTHORITATIVE, Session-0-reliable detectors for binary-on-disk
+state. The agent re-validates every rule fail-closed before any IO,
+mirroring the backend `DetectionRuleValidator`. A winget package id alone
+is NOT a reliable installed-state detector under Session-0 (CONFIRM_ONLY).
 
 ### 11.3c REGISTRY_UNINSTALL — authoritative Session-0 detection (AG-detect)
 
@@ -811,8 +814,62 @@ the package-id↔install-target identity check applies only to
 `WINGET_PACKAGE`.
 
 **Follow-ups**: bounded post-verify retry (absorb installers that write ARP
-slightly after exit); `FILE_*` rule types; backend catalog-schema + payload
-forwarding the authored rule (agent-first sequencing — Codex 019e7d82).
+slightly after exit). `FILE_*` rule types LANDED in §11.3d (Path C1,
+Codex 019e893a).
+
+### 11.3d FILE_EXISTS / FILE_SHA256 / FILE_VERSION (Path C1, AG-detect)
+
+Three additional AUTHORITATIVE Session-0 detectors for binary-on-disk
+state, shipped via Path C1 (Codex 019e893a AGREE Opsiyon C). All three
+read the device filesystem under LocalSystem (reliable in Session-0,
+no UAC interception, no per-user view), so a post-verify miss IS a
+real denial.
+
+**Shared rule fields** (validated fail-closed BEFORE any IO):
+
+- `path` — absolute Windows path of the form `<DRIVE>:\...`. Path-safety
+  guards reject **every** documented injection vector:
+  - relative segments (`.`, `..`, embedded or at-start)
+  - env-var expansion (`%FOO%`, `$env:FOO`)
+  - Windows device namespaces (`\\?\`, `\\.\`)
+  - UNC paths (`\\server\share\...`)
+  - paths without a drive letter
+  - NUL byte or any control character
+- The agent never writes the file (read-only IO).
+
+**Rule type-specific fields**:
+
+- `FILE_EXISTS` — `path` only. Satisfied=true when the path resolves to
+  an existing regular file. A path resolving to a directory is operator
+  authoring error (fail-loud, not denial).
+- `FILE_SHA256` — `path` + `expectedSha256` (lowercase hex, exactly 64
+  chars). Streams the file through SHA-256 with a hard size cap
+  (`maxHashBytes` per-rule override, default `FileMaxHashBytes` =
+  512 MiB) and a 30-second deadline. A file larger than the cap or a
+  digest mismatch yields Satisfied=false. The cap protects the agent
+  from being wedged on attacker-controlled multi-GB files.
+- `FILE_VERSION` — `path` + `versionPredicate` (`EXACT` /
+  `MINIMUM` / `RANGE` / `LATEST`, same semantics as WinGet post-verify)
+  + optional `fileVersionField` (`FILE_VERSION` default, or
+  `PRODUCT_VERSION` for installers that intentionally keep
+  FileVersion lagging). Reads PE VersionInfo via Win32 API
+  (`GetFileVersionInfoW` + `VerQueryValueW`) — NOT via PowerShell
+  shell-out, to avoid (a) SYSTEM-context PowerShell launch fragility,
+  (b) audit smell from leaking the path into a child command line, and
+  (c) shell-parser exposure. Non-Windows platforms return
+  `FAILED_UNSUPPORTED_PLATFORM` (mirrors the AG-027 install_winget
+  cross-platform stub pattern).
+
+**Audit method label**: `file_exists` / `file_sha256` / `file_version`
+on `PreDetectResult.DetectionMethod` and `PostVerificationResult.DetectionMethod`.
+
+**HARD RULE No Fake Work**: every detector returns a deterministic
+Satisfied bool + DetectionMethod + an error path that maps to the
+canonical AG-027 failure-final-statuses. There is no silent
+"satisfied=false because we don't know" branch — unknown errors
+surface explicitly so the executor maps them to
+`FAILED_INTERNAL` (not `FAILED_VERIFICATION` which would
+mis-attribute the cause).
 
 ### 11.3a Installer log redaction (AG-027L)
 
@@ -893,9 +950,14 @@ commands inherit. The agent-side `RunInstall` derives its own
   documented as `killStrategy = "taskkill_tree"` or `"process_kill_only"`
   in the result. A Job Object implementation that pre-binds the
   spawned tree is RT-AG-027-F1 (post-v1 hardening).
-- **Detection rules beyond `WINGET_PACKAGE`** (`REGISTRY_UNINSTALL`,
-  `FILE_EXISTS`, `FILE_SHA256`) — fail-closed in v1; widening planned
-  under AG-028.
+- ~~**Detection rules beyond `WINGET_PACKAGE`**~~ — LANDED.
+  `REGISTRY_UNINSTALL` (§11.3c), `FILE_EXISTS` / `FILE_SHA256` /
+  `FILE_VERSION` (§11.3d, Path C1, Codex 019e893a) are all
+  AUTHORITATIVE Session-0 detectors. The fail-closed v1 boundary now
+  applies only to **unknown** rule types. Remaining FILE_*
+  follow-ups: Windows-tag PE fixture tests (RT-AG-027-F2), translation
+  block fallback hardening for vendor binaries that use uncommon
+  codepages (RT-AG-027-F3).
 - **Server-side issuer** — BE-022 lands as the sibling backend PR
   that publishes the dual-control `INSTALL_SOFTWARE` issuer, catalog
   snapshot pinning, BE-021A install-preflight integration. AG-027
