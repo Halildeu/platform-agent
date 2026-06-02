@@ -950,9 +950,14 @@ commands inherit. The agent-side `RunInstall` derives its own
   documented as `killStrategy = "taskkill_tree"` or `"process_kill_only"`
   in the result. A Job Object implementation that pre-binds the
   spawned tree is RT-AG-027-F1 (post-v1 hardening).
-- **Detection rules beyond `WINGET_PACKAGE`** (`REGISTRY_UNINSTALL`,
-  `FILE_EXISTS`, `FILE_SHA256`) — fail-closed in v1; widening planned
-  under AG-028.
+- ~~**Detection rules beyond `WINGET_PACKAGE`**~~ — LANDED.
+  `REGISTRY_UNINSTALL` (§11.3c), `FILE_EXISTS` / `FILE_SHA256` /
+  `FILE_VERSION` (§11.3d, Path C1, Codex 019e893a) are all
+  AUTHORITATIVE Session-0 detectors. The fail-closed v1 boundary now
+  applies only to **unknown** rule types. Remaining FILE_*
+  follow-ups: Windows-tag PE fixture tests (RT-AG-027-F2), translation
+  block fallback hardening for vendor binaries that use uncommon
+  codepages (RT-AG-027-F3).
 - **Server-side issuer** — BE-022 lands as the sibling backend PR
   that publishes the dual-control `INSTALL_SOFTWARE` issuer, catalog
   snapshot pinning, BE-021A install-preflight integration. AG-027
