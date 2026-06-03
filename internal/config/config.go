@@ -36,6 +36,13 @@ type Config struct {
 	// timeout at the documented 30-min hard cap so the agent and the
 	// docs/COMMAND-CONTRACT.md §11.5 narrative agree.
 	InstallCommandTimeout  time.Duration
+	// UninstallCommandTimeout overrides CommandTimeout for the AG-028
+	// (Faz 22.5.6) UNINSTALL_SOFTWARE command type. MSI uninstall paths
+	// can run repair / custom-action / network wait phases that push
+	// past the 5-min install median; the 30-min ceiling matches the
+	// install hard cap (Codex 019e8de2 iter-1 absorb: keep parity, do
+	// not optimise downward without LIVE evidence).
+	UninstallCommandTimeout time.Duration
 	NonceSkewWindow        time.Duration
 	NonceReplayCacheWindow time.Duration
 
@@ -82,9 +89,10 @@ func Default() Config {
 		CommandPollInterval:    30 * time.Second,
 		InventoryInterval:      60 * time.Minute,
 		JitterPercent:          20,
-		CommandTimeout:         120 * time.Second,
-		InstallCommandTimeout:  30 * time.Minute,
-		NonceSkewWindow:        5 * time.Minute,
+		CommandTimeout:          120 * time.Second,
+		InstallCommandTimeout:   30 * time.Minute,
+		UninstallCommandTimeout: 30 * time.Minute,
+		NonceSkewWindow:         5 * time.Minute,
 		NonceReplayCacheWindow: 10 * time.Minute,
 	}
 }
@@ -106,6 +114,7 @@ func LoadFromEnv() Config {
 	cfg.InventoryInterval = envDuration("ENDPOINT_AGENT_INVENTORY_INTERVAL", cfg.InventoryInterval)
 	cfg.CommandTimeout = envDuration("ENDPOINT_AGENT_COMMAND_TIMEOUT", cfg.CommandTimeout)
 	cfg.InstallCommandTimeout = envDuration("ENDPOINT_AGENT_INSTALL_COMMAND_TIMEOUT", cfg.InstallCommandTimeout)
+	cfg.UninstallCommandTimeout = envDuration("ENDPOINT_AGENT_UNINSTALL_COMMAND_TIMEOUT", cfg.UninstallCommandTimeout)
 	cfg.NonceSkewWindow = envDuration("ENDPOINT_AGENT_NONCE_SKEW_WINDOW", cfg.NonceSkewWindow)
 	cfg.NonceReplayCacheWindow = envDuration("ENDPOINT_AGENT_NONCE_REPLAY_CACHE_WINDOW", cfg.NonceReplayCacheWindow)
 	cfg.JitterPercent = envInt("ENDPOINT_AGENT_JITTER_PERCENT", cfg.JitterPercent)

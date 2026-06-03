@@ -139,11 +139,22 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	// AG-027 (Codex 019e6c0d iter-2): per-command-type timeout.
 	// INSTALL_SOFTWARE needs a longer ceiling (30 min default) because
 	// WinGet installs can run 30s–5min and occasionally longer for
-	// vendor MSI bundles. Everything else stays on the lightweight
-	// CommandTimeout (120s default).
+	// vendor MSI bundles. AG-028 (Codex 019e8de2 iter-3 absorb):
+	// UNINSTALL_SOFTWARE picks `UninstallCommandTimeout` (30 min
+	// default). Without this branch the agent enforces 120s which
+	// truncates MSI uninstall paths long before the 30-min hard cap
+	// documented in uninstall_winget.go. Everything else stays on the
+	// lightweight CommandTimeout.
 	commandTimeout := r.Config.CommandTimeout
-	if command.Type == protocol.CommandInstallSoftware && r.Config.InstallCommandTimeout > 0 {
-		commandTimeout = r.Config.InstallCommandTimeout
+	switch command.Type {
+	case protocol.CommandInstallSoftware:
+		if r.Config.InstallCommandTimeout > 0 {
+			commandTimeout = r.Config.InstallCommandTimeout
+		}
+	case protocol.CommandUninstallSoftware:
+		if r.Config.UninstallCommandTimeout > 0 {
+			commandTimeout = r.Config.UninstallCommandTimeout
+		}
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
