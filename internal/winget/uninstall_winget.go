@@ -191,12 +191,27 @@ const (
 	// BEFORE mutation (Codex 019e8de2 iter-1 absorb; defense in depth
 	// with backend Phase 1b follow-up gate #419).
 	UninstallFinalStatusFailedUnsupportedVerification = "FAILED_UNSUPPORTED_VERIFICATION"
-	// UninstallFinalStatusFailedInternal — programmatic error
-	// (locator unwired, probe function nil, etc.). Forensic.
-	UninstallFinalStatusFailedInternal = "FAILED_INTERNAL"
-	// UninstallFinalStatusFailedTimeout — wall-clock budget exhausted
-	// before the post-probe could complete. Process tree killed.
-	UninstallFinalStatusFailedTimeout = "FAILED_TIMEOUT"
+	// NOTE (Codex post-impl 019e8de2 iter-3 absorb): the backend V32
+	// CHECK constraint allowlist (see V32__endpoint_uninstall_surface.sql)
+	// does NOT include `FAILED_TIMEOUT` or `FAILED_INTERNAL`. To keep
+	// agent emit + DB enum 1:1 hizalı, those two cases now project to
+	// the closest in-allowlist status:
+	//   • wall-clock budget exhausted + post-probe could not confirm
+	//     ABSENT  → PARTIAL_INCONCLUSIVE + failedReasonCode=uninstall_timeout
+	//   • internal programmatic error (locator unwired, probe nil,
+	//     missing requestId/packageId) → FAILED_UNSUPPORTED_VERIFICATION
+	//     + failedReasonCode=<specific>, killStrategy preserved in
+	//     RunnerOutcome.
+	// The `failedReasonCode` field carries the forensic detail so
+	// audit consumers can still distinguish "timeout" from a probe
+	// failure. Phase 2B audit mapping reads `failedReasonCode` for the
+	// drawer "İşlemler" surface.
+	//
+	// (Constants below are kept for reasonCode parity; they are NOT
+	// agent-emitted finalStatus values anymore.)
+	// UninstallFinalStatusPartialInconclusive was eliminated as a wire value
+	// in iter-3; agents now emit PARTIAL_INCONCLUSIVE +
+	// failedReasonCode=uninstall_timeout instead.
 )
 
 // FailedReason codes (machine-readable forensic detail; bounded
@@ -490,12 +505,12 @@ func RunUninstall(parentCtx context.Context, req UninstallRequest, opts Uninstal
 		pkg = strings.TrimSpace(req.CatalogPackageID)
 	}
 	if pkg == "" {
-		result.FinalStatus = UninstallFinalStatusFailedInternal
+		result.FinalStatus = UninstallFinalStatusFailedUnsupportedVerification
 		result.FailedReasonCode = UninstallReasonPackageIDMissing
 		return result
 	}
 	if strings.TrimSpace(req.RequestID) == "" {
-		result.FinalStatus = UninstallFinalStatusFailedInternal
+		result.FinalStatus = UninstallFinalStatusFailedUnsupportedVerification
 		result.FailedReasonCode = UninstallReasonRequestIDMissing
 		return result
 	}
@@ -518,7 +533,7 @@ func RunUninstall(parentCtx context.Context, req UninstallRequest, opts Uninstal
 		return result
 	}
 	if opts.Probe == nil {
-		result.FinalStatus = UninstallFinalStatusFailedInternal
+		result.FinalStatus = UninstallFinalStatusFailedUnsupportedVerification
 		result.FailedReasonCode = UninstallReasonProbeUnwired
 		return result
 	}
@@ -576,7 +591,7 @@ func RunUninstall(parentCtx context.Context, req UninstallRequest, opts Uninstal
 		return result
 	}
 	if opts.UninstallRunner == nil {
-		result.FinalStatus = UninstallFinalStatusFailedInternal
+		result.FinalStatus = UninstallFinalStatusFailedUnsupportedVerification
 		result.FailedReasonCode = UninstallReasonRunnerUnwired
 		result.DurationMs = elapsedMs(startedAt, opts.Now)
 		return result
@@ -614,7 +629,7 @@ func RunUninstall(parentCtx context.Context, req UninstallRequest, opts Uninstal
 			})
 			return result
 		}
-		result.FinalStatus = UninstallFinalStatusFailedTimeout
+		result.FinalStatus = UninstallFinalStatusPartialInconclusive
 		result.FailedReasonCode = UninstallReasonTimeout
 		return result
 	}

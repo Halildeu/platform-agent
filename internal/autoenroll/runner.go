@@ -85,6 +85,12 @@ type Config struct {
 	// 30 min — matches the agent-side hard cap in winget.RunInstall
 	// (Codex 019e6c0d iter-3 absorb).
 	InstallCommandTimeout time.Duration
+	// UninstallCommandTimeout overrides CommandTimeout for the AG-028
+	// UNINSTALL_SOFTWARE command type. MSI uninstall paths can run
+	// repair / custom-action / network wait phases longer than the
+	// 5-min install median; 30-min default matches the agent-side
+	// hard cap in winget.RunUninstall (Codex 019e8de2 iter-3 absorb).
+	UninstallCommandTimeout time.Duration
 	// HTTPTimeout caps individual mTLS request time.
 	HTTPTimeout time.Duration
 
@@ -112,9 +118,10 @@ func Defaults() Config {
 		CertFilter:            DefaultCertFilter(),
 		HeartbeatInterval:     60 * time.Second,
 		CommandPollInterval:   30 * time.Second,
-		CommandTimeout:        120 * time.Second,
-		InstallCommandTimeout: 30 * time.Minute,
-		HTTPTimeout:           30 * time.Second,
+		CommandTimeout:          120 * time.Second,
+		InstallCommandTimeout:   30 * time.Minute,
+		UninstallCommandTimeout: 30 * time.Minute,
+		HTTPTimeout:             30 * time.Second,
 		TokenRefreshWindow:    2 * time.Hour,
 		CertRenewalWindow:     7 * 24 * time.Hour,
 		NoCertBackoff:         60 * time.Minute,
@@ -538,9 +545,20 @@ func (r *Runner) pollAndExecute(ctx context.Context, persisted PersistedConfig) 
 	// path honours the documented 30-min INSTALL_SOFTWARE hard cap
 	// instead of the lightweight 120s default that read-only commands
 	// inherit.
+	// AG-028 (Codex 019e8de2 iter-3 absorb): UNINSTALL_SOFTWARE also
+	// gets a per-command-type timeout (30 min default), parity with
+	// INSTALL_SOFTWARE. Without this branch the auto-enroll path
+	// truncated uninstalls at 120s.
 	commandTimeout := r.Config.CommandTimeout
-	if command.Type == protocol.CommandInstallSoftware && r.Config.InstallCommandTimeout > 0 {
-		commandTimeout = r.Config.InstallCommandTimeout
+	switch command.Type {
+	case protocol.CommandInstallSoftware:
+		if r.Config.InstallCommandTimeout > 0 {
+			commandTimeout = r.Config.InstallCommandTimeout
+		}
+	case protocol.CommandUninstallSoftware:
+		if r.Config.UninstallCommandTimeout > 0 {
+			commandTimeout = r.Config.UninstallCommandTimeout
+		}
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()

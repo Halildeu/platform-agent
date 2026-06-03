@@ -269,7 +269,7 @@ func TestRunUninstall_MissingRequestID_FailsValidation(t *testing.T) {
 		Now:     time.Now,
 	}
 	res := RunUninstall(context.Background(), req, opts)
-	if res.FinalStatus != UninstallFinalStatusFailedInternal {
+	if res.FinalStatus != UninstallFinalStatusFailedUnsupportedVerification {
 		t.Fatalf("expected FAILED_INTERNAL on missing requestId, got %s", res.FinalStatus)
 	}
 	if res.FailedReasonCode != UninstallReasonRequestIDMissing {
@@ -287,7 +287,7 @@ func TestRunUninstall_MissingPackageID_FailsValidation(t *testing.T) {
 		Now:     time.Now,
 	}
 	res := RunUninstall(context.Background(), req, opts)
-	if res.FinalStatus != UninstallFinalStatusFailedInternal {
+	if res.FinalStatus != UninstallFinalStatusFailedUnsupportedVerification {
 		t.Fatalf("expected FAILED_INTERNAL on missing packageId, got %s", res.FinalStatus)
 	}
 	if res.FailedReasonCode != UninstallReasonPackageIDMissing {
@@ -372,7 +372,7 @@ func TestRunUninstall_RunnerTimedOut_PostMatched_Timeout(t *testing.T) {
 		Now:             time.Now,
 	}
 	res := RunUninstall(context.Background(), req, opts)
-	if res.FinalStatus != UninstallFinalStatusFailedTimeout {
+	if res.FinalStatus != UninstallFinalStatusPartialInconclusive {
 		t.Fatalf("expected FAILED_TIMEOUT on timeout+post-matched, got %s", res.FinalStatus)
 	}
 }

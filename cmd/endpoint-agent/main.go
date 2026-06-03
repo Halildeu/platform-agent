@@ -254,6 +254,13 @@ func newAutoEnrollRunner(cfg config.Config, apiURLOverride string, logger *log.L
 	if cfg.InstallCommandTimeout > 0 {
 		aeCfg.InstallCommandTimeout = cfg.InstallCommandTimeout
 	}
+	// AG-028 (Codex 019e8de2 iter-3 absorb): same propagation for
+	// UNINSTALL_SOFTWARE. Without this the auto-enroll path falls back
+	// to the 120s CommandTimeout and the 30-min RunUninstall budget is
+	// truncated by the parent context.
+	if cfg.UninstallCommandTimeout > 0 {
+		aeCfg.UninstallCommandTimeout = cfg.UninstallCommandTimeout
+	}
 	aeCfg.CertFilter.SubjectSuffix = cfg.AutoEnrollCertSubjectSuffix
 	aeCfg.CertFilter.SANURIPrefix = cfg.AutoEnrollCertSANURIPrefix
 
