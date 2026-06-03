@@ -21,6 +21,13 @@ import (
 // executor path without spawning a real winget invocation.
 var installWinGetFn = winget.InstallWinGet
 
+// uninstallWinGetFn is the AG-028 counterpart — same seam pattern for
+// the `UNINSTALL_SOFTWARE` command. Production wires winget.UninstallWinGet
+// (Windows runner / non-Windows stub via the build-tagged uninstallers).
+// Tests override to exercise the executor path without spawning a real
+// winget invocation.
+var uninstallWinGetFn = winget.UninstallWinGet
+
 type LocalExecutor struct {
 	Capabilities []protocol.CommandType
 	AgentVersion string
@@ -229,6 +236,25 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 		result.Status = mapInstallStatusToCommandStatus(installResult.FinalStatus)
 		result.Summary = fmt.Sprintf("INSTALL_SOFTWARE %s", installResult.FinalStatus)
 		result.Details = map[string]interface{}{"install": installResult}
+	case protocol.CommandUninstallSoftware:
+		// AG-028 (Faz 22.5.6) — managed uninstall execution adapter.
+		//
+		// Mirror of INSTALL_SOFTWARE: payload JSON round-trip,
+		// structured UninstallResult shipped via
+		// `Details.uninstall`. Backend `UninstallEvidencePayloadPolicy`
+		// validates/redacts BEFORE persisting to
+		// `endpoint_command_results` + `endpoint_uninstall_audit`
+		// (Phase 2B, separate PR).
+		req, payloadErr := unmarshalUninstallRequest(command.Payload)
+		if payloadErr != nil {
+			result.Status = protocol.CommandStatusFailed
+			result.Summary = payloadErr.Error()
+			break
+		}
+		uninstallResult := uninstallWinGetFn(ctx, req)
+		result.Status = mapUninstallStatusToCommandStatus(uninstallResult.FinalStatus)
+		result.Summary = fmt.Sprintf("UNINSTALL_SOFTWARE %s", uninstallResult.FinalStatus)
+		result.Details = map[string]interface{}{"uninstall": uninstallResult}
 	default:
 		result.Status = protocol.CommandStatusUnsupported
 		result.Summary = "Command is not implemented by this agent build"
@@ -288,6 +314,62 @@ func mapInstallStatusToCommandStatus(finalStatus string) protocol.CommandStatus 
 	case winget.FinalStatusFailedUnsupportedPlatform,
 		winget.FinalStatusFailedUnsupportedDetectionRule,
 		winget.FinalStatusFailedUnsupportedArgsPolicy:
+		return protocol.CommandStatusUnsupported
+	default:
+		return protocol.CommandStatusFailed
+	}
+}
+
+// unmarshalUninstallRequest converts the wire-side payload map into a
+// canonical winget.UninstallRequest. Validation is delegated to the
+// uninstall pipeline (RunUninstall) which fails-closed on unsupported
+// detection rules / args presets / missing required fields; this
+// function only guarantees that the shape JSON-decodes without
+// panicking and the contract minima are present.
+func unmarshalUninstallRequest(payload map[string]interface{}) (winget.UninstallRequest, error) {
+	if payload == nil {
+		return winget.UninstallRequest{}, errors.New("UNINSTALL_SOFTWARE payload is empty")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return winget.UninstallRequest{}, fmt.Errorf("UNINSTALL_SOFTWARE payload re-marshal failed: %w", err)
+	}
+	var req winget.UninstallRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return winget.UninstallRequest{}, fmt.Errorf("UNINSTALL_SOFTWARE payload decode failed: %w", err)
+	}
+	if strings.TrimSpace(string(req.DetectionRule.Type)) == "" {
+		return winget.UninstallRequest{}, errors.New("UNINSTALL_SOFTWARE payload missing detectionRule.type")
+	}
+	if strings.TrimSpace(req.RequestID) == "" {
+		return winget.UninstallRequest{}, errors.New("UNINSTALL_SOFTWARE payload missing requestId")
+	}
+	if strings.TrimSpace(req.PackageID) == "" && strings.TrimSpace(req.CatalogPackageID) == "" {
+		return winget.UninstallRequest{}, errors.New("UNINSTALL_SOFTWARE payload missing packageId / catalogPackageId")
+	}
+	// argsPolicyPreset is REQUIRED — backend
+	// `EndpointUninstallService.buildUninstallPayload` (Phase 2B) will
+	// always send it, but v1 contracts the absent case as
+	// FAILED_UNSUPPORTED_VERIFICATION at the agent (defense in depth).
+	if strings.TrimSpace(req.ArgsPolicyPreset) == "" {
+		return winget.UninstallRequest{}, errors.New("UNINSTALL_SOFTWARE payload missing argsPolicyPreset")
+	}
+	return req, nil
+}
+
+// mapUninstallStatusToCommandStatus mirrors mapInstallStatusToCommandStatus
+// for AG-028. SUCCEEDED_VERIFIED + SKIP_ALREADY_ABSENT → SUCCEEDED;
+// FAILED_UNSUPPORTED_* + UNSUPPORTED probe state → UNSUPPORTED; all
+// other terminal states (PARTIAL_RESIDUE / PARTIAL_INCONCLUSIVE /
+// FAILED_EXIT / FAILED_VERIFY_GHOST / FAILED_TIMEOUT /
+// FAILED_PRECHECK_INCONCLUSIVE / FAILED_INTERNAL) → FAILED.
+func mapUninstallStatusToCommandStatus(finalStatus string) protocol.CommandStatus {
+	switch finalStatus {
+	case winget.UninstallFinalStatusSucceededVerified,
+		winget.UninstallFinalStatusSkipAlreadyAbsent:
+		return protocol.CommandStatusSucceeded
+	case winget.UninstallFinalStatusFailedUnsupportedPlatform,
+		winget.UninstallFinalStatusFailedUnsupportedVerification:
 		return protocol.CommandStatusUnsupported
 	default:
 		return protocol.CommandStatusFailed

@@ -35,6 +35,18 @@ const (
 	// mutation. See internal/winget/install_winget.go for the
 	// canonical wire-shape.
 	CommandInstallSoftware CommandType = "INSTALL_SOFTWARE"
+	// AG-028 (Faz 22.5.6): agent-side managed uninstall execution
+	// adapter. Backend (Phase 1b EndpointUninstallService) dispatches
+	// after the propose/approve maker-checker + provenance + capability
+	// + heartbeat freshness + authoritative-detection-rule gates pass.
+	// Agent runs absence-aware ProbeState pre-/post-probe and reports
+	// the AG-028 UninstallResult. v1 authoritative detector tier ONLY:
+	// REGISTRY_UNINSTALL / FILE_EXISTS / FILE_SHA256 / FILE_VERSION.
+	// WINGET_PACKAGE → FAILED_UNSUPPORTED_VERIFICATION (Codex 019e8de2
+	// iter-1 absorb: Session-0 `winget list` cache lag unreliable).
+	// See internal/winget/uninstall_winget.go for the canonical
+	// wire-shape.
+	CommandUninstallSoftware CommandType = "UNINSTALL_SOFTWARE"
 )
 
 type CommandStatus string

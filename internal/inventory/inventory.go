@@ -717,6 +717,15 @@ func RuntimeCapabilities() []protocol.CommandType {
 			// Validate() rejects every INSTALL_SOFTWARE command
 			// before the executor branch can run.
 			protocol.CommandInstallSoftware,
+			// AG-028 (Faz 22.5.6): Windows-only managed uninstall
+			// adapter. Backend Phase 1b approve gate reads heartbeat
+			// payload.capabilities and rejects with 422 if
+			// UNINSTALL_SOFTWARE missing. Advertised ONLY on Windows
+			// to mirror INSTALL_SOFTWARE — non-Windows executor stub
+			// would return FAILED_UNSUPPORTED_PLATFORM. Codex
+			// 019e8de2 iter-1 absorb: advertise only what is actually
+            // dispatchable on this build (no forward-matrix).
+			protocol.CommandUninstallSoftware,
 		)
 	}
 	return capabilities
