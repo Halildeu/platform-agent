@@ -207,11 +207,11 @@ const (
 	// failure. Phase 2B audit mapping reads `failedReasonCode` for the
 	// drawer "İşlemler" surface.
 	//
-	// (Constants below are kept for reasonCode parity; they are NOT
-	// agent-emitted finalStatus values anymore.)
-	// UninstallFinalStatusPartialInconclusive was eliminated as a wire value
+	// FAILED_TIMEOUT and FAILED_INTERNAL were eliminated as wire values
 	// in iter-3; agents now emit PARTIAL_INCONCLUSIVE +
-	// failedReasonCode=uninstall_timeout instead.
+	// failedReasonCode=uninstall_timeout (for runner timeout) and
+	// FAILED_UNSUPPORTED_VERIFICATION + failedReasonCode=<specific>
+	// (for programmatic-side issues) instead.
 )
 
 // FailedReason codes (machine-readable forensic detail; bounded
@@ -455,7 +455,7 @@ type UninstallOptions struct {
 //	     • PRESENT_MISMATCH → PARTIAL_RESIDUE.
 //	     • AMBIGUOUS / ERROR / UNSUPPORTED → PARTIAL_INCONCLUSIVE.
 //	7. Timeout / cancel during runner → process-tree kill, return
-//	   FAILED_TIMEOUT (or PARTIAL_INCONCLUSIVE if a bounded post-probe
+//	   PARTIAL_INCONCLUSIVE (when a bounded post-probe if a bounded post-probe
 //	   could still execute under the parent context).
 func RunUninstall(parentCtx context.Context, req UninstallRequest, opts UninstallOptions) UninstallResult {
 	if opts.Now == nil {

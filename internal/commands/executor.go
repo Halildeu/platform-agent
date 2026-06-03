@@ -361,8 +361,8 @@ func unmarshalUninstallRequest(payload map[string]interface{}) (winget.Uninstall
 // for AG-028. SUCCEEDED_VERIFIED + SKIP_ALREADY_ABSENT → SUCCEEDED;
 // FAILED_UNSUPPORTED_* + UNSUPPORTED probe state → UNSUPPORTED; all
 // other terminal states (PARTIAL_RESIDUE / PARTIAL_INCONCLUSIVE /
-// FAILED_EXIT / FAILED_VERIFY_GHOST / FAILED_TIMEOUT /
-// FAILED_PRECHECK_INCONCLUSIVE / FAILED_INTERNAL) → FAILED.
+// FAILED_EXIT / FAILED_VERIFY_GHOST / PARTIAL_INCONCLUSIVE / uninstall_timeout /
+// FAILED_PRECHECK_INCONCLUSIVE / FAILED_UNSUPPORTED_VERIFICATION) → FAILED.
 func mapUninstallStatusToCommandStatus(finalStatus string) protocol.CommandStatus {
 	switch finalStatus {
 	case winget.UninstallFinalStatusSucceededVerified,
