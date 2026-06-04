@@ -239,7 +239,7 @@ func enumerateRegistryRun(root registry.Key, path string, location StartupAppLoc
 			redactions = append(redactions, StartupExposureProbeError{
 				Code:    StartupExposureErrNameValueRedacted,
 				Source:  location,
-				Summary: "Autorun entry name redacted (path or command fragment)",
+				Summary: "Autorun entry name redacted (forbidden value pattern)",
 			})
 			continue
 		}
@@ -323,7 +323,7 @@ func enumerateStartupFolder(envExpand func() string, location StartupAppLocation
 			redactions = append(redactions, StartupExposureProbeError{
 				Code:    StartupExposureErrNameValueRedacted,
 				Source:  location,
-				Summary: "Startup-folder entry name redacted (path or command fragment)",
+				Summary: "Startup-folder entry name redacted (forbidden value pattern)",
 			})
 			continue
 		}
@@ -448,7 +448,7 @@ try {
 			redactions = append(redactions, StartupExposureProbeError{
 				Code:    StartupExposureErrNameValueRedacted,
 				Source:  bucket,
-				Summary: "Scheduled task name redacted (path or command fragment)",
+				Summary: "Scheduled task name redacted (forbidden value pattern)",
 			})
 			continue
 		}

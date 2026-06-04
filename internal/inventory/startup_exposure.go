@@ -189,7 +189,8 @@ const (
 	// NAME_VALUE_REDACTED — Codex 019e83a8 iter-1 P1#2 absorb: when a
 	// registry value name / task name / startup-folder basename matches
 	// a forbidden value pattern (drive letter / UNC / unix path /
-	// executable extension / control char), the agent OMITS the entry
+	// executable extension / raw MSI ProductCode GUID / Windows SID /
+	// control char), the agent OMITS the entry
 	// from startupApps AND emits this typed probe error so the wire
 	// never carries the leak. Source carries the autorun anchor of
 	// the omitted entry; summary stays a bounded static phrasing.
@@ -329,8 +330,24 @@ func startupExposureElapsedMs(start time.Time, now func() time.Time) int {
 // here — they would require an allowlist-shaped name policy which is
 // out of scope for v1. Operators who want stricter shapes can extend
 // at the backend policy layer.
+//
+// Codex 019e94d8 (AG-040 LIVE unblock): the mirror MUST also cover the
+// backend's remaining forbidden VALUE patterns or a single offending
+// name 400s the WHOLE COLLECT_INVENTORY result (services + startup) —
+// observed live on a real Windows host: a Run value named
+// `{90160000-...}` (MSI-published autorun) passed this mirror, reached
+// SoftwareInventoryPayloadPolicy, and rejected the entire payload.
+// Backend rejects 3 value patterns: raw MSI ProductCode GUID
+// `{8-4-4-4-12 hex}`, `c:\users\<name>` paths (already covered by the
+// broader `[a-z]:\` alternative), and Windows SID `S-1-5-21-...`. The
+// GUID + SID alternatives below close the gap; such entries are
+// OMITTED + NAME_VALUE_REDACTED exactly like path names. We
+// deliberately do NOT extend to UNBRACED GUID-shaped names — that is
+// outside the backend RAW_MSI_GUID pattern and would silently widen
+// policy. (Resolving ProductCode→DisplayName for startup visibility is
+// a separate v2 enhancement, not this fail-closed unblock.)
 var nameValueDenylistPattern = regexp.MustCompile(
-	`(?i)([a-z]:\\|\\\\|/[a-z]+/[a-z]+|\.(exe|dll|bat|cmd|ps1|vbs)\b|[\x00-\x1F\x7F])`,
+	`(?i)([a-z]:\\|\\\\|/[a-z]+/[a-z]+|\.(exe|dll|bat|cmd|ps1|vbs)\b|\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}|s-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+|[\x00-\x1F\x7F])`,
 )
 
 // shouldRedactName reports whether a value/task/folder name carries a
@@ -408,7 +425,7 @@ func buildRedactionProbeErrors(counts map[StartupAppLocation]int) []StartupExpos
 		out = append(out, StartupExposureProbeError{
 			Code:    StartupExposureErrNameValueRedacted,
 			Source:  loc,
-			Summary: "Autorun entry name(s) redacted under this anchor (path or executable fragment)",
+			Summary: "Autorun entry name(s) redacted under this anchor (forbidden value pattern)",
 		})
 	}
 	return out
