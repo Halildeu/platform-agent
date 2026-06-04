@@ -362,33 +362,14 @@ jobs:
           TAG: ${{ needs.classify-release.outputs.tag }}
           TIER: ${{ needs.classify-release.outputs.signing_tier }}
           SHA256: ${{ steps.sign-and-hash.outputs.sha256 }}
-        run: |
-          $notes = @"
-# platform-agent $env:TAG
-
-> **Signing tier**: ``$env:TIER`` — lab-only-evidence releases use an ephemeral self-signed certificate generated on the release runner. They are **not** trusted by Windows out of the box; the install path requires explicit ``-AcceptLabOnlySigning`` opt-in. **Do not install on production endpoints**. Trusted-signing releases (``v*.*.*`` without ``-lab.N``) are parked until Faz 22.2 Azure Trusted Signing.
-
-## One-line lab install
-
-``````powershell
-& ([scriptblock]::Create((iwr -useb "https://github.com/${{ github.repository }}/releases/download/$env:TAG/install.ps1").Content)) ``
-    -ApiUrl "https://api.acik.com" ``
-    -EnrollmentToken `$env:ENROLLMENT_TOKEN ``
-    -AcceptLabOnlySigning ``
-    -Start
-``````
-
-## Artifacts
-
-| Asset | SHA-256 |
-|---|---|
-| ``endpoint-agent.exe`` | ``$env:SHA256`` |
-
-The ``SHA256SUMS`` and ``release-manifest.json`` assets carry the full set of post-sign hashes for audit. The installer itself embeds the same ``ExpectedSha256`` and ``ExpectedSignerThumbprint`` as its defaults, so a tampered ``install.ps1`` cannot point the operator at a different binary without the operator overriding the values on the command line.
-
-Tracked-by: platform-k8s-gitops Faz 22.5 §3 — agent distribution.
-"@
-          $notes | Out-File -Encoding utf8 dist/RELEASE_NOTES.md
+          # github.repository is passed via env because ${{ }} expressions
+          # are not expanded inside the checked-out emit-release-notes.ps1.
+          REPO: ${{ github.repository }}
+        # The notes body lives in a standalone .ps1 — a PowerShell
+        # double-quoted here-string needs its `"@` terminator at column 0,
+        # which is incompatible with a YAML `run: |` block scalar and made
+        # this workflow file invalid (validation-time failure on every push).
+        run: pwsh scripts/release/emit-release-notes.ps1 -OutFile dist/RELEASE_NOTES.md
 
       - name: Upload release dist artifact
         uses: actions/upload-artifact@v4
