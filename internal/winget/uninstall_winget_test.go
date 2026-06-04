@@ -2,6 +2,7 @@ package winget
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -442,5 +443,175 @@ func TestRunUninstall_UnknownProbeState_NormalizesToError(t *testing.T) {
 	if res.FinalStatus != UninstallFinalStatusFailedPrecheckInconclusive {
 		t.Fatalf("expected unknown probe-state to normalise to ERROR → FAILED_PRECHECK_INCONCLUSIVE, got %s",
 			res.FinalStatus)
+	}
+}
+
+// ────────────────────────────────────────────────────────────────
+// Evidence-policy contract (LIVE 400 fix, Codex cross-AI verdict A)
+//
+// The backend UninstallEvidencePayloadPolicy rejects raw
+// stdoutTail/stderrTail in uninstall evidence with HTTP 400
+// `Forbidden uninstall-evidence field 'stdoutTail' at $.uninstall`.
+// LIVE: a real 7-Zip uninstall succeeded on the device but the result
+// submission was 400-rejected because the agent serialised raw tails.
+// The fix: the result wire JSON must carry ONLY bounded, redacted
+// stdoutSummary/stderrSummary and NEVER the raw-tail keys.
+
+// TestRunUninstall_WireJSON_NoRawTails_OnlyRedactedSummaries marshals the
+// full UninstallResult produced by a real MATCHED→ABSENT 7-Zip uninstall
+// (the LIVE scenario) and asserts the wire shape the backend accepts.
+func TestRunUninstall_WireJSON_NoRawTails_OnlyRedactedSummaries(t *testing.T) {
+	req := goodReq()
+
+	// Runner output mirrors a verbose winget/MSI uninstall log carrying a
+	// credential-shaped secret (the exact class the backend forbids on the
+	// wire). MASKME is the sentinel that must NOT survive redaction.
+	dirtyStdout := strings.Join([]string{
+		"Found 7-Zip 24.07",
+		"Starting package uninstall...",
+		"Downloading https://operator:MASKME@vendor.example.com/uninstall.msi",
+		"Applying LICENSEKEY=MASKME",
+		"Successfully uninstalled",
+	}, "\n")
+	dirtyStderr := "warn: residual cleanup via ?client_secret=MASKME"
+
+	opts := UninstallOptions{
+		Locator: stubLocator("/path/to/winget"),
+		Probe: stubProbeSequence(
+			UninstallProbeResult{State: ProbeStateMatched, Authority: DetectionReliabilityAuthoritative},
+			UninstallProbeResult{State: ProbeStateAbsent, Authority: DetectionReliabilityAuthoritative},
+		),
+		UninstallRunner: stubRunner(RunnerOutcome{
+			ExitCode:         0,
+			DurationMs:       1200,
+			StdoutTail:       dirtyStdout,
+			StdoutTotalBytes: len(dirtyStdout),
+			StderrTail:       dirtyStderr,
+			StderrTotalBytes: len(dirtyStderr),
+		}),
+		Now: time.Now,
+	}
+
+	res := RunUninstall(context.Background(), req, opts)
+	if res.FinalStatus != UninstallFinalStatusSucceededVerified {
+		t.Fatalf("LIVE scenario should be SUCCEEDED_VERIFIED, got %s", res.FinalStatus)
+	}
+
+	raw, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal UninstallResult: %v", err)
+	}
+	wire := string(raw)
+
+	// (1) The forbidden raw-tail keys must NOT appear on the wire at all.
+	for _, forbidden := range []string{`"stdoutTail"`, `"stderrTail"`} {
+		if strings.Contains(wire, forbidden) {
+			t.Errorf("wire JSON must NOT contain forbidden key %s (backend 400s on it): %s",
+				forbidden, wire)
+		}
+	}
+
+	// (2) The allowed redacted-summary keys MUST appear (stdout + stderr
+	// both present in this run).
+	for _, want := range []string{`"stdoutSummary"`, `"stderrSummary"`} {
+		if !strings.Contains(wire, want) {
+			t.Errorf("wire JSON must contain summary key %s when output is present: %s",
+				want, wire)
+		}
+	}
+
+	// (3) The known secret placed in the raw tail must NOT survive into the
+	// wire JSON — redaction works end-to-end.
+	if strings.Contains(wire, "MASKME") {
+		t.Errorf("secret MASKME leaked into wire JSON: %s", wire)
+	}
+	// And the struct fields themselves carry the sanitised text.
+	if strings.Contains(res.StdoutSummary, "MASKME") {
+		t.Errorf("secret MASKME leaked into StdoutSummary: %q", res.StdoutSummary)
+	}
+	if strings.Contains(res.StderrSummary, "MASKME") {
+		t.Errorf("secret MASKME leaked into StderrSummary: %q", res.StderrSummary)
+	}
+	// The redaction marker proves the credential lines were rewritten, not
+	// dropped wholesale — operator still sees structure.
+	if !strings.Contains(res.StdoutSummary, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker in StdoutSummary, got %q", res.StdoutSummary)
+	}
+}
+
+// TestRunUninstall_WireJSON_OmitsSummaries_WhenNoOutput asserts the
+// no-output path: with empty runner tails the summary fields are OMITTED
+// (omitempty) and — critically — the forbidden raw-tail keys are still
+// absent. There must be NO fall-back to raw tails ever.
+func TestRunUninstall_WireJSON_OmitsSummaries_WhenNoOutput(t *testing.T) {
+	req := goodReq()
+	opts := UninstallOptions{
+		Locator: stubLocator("/path/to/winget"),
+		Probe: stubProbeSequence(
+			UninstallProbeResult{State: ProbeStateMatched, Authority: DetectionReliabilityAuthoritative},
+			UninstallProbeResult{State: ProbeStateAbsent, Authority: DetectionReliabilityAuthoritative},
+		),
+		UninstallRunner: stubRunner(RunnerOutcome{ExitCode: 0}), // no stdout/stderr
+		Now:             time.Now,
+	}
+	res := RunUninstall(context.Background(), req, opts)
+	if res.StdoutSummary != "" || res.StderrSummary != "" {
+		t.Fatalf("expected empty summaries when runner produced no output, got stdout=%q stderr=%q",
+			res.StdoutSummary, res.StderrSummary)
+	}
+	raw, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal UninstallResult: %v", err)
+	}
+	wire := string(raw)
+	for _, key := range []string{`"stdoutTail"`, `"stderrTail"`, `"stdoutSummary"`, `"stderrSummary"`} {
+		if strings.Contains(wire, key) {
+			t.Errorf("empty-output wire JSON must omit %s, got: %s", key, wire)
+		}
+	}
+}
+
+// TestSummarizeForWire_RedactsBoundsAndOmits unit-tests the helper:
+// redaction, tail truncation past UninstallSummaryLimitBytes with the
+// marker, and empty-in → empty-out (never a raw fall-back).
+func TestSummarizeForWire_RedactsBoundsAndOmits(t *testing.T) {
+	// Empty in → empty out.
+	if got := summarizeForWire(""); got != "" {
+		t.Errorf("empty input must summarise to empty, got %q", got)
+	}
+	if got := summarizeForWire("   \r\n  "); got != "" {
+		t.Errorf("whitespace-only input must summarise to empty, got %q", got)
+	}
+
+	// Redaction: credential masked, structural anchors survive.
+	red := summarizeForWire("Applying LICENSEKEY=SUPERSECRET and ?token=ABCDEF")
+	if strings.Contains(red, "SUPERSECRET") || strings.Contains(red, "ABCDEF") {
+		t.Errorf("credentials must be redacted, got %q", red)
+	}
+	if !strings.Contains(red, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker, got %q", red)
+	}
+
+	// Truncation: input longer than the bound keeps the TAIL + marker.
+	long := strings.Repeat("A", UninstallSummaryLimitBytes) + "TAIL_MARKER_END"
+	trunc := summarizeForWire(long)
+	if len(trunc) > UninstallSummaryLimitBytes+len(UninstallSummaryTruncatedMarker)+1 {
+		t.Errorf("summary exceeds bound: %d bytes", len(trunc))
+	}
+	if !strings.HasPrefix(trunc, UninstallSummaryTruncatedMarker) {
+		t.Errorf("expected truncation marker prefix, got %q", trunc[:40])
+	}
+	if !strings.HasSuffix(trunc, "TAIL_MARKER_END") {
+		t.Errorf("expected the TAIL of the input to survive truncation, got suffix %q",
+			trunc[len(trunc)-20:])
+	}
+
+	// Short input is returned verbatim (after redaction), no marker.
+	short := summarizeForWire("clean line")
+	if short != "clean line" {
+		t.Errorf("short clean input should pass through, got %q", short)
+	}
+	if strings.Contains(short, UninstallSummaryTruncatedMarker) {
+		t.Errorf("short input must not be marked truncated, got %q", short)
 	}
 }
