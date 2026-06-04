@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // AG-028 — Managed Uninstall Execution Adapter (Faz 22.5.6).
@@ -88,6 +89,22 @@ const DefaultUninstallTimeout = 30 * time.Minute
 // DetectionProbeTimeout — registry walks + bounded file hashes complete
 // well inside this budget.
 const UninstallProbeTimeout = 30 * time.Second
+
+// UninstallSummaryLimitBytes bounds the redacted stdout/stderr SUMMARY
+// the agent puts on the result wire. Deliberately much smaller than the
+// install path's 4 KiB CaptureLimitBytes tail: the backend
+// UninstallEvidencePayloadPolicy forbids raw tails entirely, so the wire
+// carries only a short forensic excerpt (last N bytes, sanitised). 512
+// bytes is enough to surface the trailing winget/MSI error line without
+// re-introducing a large data-leak surface.
+const UninstallSummaryLimitBytes = 512
+
+// UninstallSummaryTruncatedMarker is prefixed onto a stdout/stderr
+// summary when the source text was longer than UninstallSummaryLimitBytes
+// and only its tail survives. It makes truncation visible in the wire
+// JSON itself (the StdoutTruncated/StderrTruncated scalar still carries
+// the machine-readable flag).
+const UninstallSummaryTruncatedMarker = "[truncated]"
 
 // ────────────────────────────────────────────────────────────────
 // ProbeState — closed enum of device-target observations
@@ -350,10 +367,19 @@ type UninstallProbeResult struct {
 }
 
 // UninstallResult is the wire-safe outcome the agent reports back via
-// the command-result channel. Every field is machine-readable; backend
-// `UninstallEvidencePayloadPolicy.redact()` strips raw tails (NOT in
-// allow-list) — `StdoutTail`/`StderrTail` therefore land in
-// `endpoint_command_results` but NOT in the audit row.
+// the command-result channel. Every field is machine-readable.
+//
+// EVIDENCE POLICY (LIVE 400 fix, Codex cross-AI verdict A — must-fix):
+// the backend `UninstallEvidencePayloadPolicy` DELIBERATELY FORBIDS raw
+// `stdoutTail`/`stderrTail` in uninstall evidence (security: raw tails
+// may leak data) and rejects the whole submission with HTTP 400
+// `Forbidden uninstall-evidence field 'stdoutTail' at $.uninstall`. The
+// agent therefore does NOT send raw tails on the wire; it sends only
+// bounded, redacted `StdoutSummary`/`StderrSummary` (sanitised via the
+// AG-027L `sanitizeForWire` redactor, then truncated to
+// `UninstallSummaryLimitBytes`). The backend accepts summaries only.
+// This is the destructive-side divergence from the INSTALL path, whose
+// policy still permits redacted tails.
 type UninstallResult struct {
 	FinalStatus      string               `json:"finalStatus"`
 	SchemaVersion    int                  `json:"schemaVersion"`
@@ -379,13 +405,22 @@ type UninstallResult struct {
 	// surface.
 	PreProbe  UninstallProbeResult `json:"preProbe,omitempty"`
 	PostProbe UninstallProbeResult `json:"postProbe,omitempty"`
-	// StdoutTail/StderrTail captured for forensic depth; dropped by the
-	// backend sanitiser (Codex 019e8d81 iter-6 absorb — backend redactor
-	// weaker than agent AG-027L PII redactor, raw tails not surfaced).
-	StdoutTail       string `json:"stdoutTail,omitempty"`
+	// StdoutSummary/StderrSummary are the ONLY stdout/stderr text the
+	// agent puts on the result wire JSON. They are bounded + redacted:
+	// the raw runner tail is run through the AG-027L `sanitizeForWire`
+	// redactor and then truncated to `UninstallSummaryLimitBytes`. The
+	// agent does NOT send raw `stdoutTail`/`stderrTail` on the wire —
+	// the backend `UninstallEvidencePayloadPolicy` forbids those keys
+	// (raw tails may leak data) and rejects the submission with HTTP 400;
+	// only bounded redacted `stdoutSummary`/`stderrSummary` are sent and
+	// the backend accepts summaries only. If a summary cannot be produced
+	// (empty raw text) the field is OMITTED — there is NEVER a fall-back
+	// to the raw tail. Raw tails may still be captured internally for
+	// diagnostics/logging but never reach this struct's wire JSON.
+	StdoutSummary    string `json:"stdoutSummary,omitempty"`
 	StdoutTruncated  bool   `json:"stdoutTruncated"`
 	StdoutTotalBytes int    `json:"stdoutTotalBytes"`
-	StderrTail       string `json:"stderrTail,omitempty"`
+	StderrSummary    string `json:"stderrSummary,omitempty"`
 	StderrTruncated  bool   `json:"stderrTruncated"`
 	StderrTotalBytes int    `json:"stderrTotalBytes"`
 }
@@ -604,10 +639,14 @@ func RunUninstall(parentCtx context.Context, req UninstallRequest, opts Uninstal
 	}
 	result.RebootRequired = outcome.RebootRequired
 	result.KillStrategy = outcome.KillStrategy
-	result.StdoutTail = outcome.StdoutTail
+	// Backend UninstallEvidencePayloadPolicy forbids raw stdout/stderr
+	// tails (HTTP 400). Only bounded, redacted summaries reach the wire;
+	// the raw outcome.StdoutTail/StderrTail are NOT copied onto the
+	// result. Scalar truncated/total-bytes flags are safe to carry.
+	result.StdoutSummary = summarizeForWire(outcome.StdoutTail)
 	result.StdoutTruncated = outcome.StdoutTruncated
 	result.StdoutTotalBytes = outcome.StdoutTotalBytes
-	result.StderrTail = outcome.StderrTail
+	result.StderrSummary = summarizeForWire(outcome.StderrTail)
 	result.StderrTruncated = outcome.StderrTruncated
 	result.StderrTotalBytes = outcome.StderrTotalBytes
 
@@ -738,6 +777,39 @@ func mergeEvidence(a, b map[string]interface{}) map[string]interface{} {
 		return nil
 	}
 	return out
+}
+
+// summarizeForWire produces the bounded, redacted stdout/stderr SUMMARY
+// the agent is allowed to send on the uninstall result wire.
+//
+// The raw runner tail is FIRST redacted through the AG-027L
+// `sanitizeForWire` pipeline (URL userinfo + MSI/installer credential
+// property assignments + token-bearing query params + the baseline
+// PII/JWT/SID/user-path/product-key shapes), THEN truncated to
+// UninstallSummaryLimitBytes keeping the TAIL (the trailing
+// winget/MSI error line is the operationally useful part). Redaction
+// happens before truncation so a secret token can never be split across
+// the truncation boundary and leak a partial value.
+//
+// Returns "" (so the omitempty wire field is OMITTED) when the source
+// is empty or redacts to nothing — there is NEVER a fall-back to the
+// raw tail.
+func summarizeForWire(raw string) string {
+	cleaned := sanitizeForWire(raw)
+	if cleaned == "" {
+		return ""
+	}
+	// Byte-bounded tail. Runes are not split: back up to a UTF-8 rune
+	// boundary so the redacted text stays valid (avoids a mojibake byte
+	// that some JSON consumers reject).
+	if len(cleaned) > UninstallSummaryLimitBytes {
+		start := len(cleaned) - UninstallSummaryLimitBytes
+		for start < len(cleaned) && !utf8.RuneStart(cleaned[start]) {
+			start++
+		}
+		cleaned = UninstallSummaryTruncatedMarker + " " + cleaned[start:]
+	}
+	return cleaned
 }
 
 // JSONOrErr is a small convenience to serialise an UninstallResult for
