@@ -189,7 +189,8 @@ const (
 	// NAME_VALUE_REDACTED — Codex 019e83a8 iter-1 P1#2 absorb: when a
 	// registry value name / task name / startup-folder basename matches
 	// a forbidden value pattern (drive letter / UNC / unix path /
-	// executable extension / control char), the agent OMITS the entry
+	// executable extension / raw MSI ProductCode GUID / Windows SID /
+	// control char), the agent OMITS the entry
 	// from startupApps AND emits this typed probe error so the wire
 	// never carries the leak. Source carries the autorun anchor of
 	// the omitted entry; summary stays a bounded static phrasing.
