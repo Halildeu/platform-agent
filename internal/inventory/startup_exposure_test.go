@@ -236,6 +236,19 @@ func TestShouldRedactName_ValueLevelDenylist(t *testing.T) {
 		{"helper.vbs", true, "vbs extension rejected"},
 		{"OneDrive Sync", false, "spaces accepted"},
 		{"Update_Agent", false, "underscore accepted"},
+		// Codex 019e94d8 (AG-040 LIVE unblock): raw MSI ProductCode GUID
+		// + Windows SID mirror completeness vs the backend
+		// SoftwareInventoryPayloadPolicy. A {GUID}-named Run value 400'd
+		// the entire COLLECT_INVENTORY result (services + startup) before
+		// this. The unbraced case stays accepted — we mirror the backend
+		// RAW_MSI_GUID pattern exactly, no silent policy widening.
+		{`{90160000-0011-0000-0000-0000000FF1CE}`, true, "raw MSI ProductCode GUID rejected"},
+		{`{90160000-0011-0000-0000-0000000ff1ce}`, true, "raw MSI ProductCode GUID case-insensitive rejected"},
+		{`Updater {90160000-0011-0000-0000-0000000FF1CE}`, true, "embedded raw MSI ProductCode GUID rejected"},
+		{`S-1-5-21-1111111111-2222222222-3333333333-1001`, true, "Windows SID rejected"},
+		{`s-1-5-21-1111111111-2222222222-3333333333-1001`, true, "Windows SID rejected case-insensitively"},
+		{`{not-a-guid}`, false, "non-GUID braces accepted"},
+		{`90160000-0011-0000-0000-0000000FF1CE`, false, "unbraced GUID-shaped name is outside backend RAW_MSI_GUID pattern"},
 	}
 	for _, c := range cases {
 		got := shouldRedactName(c.name)
