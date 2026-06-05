@@ -1,6 +1,10 @@
 package selfupdate
 
-import "strings"
+import (
+	"encoding/json"
+	"os"
+	"strings"
+)
 
 const activationPlanSchemaVersion = 1
 
@@ -81,4 +85,80 @@ func BuildActivationPlan(paths StagingPaths, currentBinaryPath, serviceName stri
 		ActualSignerThumbprint: normalizeThumbprint(ready.ActualSignerThumbprint),
 		SigningTier:            ready.SigningTier,
 	}, "", ""
+}
+
+// WriteActivationPlan atomically persists the local-only activation handoff
+// file. The file is deliberately not part of StageResult; it is consumed by a
+// later service-safe activation helper after the backend has received the
+// bounded staging evidence.
+func WriteActivationPlan(paths StagingPaths, plan ActivationPlan) (ErrorCode, string) {
+	if code, reason := validateStagingPaths(paths); code != "" {
+		return code, reason
+	}
+	if code, reason := validateActivationPlanForWrite(paths, plan); code != "" {
+		return code, reason
+	}
+	raw, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return ErrActivationPlanWrite, "marshal activation plan failed"
+	}
+	raw = append(raw, '\n')
+
+	tmp := paths.ActivationPlanPath + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return ErrActivationPlanWrite, "create activation plan temp failed"
+	}
+	cleanup := func() { _ = os.Remove(tmp) }
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		cleanup()
+		return ErrActivationPlanWrite, "write activation plan temp failed"
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		cleanup()
+		return ErrActivationPlanWrite, "fsync activation plan temp failed"
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return ErrActivationPlanWrite, "close activation plan temp failed"
+	}
+	if err := stagedFileHardener(tmp); err != nil {
+		cleanup()
+		return ErrActivationPlanWrite, "harden activation plan temp failed"
+	}
+	if err := os.Rename(tmp, paths.ActivationPlanPath); err != nil {
+		cleanup()
+		return ErrActivationPlanWrite, "promote activation plan failed"
+	}
+	if err := stagedFileHardener(paths.ActivationPlanPath); err != nil {
+		return ErrActivationPlanWrite, "harden activation plan final failed"
+	}
+	return "", ""
+}
+
+func validateActivationPlanForWrite(paths StagingPaths, plan ActivationPlan) (ErrorCode, string) {
+	if plan.SchemaVersion != activationPlanSchemaVersion {
+		return ErrActivationPlanWrite, "activation plan schema version mismatch"
+	}
+	if !validStagingID(plan.StagingID) || plan.StagingID != paths.StagingID || plan.ActivationPlanID != paths.StagingID {
+		return ErrActivationPlanWrite, "activation plan identifiers do not match staging paths"
+	}
+	if strings.TrimSpace(plan.ServiceName) == "" || strings.TrimSpace(plan.CurrentBinaryPath) == "" {
+		return ErrActivationPlanWrite, "activation plan missing service or current binary path"
+	}
+	if plan.StagedBinaryPath != paths.BinaryPath || plan.ActivationPlanPath != paths.ActivationPlanPath {
+		return ErrActivationPlanWrite, "activation plan local paths do not match staging paths"
+	}
+	if code, reason := VerifyClaimedSHA256(plan.ActualSha256, plan.ActualSha256); code != "" {
+		return code, reason
+	}
+	if strings.TrimSpace(plan.TargetVersion) == "" || strings.TrimSpace(plan.ActualSignerThumbprint) == "" {
+		return ErrActivationPlanWrite, "activation plan missing target version or signer"
+	}
+	if plan.SigningTier == "" {
+		return ErrActivationPlanWrite, "activation plan missing signing tier"
+	}
+	return "", ""
 }

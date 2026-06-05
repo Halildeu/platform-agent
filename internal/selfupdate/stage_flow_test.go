@@ -39,6 +39,17 @@ func TestStageCandidateFromReaderReady(t *testing.T) {
 	if string(got) != string(payload) {
 		t.Fatalf("staged bytes=%q", got)
 	}
+	planRaw, err := os.ReadFile(plan.ActivationPlanPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedPlan ActivationPlan
+	if err := json.Unmarshal(planRaw, &persistedPlan); err != nil {
+		t.Fatal(err)
+	}
+	if persistedPlan.ActivationPlanID != result.ActivationPlanID || persistedPlan.StagedBinaryPath != plan.StagedBinaryPath {
+		t.Fatalf("persisted activation plan mismatch: %+v plan=%+v", persistedPlan, plan)
+	}
 	stageJSON, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)

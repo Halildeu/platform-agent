@@ -85,5 +85,9 @@ func stageCandidateFromReader(in StageCandidateInput, verifier AuthenticodeVerif
 		removeStagedArtifacts(paths)
 		return Failed(code, reason), ActivationPlan{}
 	}
+	if code, reason := WriteActivationPlan(paths, plan); code != "" {
+		removeStagedArtifacts(paths)
+		return Failed(code, reason), ActivationPlan{}
+	}
 	return ready, plan
 }
