@@ -3,6 +3,7 @@ package selfupdate
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -24,6 +25,20 @@ type ActivationPlan struct {
 	ActualSha256           string      `json:"actualSha256"`
 	ActualSignerThumbprint string      `json:"actualSignerThumbprint"`
 	SigningTier            SigningTier `json:"signingTier"`
+}
+
+// ActivationReadiness is local-only evidence that the persisted activation
+// handoff still matches the staged binary before any service stop/swap work is
+// attempted. It deliberately omits filesystem paths so a future wire/audit
+// mirror cannot accidentally leak local layout.
+type ActivationReadiness struct {
+	ActivationPlanID       string      `json:"activationPlanId"`
+	TargetVersion          string      `json:"targetVersion"`
+	ActualSha256           string      `json:"actualSha256"`
+	ActualSignerThumbprint string      `json:"actualSignerThumbprint"`
+	SigningTier            SigningTier `json:"signingTier"`
+	CurrentBinaryPresent   bool        `json:"currentBinaryPresent"`
+	StagedBinaryVerified   bool        `json:"stagedBinaryVerified"`
 }
 
 // BuildReadyStageResult converts verified local staging evidence into the
@@ -138,6 +153,66 @@ func WriteActivationPlan(paths StagingPaths, plan ActivationPlan) (ErrorCode, st
 	return "", ""
 }
 
+// LoadActivationPlan reads and validates the local activation handoff file
+// without performing service mutation. This is the first step a later
+// activation helper must take before stopping the service or touching the
+// current binary.
+func LoadActivationPlan(paths StagingPaths) (ActivationPlan, ErrorCode, string) {
+	if code, reason := validateStagingPaths(paths); code != "" {
+		return ActivationPlan{}, code, reason
+	}
+	raw, err := os.ReadFile(paths.ActivationPlanPath)
+	if err != nil {
+		return ActivationPlan{}, ErrActivationPlanWrite, "read activation plan failed"
+	}
+	var plan ActivationPlan
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		return ActivationPlan{}, ErrActivationPlanWrite, "decode activation plan failed"
+	}
+	if code, reason := validateActivationPlanForWrite(paths, plan); code != "" {
+		return ActivationPlan{}, code, reason
+	}
+	return plan, "", ""
+}
+
+// VerifyActivationPlanReady performs the activation-phase preflight that is
+// safe to run before any service mutation: load the local plan, prove the
+// staged binary still hashes to the plan evidence, and prove the current binary
+// exists and is distinct from the staged binary. It does not stop services,
+// replace binaries, or create rollback state.
+func VerifyActivationPlanReady(paths StagingPaths, maxBytes int64) (ActivationReadiness, ErrorCode, string) {
+	plan, code, reason := LoadActivationPlan(paths)
+	if code != "" {
+		return ActivationReadiness{}, code, reason
+	}
+	if sameCleanPath(plan.CurrentBinaryPath, plan.StagedBinaryPath) {
+		return ActivationReadiness{}, ErrActivationPlanWrite, "current and staged binary paths must differ"
+	}
+	currentInfo, err := os.Stat(plan.CurrentBinaryPath)
+	if err != nil {
+		return ActivationReadiness{}, ErrStagingIO, "current binary is not readable"
+	}
+	if currentInfo.IsDir() {
+		return ActivationReadiness{}, ErrStagingIO, "current binary path is a directory"
+	}
+	stagedHash, code, reason := HashFileWithLimit(plan.StagedBinaryPath, maxBytes)
+	if code != "" {
+		return ActivationReadiness{}, code, reason
+	}
+	if code, reason := VerifyClaimedSHA256(stagedHash.ActualSha256, plan.ActualSha256); code != "" {
+		return ActivationReadiness{}, code, reason
+	}
+	return ActivationReadiness{
+		ActivationPlanID:       plan.ActivationPlanID,
+		TargetVersion:          plan.TargetVersion,
+		ActualSha256:           plan.ActualSha256,
+		ActualSignerThumbprint: plan.ActualSignerThumbprint,
+		SigningTier:            plan.SigningTier,
+		CurrentBinaryPresent:   true,
+		StagedBinaryVerified:   true,
+	}, "", ""
+}
+
 func validateActivationPlanForWrite(paths StagingPaths, plan ActivationPlan) (ErrorCode, string) {
 	if plan.SchemaVersion != activationPlanSchemaVersion {
 		return ErrActivationPlanWrite, "activation plan schema version mismatch"
@@ -161,4 +236,8 @@ func validateActivationPlanForWrite(paths StagingPaths, plan ActivationPlan) (Er
 		return ErrActivationPlanWrite, "activation plan missing signing tier"
 	}
 	return "", ""
+}
+
+func sameCleanPath(a, b string) bool {
+	return filepath.Clean(strings.TrimSpace(a)) == filepath.Clean(strings.TrimSpace(b))
 }

@@ -1,8 +1,11 @@
 package selfupdate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -118,6 +121,69 @@ func TestWriteActivationPlanPersistsLocalOnlyPlan(t *testing.T) {
 	}
 }
 
+func TestVerifyActivationPlanReady(t *testing.T) {
+	root := t.TempDir()
+	withNoopStagedFileHardener(t)
+	paths, plan, payload := writeTestActivationPlan(t, root)
+	currentPath := filepath.Join(root, "current-agent.exe")
+	if err := os.WriteFile(currentPath, []byte("current"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan.CurrentBinaryPath = currentPath
+	if code, reason := WriteActivationPlan(paths, plan); code != "" || reason != "" {
+		t.Fatalf("WriteActivationPlan: code=%q reason=%q", code, reason)
+	}
+	if err := os.WriteFile(paths.BinaryPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, code, reason := VerifyActivationPlanReady(paths, 1024)
+	if code != "" || reason != "" {
+		t.Fatalf("VerifyActivationPlanReady: code=%q reason=%q", code, reason)
+	}
+	if !ready.CurrentBinaryPresent || !ready.StagedBinaryVerified || ready.ActivationPlanID != plan.ActivationPlanID {
+		t.Fatalf("readiness mismatch: %+v", ready)
+	}
+}
+
+func TestVerifyActivationPlanReadyRejectsTamperedStagedBinary(t *testing.T) {
+	root := t.TempDir()
+	withNoopStagedFileHardener(t)
+	paths, plan, _ := writeTestActivationPlan(t, root)
+	currentPath := filepath.Join(root, "current-agent.exe")
+	if err := os.WriteFile(currentPath, []byte("current"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan.CurrentBinaryPath = currentPath
+	if code, reason := WriteActivationPlan(paths, plan); code != "" || reason != "" {
+		t.Fatalf("WriteActivationPlan: code=%q reason=%q", code, reason)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, code, _ := VerifyActivationPlanReady(paths, 1024); code != ErrHashMismatch {
+		t.Fatalf("code=%q, want HASH_MISMATCH", code)
+	}
+}
+
+func TestVerifyActivationPlanReadyRejectsMissingCurrentBinary(t *testing.T) {
+	root := t.TempDir()
+	withNoopStagedFileHardener(t)
+	paths, plan, payload := writeTestActivationPlan(t, root)
+	plan.CurrentBinaryPath = filepath.Join(root, "missing-agent.exe")
+	if code, reason := WriteActivationPlan(paths, plan); code != "" || reason != "" {
+		t.Fatalf("WriteActivationPlan: code=%q reason=%q", code, reason)
+	}
+	if err := os.WriteFile(paths.BinaryPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, code, _ := VerifyActivationPlanReady(paths, 1024); code != ErrStagingIO {
+		t.Fatalf("code=%q, want STAGING_IO_FAILED", code)
+	}
+}
+
 func TestWriteActivationPlanRejectsPathMismatch(t *testing.T) {
 	paths, _, _ := BuildStagingPaths(t.TempDir(), "req-mismatch")
 	plan := ActivationPlan{
@@ -136,4 +202,27 @@ func TestWriteActivationPlanRejectsPathMismatch(t *testing.T) {
 	if code, _ := WriteActivationPlan(paths, plan); code != ErrActivationPlanWrite {
 		t.Fatalf("code=%q, want ACTIVATION_PLAN_WRITE_FAILED", code)
 	}
+}
+
+func writeTestActivationPlan(t *testing.T, root string) (StagingPaths, ActivationPlan, []byte) {
+	t.Helper()
+	paths, code, reason := BuildStagingPaths(root, "req-ready")
+	if code != "" || reason != "" {
+		t.Fatalf("BuildStagingPaths: code=%q reason=%q", code, reason)
+	}
+	if err := os.MkdirAll(paths.Directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("verified staged agent")
+	sum := sha256.Sum256(payload)
+	evidence := PreflightEvidence{OldVersion: "1.0.0", TargetVersion: "1.2.0", SigningTier: TierTrusted}
+	ready, code, reason := BuildReadyStageResult(paths, evidence, hex.EncodeToString(sum[:]), "AA:BB")
+	if code != "" || reason != "" {
+		t.Fatalf("BuildReadyStageResult: code=%q reason=%q", code, reason)
+	}
+	plan, code, reason := BuildActivationPlan(paths, filepath.Join(root, "current-agent.exe"), "EndpointAgent", ready)
+	if code != "" || reason != "" {
+		t.Fatalf("BuildActivationPlan: code=%q reason=%q", code, reason)
+	}
+	return paths, plan, payload
 }
