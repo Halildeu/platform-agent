@@ -26,6 +26,7 @@ type HashResult struct {
 }
 
 var stagedFileHardener = hardenStagedFile
+var protectedStagingDirPreparer = PrepareProtectedStagingDir
 
 // HashReaderWithLimit streams r through SHA256 while enforcing maxBytes. It
 // reads at most maxBytes+1 bytes, so an oversized download is rejected without
@@ -205,6 +206,15 @@ func validateStagingPaths(paths StagingPaths) (ErrorCode, string) {
 		return ErrStagingIO, "staging paths escaped directory"
 	}
 	return "", ""
+}
+
+func removeStagedArtifacts(paths StagingPaths) {
+	if code, _ := validateStagingPaths(paths); code != "" {
+		return
+	}
+	_ = os.Remove(paths.BinaryPath + ".tmp")
+	_ = os.Remove(paths.BinaryPath)
+	_ = os.Remove(paths.ActivationPlanPath)
 }
 
 func validStagingID(id string) bool {
