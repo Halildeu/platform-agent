@@ -433,6 +433,25 @@ type selfUpdateActivateOptions struct {
 	MaxBytes    int64
 }
 
+type selfUpdatePreflightOptions struct {
+	StagingRoot string
+	StagingID   string
+	MaxBytes    int64
+}
+
+type selfUpdatePreflightOutcome struct {
+	Status                 string                 `json:"status"`
+	ErrorCode              selfupdate.ErrorCode   `json:"errorCode,omitempty"`
+	Reason                 string                 `json:"reason,omitempty"`
+	ActivationPlanID       string                 `json:"activationPlanId,omitempty"`
+	TargetVersion          string                 `json:"targetVersion,omitempty"`
+	ActualSha256           string                 `json:"actualSha256,omitempty"`
+	ActualSignerThumbprint string                 `json:"actualSignerThumbprint,omitempty"`
+	SigningTier            selfupdate.SigningTier `json:"signingTier,omitempty"`
+	CurrentBinaryPresent   bool                   `json:"currentBinaryPresent,omitempty"`
+	StagedBinaryVerified   bool                   `json:"stagedBinaryVerified,omitempty"`
+}
+
 func handleSelfUpdateCommand(args []string, cfg config.Config) {
 	if len(args) == 0 {
 		printSelfUpdateUsage()
@@ -463,6 +482,26 @@ func handleSelfUpdateCommand(args []string, cfg config.Config) {
 		if outcome.Status != selfupdate.ActivationActivated {
 			os.Exit(1)
 		}
+	case "preflight":
+		flags := flag.NewFlagSet("self-update preflight", flag.ExitOnError)
+		opts := selfUpdatePreflightOptions{
+			StagingRoot: cfg.SelfUpdateStagingRoot,
+			MaxBytes:    selfupdate.DefaultMaxUpdateBytes,
+		}
+		flags.StringVar(&opts.StagingRoot, "staging-root", opts.StagingRoot, "self-update staging root")
+		flags.StringVar(&opts.StagingID, "staging-id", "", "self-update staging identifier / command id")
+		flags.Int64Var(&opts.MaxBytes, "max-bytes", opts.MaxBytes, "maximum staged binary bytes")
+		if err := flags.Parse(args[1:]); err != nil {
+			log.Fatalf("self-update preflight parse failed: %v", err)
+		}
+
+		outcome := runSelfUpdatePreflight(opts)
+		if err := json.NewEncoder(os.Stdout).Encode(outcome); err != nil {
+			log.Fatalf("self-update preflight encode failed: %v", err)
+		}
+		if outcome.Status != "READY" {
+			os.Exit(1)
+		}
 	default:
 		printSelfUpdateUsage()
 		os.Exit(2)
@@ -470,7 +509,28 @@ func handleSelfUpdateCommand(args []string, cfg config.Config) {
 }
 
 func printSelfUpdateUsage() {
-	fmt.Fprintln(os.Stderr, "usage: endpoint-agent self-update activate --staging-id id [--staging-root path] [--max-bytes n] [--timeout duration]")
+	fmt.Fprintln(os.Stderr, "usage: endpoint-agent self-update <preflight|activate> --staging-id id [--staging-root path] [--max-bytes n]")
+}
+
+func runSelfUpdatePreflight(opts selfUpdatePreflightOptions) selfUpdatePreflightOutcome {
+	paths, code, reason := selfupdate.BuildStagingPaths(strings.TrimSpace(opts.StagingRoot), strings.TrimSpace(opts.StagingID))
+	if code != "" {
+		return selfUpdatePreflightOutcome{Status: "FAILED", ErrorCode: code, Reason: reason}
+	}
+	ready, code, reason := selfupdate.VerifyActivationPlanReady(paths, opts.MaxBytes)
+	if code != "" {
+		return selfUpdatePreflightOutcome{Status: "FAILED", ErrorCode: code, Reason: reason}
+	}
+	return selfUpdatePreflightOutcome{
+		Status:                 "READY",
+		ActivationPlanID:       ready.ActivationPlanID,
+		TargetVersion:          ready.TargetVersion,
+		ActualSha256:           ready.ActualSha256,
+		ActualSignerThumbprint: ready.ActualSignerThumbprint,
+		SigningTier:            ready.SigningTier,
+		CurrentBinaryPresent:   ready.CurrentBinaryPresent,
+		StagedBinaryVerified:   ready.StagedBinaryVerified,
+	}
 }
 
 func runSelfUpdateActivate(ctx context.Context, opts selfUpdateActivateOptions, service selfupdate.ActivationServiceController) selfupdate.ActivationOutcome {

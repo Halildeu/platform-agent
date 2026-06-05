@@ -64,6 +64,74 @@ func TestRunSelfUpdateActivateRejectsInvalidStagingInput(t *testing.T) {
 	}
 }
 
+func TestRunSelfUpdatePreflightReturnsPathFreeReady(t *testing.T) {
+	root := t.TempDir()
+	currentPath := filepath.Join(root, "current-agent.exe")
+	if err := os.WriteFile(currentPath, []byte("old-agent"), 0o600); err != nil {
+		t.Fatalf("write current binary: %v", err)
+	}
+	paths := writeActivationPlanForPreflightMainTest(t, root, "cmd-preflight-1", currentPath, []byte("new-agent"))
+
+	outcome := runSelfUpdatePreflight(selfUpdatePreflightOptions{
+		StagingRoot: root,
+		StagingID:   paths.StagingID,
+		MaxBytes:    1024,
+	})
+
+	if outcome.Status != "READY" {
+		t.Fatalf("preflight status=%s reason=%q code=%q", outcome.Status, outcome.Reason, outcome.ErrorCode)
+	}
+	if outcome.ActivationPlanID != paths.StagingID || outcome.TargetVersion != "1.1.0" {
+		t.Fatalf("unexpected outcome identity: %+v", outcome)
+	}
+	if !outcome.CurrentBinaryPresent || !outcome.StagedBinaryVerified {
+		t.Fatalf("readiness flags not set: %+v", outcome)
+	}
+	raw, err := json.Marshal(outcome)
+	if err != nil {
+		t.Fatalf("marshal outcome: %v", err)
+	}
+	if strings.Contains(string(raw), root) || strings.Contains(string(raw), currentPath) || strings.Contains(string(raw), paths.BinaryPath) {
+		t.Fatalf("preflight outcome leaked local path: %s", raw)
+	}
+}
+
+func TestRunSelfUpdatePreflightRejectsTamperedStagedBinary(t *testing.T) {
+	root := t.TempDir()
+	currentPath := filepath.Join(root, "current-agent.exe")
+	if err := os.WriteFile(currentPath, []byte("old-agent"), 0o600); err != nil {
+		t.Fatalf("write current binary: %v", err)
+	}
+	paths := writeActivationPlanForPreflightMainTest(t, root, "cmd-preflight-tampered", currentPath, []byte("new-agent"))
+	if err := os.WriteFile(paths.BinaryPath, []byte("tampered-agent"), 0o600); err != nil {
+		t.Fatalf("tamper staged binary: %v", err)
+	}
+
+	outcome := runSelfUpdatePreflight(selfUpdatePreflightOptions{
+		StagingRoot: root,
+		StagingID:   paths.StagingID,
+		MaxBytes:    1024,
+	})
+
+	if outcome.Status != "FAILED" || outcome.ErrorCode != selfupdate.ErrHashMismatch {
+		t.Fatalf("preflight outcome=%+v, want failed hash mismatch", outcome)
+	}
+}
+
+func TestRunSelfUpdatePreflightRejectsInvalidStagingInput(t *testing.T) {
+	outcome := runSelfUpdatePreflight(selfUpdatePreflightOptions{
+		StagingRoot: t.TempDir(),
+		StagingID:   "../escape",
+		MaxBytes:    1024,
+	})
+	if outcome.Status != "FAILED" || outcome.ErrorCode != selfupdate.ErrStagingIO {
+		t.Fatalf("outcome=%+v, want failed staging IO", outcome)
+	}
+	if strings.Contains(outcome.Reason, string(os.PathSeparator)) {
+		t.Fatalf("reason should remain bounded and path-free: %q", outcome.Reason)
+	}
+}
+
 func writeActivationPlanForMainTest(t *testing.T, root, stagingID, currentPath string, stagedPayload []byte) selfupdate.StagingPaths {
 	t.Helper()
 	paths, code, reason := selfupdate.PrepareProtectedStagingDir(root, stagingID)
@@ -96,6 +164,42 @@ func writeActivationPlanForMainTest(t *testing.T, root, stagingID, currentPath s
 	}
 	if code, reason := selfupdate.WriteActivationPlan(paths, plan); code != "" || reason != "" {
 		t.Fatalf("WriteActivationPlan: code=%q reason=%q", code, reason)
+	}
+	return paths
+}
+
+func writeActivationPlanForPreflightMainTest(t *testing.T, root, stagingID, currentPath string, stagedPayload []byte) selfupdate.StagingPaths {
+	t.Helper()
+	paths, code, reason := selfupdate.BuildStagingPaths(root, stagingID)
+	if code != "" {
+		t.Fatalf("BuildStagingPaths: code=%q reason=%q", code, reason)
+	}
+	if err := os.MkdirAll(paths.Directory, 0o700); err != nil {
+		t.Fatalf("mkdir staging: %v", err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, stagedPayload, 0o600); err != nil {
+		t.Fatalf("write staged binary: %v", err)
+	}
+	sum := sha256.Sum256(stagedPayload)
+	plan := selfupdate.ActivationPlan{
+		SchemaVersion:          1,
+		StagingID:              paths.StagingID,
+		ActivationPlanID:       paths.StagingID,
+		ServiceName:            "EndpointAgent",
+		CurrentBinaryPath:      currentPath,
+		StagedBinaryPath:       paths.BinaryPath,
+		ActivationPlanPath:     paths.ActivationPlanPath,
+		TargetVersion:          "1.1.0",
+		ActualSha256:           hex.EncodeToString(sum[:]),
+		ActualSignerThumbprint: "AABBCC",
+		SigningTier:            selfupdate.TierTrusted,
+	}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal activation plan: %v", err)
+	}
+	if err := os.WriteFile(paths.ActivationPlanPath, raw, 0o600); err != nil {
+		t.Fatalf("write activation plan: %v", err)
 	}
 	return paths
 }
