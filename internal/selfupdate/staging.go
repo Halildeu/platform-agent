@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -24,6 +25,8 @@ type HashResult struct {
 	Bytes        int64
 }
 
+var stagedFileHardener = hardenStagedFile
+
 // HashReaderWithLimit streams r through SHA256 while enforcing maxBytes. It
 // reads at most maxBytes+1 bytes, so an oversized download is rejected without
 // buffering the full payload in memory.
@@ -40,6 +43,17 @@ func HashReaderWithLimit(r io.Reader, maxBytes int64) (HashResult, ErrorCode, st
 		return HashResult{Bytes: n}, ErrDownloadTooLarge, "candidate binary exceeded maxBytes"
 	}
 	return HashResult{ActualSha256: hex.EncodeToString(h.Sum(nil)), Bytes: n}, "", ""
+}
+
+// HashFileWithLimit hashes an already-staged file with the same size cap used
+// for downloads. PR1 uses this after rename as a final byte-for-byte guard.
+func HashFileWithLimit(path string, maxBytes int64) (HashResult, ErrorCode, string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return HashResult{}, ErrStagingIO, "open staged binary for verification failed"
+	}
+	defer f.Close()
+	return HashReaderWithLimit(f, maxBytes)
 }
 
 // VerifyClaimedSHA256 compares the locally-computed hash to the backend's
@@ -102,6 +116,95 @@ func BuildStagingPaths(root, stagingID string) (StagingPaths, ErrorCode, string)
 		BinaryPath:         filepath.Join(dir, stagedBinaryName),
 		ActivationPlanPath: filepath.Join(dir, activationPlanFileName),
 	}, "", ""
+}
+
+// WriteStagedBinaryFromReader atomically writes a verified candidate binary to
+// paths.BinaryPath. The caller supplies the bytes (future PR1 downloader can
+// pass an HTTP body); this helper performs no network work and is not wired to
+// command execution in PR1a.
+//
+// Sequence: exclusive temp create -> stream hash+write under maxBytes -> claim
+// check -> fsync+close -> harden temp -> rename -> harden final -> re-hash
+// final. Any failure removes the temp file and returns a bounded, path-free
+// reason.
+func WriteStagedBinaryFromReader(paths StagingPaths, r io.Reader, claimedSha256 string, maxBytes int64) (HashResult, ErrorCode, string) {
+	if code, reason := validateStagingPaths(paths); code != "" {
+		return HashResult{}, code, reason
+	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxUpdateBytes
+	}
+
+	tmp := paths.BinaryPath + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return HashResult{}, ErrStagingIO, "create staged binary temp failed"
+	}
+	cleanup := func() { _ = os.Remove(tmp) }
+
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		_ = f.Close()
+		cleanup()
+		return HashResult{}, ErrDownloadFailed, "read candidate binary failed"
+	}
+	if n > maxBytes {
+		_ = f.Close()
+		cleanup()
+		return HashResult{Bytes: n}, ErrDownloadTooLarge, "candidate binary exceeded maxBytes"
+	}
+
+	result := HashResult{ActualSha256: hex.EncodeToString(h.Sum(nil)), Bytes: n}
+	if code, reason := VerifyClaimedSHA256(result.ActualSha256, claimedSha256); code != "" {
+		_ = f.Close()
+		cleanup()
+		return result, code, reason
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		cleanup()
+		return HashResult{}, ErrStagingIO, "fsync staged binary temp failed"
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return HashResult{}, ErrStagingIO, "close staged binary temp failed"
+	}
+	if err := stagedFileHardener(tmp); err != nil {
+		cleanup()
+		return HashResult{}, ErrStagingIO, "harden staged binary temp failed"
+	}
+	if err := os.Rename(tmp, paths.BinaryPath); err != nil {
+		cleanup()
+		return HashResult{}, ErrStagingIO, "promote staged binary failed"
+	}
+	if err := stagedFileHardener(paths.BinaryPath); err != nil {
+		return HashResult{}, ErrStagingIO, "harden staged binary final failed"
+	}
+	finalHash, code, reason := HashFileWithLimit(paths.BinaryPath, maxBytes)
+	if code != "" {
+		return HashResult{}, code, reason
+	}
+	if finalHash.ActualSha256 != result.ActualSha256 || finalHash.Bytes != result.Bytes {
+		return HashResult{}, ErrHashMismatch, "final staged binary verification mismatch"
+	}
+	return result, "", ""
+}
+
+func validateStagingPaths(paths StagingPaths) (ErrorCode, string) {
+	if !validStagingID(paths.StagingID) {
+		return ErrStagingIO, "invalid staging identifier"
+	}
+	if strings.TrimSpace(paths.Directory) == "" || strings.TrimSpace(paths.BinaryPath) == "" || strings.TrimSpace(paths.ActivationPlanPath) == "" {
+		return ErrStagingIO, "staging paths are incomplete"
+	}
+	if filepath.Base(paths.BinaryPath) != stagedBinaryName || filepath.Base(paths.ActivationPlanPath) != activationPlanFileName {
+		return ErrStagingIO, "staging paths have unexpected filenames"
+	}
+	if !pathWithinRoot(paths.Directory, paths.BinaryPath) || !pathWithinRoot(paths.Directory, paths.ActivationPlanPath) {
+		return ErrStagingIO, "staging paths escaped directory"
+	}
+	return "", ""
 }
 
 func validStagingID(id string) bool {
