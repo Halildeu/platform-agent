@@ -12,6 +12,75 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
+// servicesQueryAccess is the MINIMAL, read-only per-service SCM access mask
+// the probe requests on each OpenService. It is deliberately NOT
+// windows.SERVICE_ALL_ACCESS (which mgr.Mgr.OpenService hard-codes).
+//
+// AG-039 fix (Codex 019e950c iter-1 absorb): SERVICE_ALL_ACCESS bundles
+// STANDARD_RIGHTS_REQUIRED (DELETE | WRITE_DAC | WRITE_OWNER) plus
+// SERVICE_CHANGE_CONFIG / SERVICE_STOP / SERVICE_START / SERVICE_PAUSE_CONTINUE
+// — write/control rights that a protected/hardened service DACL (Microsoft
+// Defender's WinDefend, Windows Firewall's MpsSvc) denies even to LocalSystem.
+// OpenService then returns ERROR_ACCESS_DENIED, the per-service path emits
+// SERVICE_QUERY_FAILED, ProbeComplete flips false, and the endpoint-admin
+// "Hizmetler" table is hidden — the symptom this fix removes.
+//
+// The probe only ever READS state:
+//   - SERVICE_QUERY_STATUS → service.Query()  (run-state)
+//   - SERVICE_QUERY_CONFIG → service.Config() (StartType → StartupMode,
+//     including the DISABLED ops signal and DelayedAutoStart disambiguation)
+//
+// Both are read-only rights a protected service grants to LocalSystem, so
+// WinDefend/MpsSvc open successfully and the probe completes. SERVICE_QUERY_CONFIG
+// is retained (NOT dropped to QUERY_STATUS-only): DISABLED detection derives
+// from Config().StartType, so dropping it would re-introduce a config-read
+// SERVICE_QUERY_FAILED and keep ProbeComplete=false. We do NOT silently swallow
+// a config-read failure (that would weaken the fail-closed evidence contract,
+// Codex 019e950c iter-1 #3); the correct posture is to request the access the
+// read genuinely needs.
+const servicesQueryAccess = windows.SERVICE_QUERY_STATUS | windows.SERVICE_QUERY_CONFIG
+
+// scmConnectAccess is the MINIMAL Service Control Manager access needed to
+// open service handles by name. mgr.Connect hard-codes SC_MANAGER_ALL_ACCESS
+// (admin-only, over-broad for a read-only probe); SC_MANAGER_CONNECT is
+// sufficient for OpenService and is the least-privilege right
+// (Codex 019e950c iter-1 #5 absorb).
+const scmConnectAccess = windows.SC_MANAGER_CONNECT
+
+// connectSCMReadOnly opens a least-privilege (SC_MANAGER_CONNECT) handle to
+// the local Service Control Manager. It replaces mgr.Connect, which requests
+// SC_MANAGER_ALL_ACCESS. The probe never enumerates or mutates the SCM
+// database — it only opens named services for query — so SC_MANAGER_CONNECT
+// is the minimal sufficient right. The returned *mgr.Mgr drives
+// scmManager.Disconnect() exactly as a mgr.Connect() result would (Handle is
+// the only field; exported in x/sys/windows/svc/mgr).
+func connectSCMReadOnly() (*mgr.Mgr, error) {
+	h, err := windows.OpenSCManager(nil, nil, scmConnectAccess)
+	if err != nil {
+		return nil, err
+	}
+	return &mgr.Mgr{Handle: h}, nil
+}
+
+// openServiceQueryOnly opens a single service handle with the minimal
+// read-only servicesQueryAccess mask. mgr.Mgr.OpenService cannot be used
+// because it hard-codes SERVICE_ALL_ACCESS (see servicesQueryAccess); we
+// replicate its trivial body with the narrower mask. The returned
+// *mgr.Service drives service.Config()/Query()/Close() exactly as a
+// mgr.OpenService result would (Name + Handle are the only fields; both
+// exported in x/sys/windows/svc/mgr).
+func openServiceQueryOnly(scmManager *mgr.Mgr, name string) (*mgr.Service, error) {
+	namePtr, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, err
+	}
+	h, err := windows.OpenService(scmManager.Handle, namePtr, servicesQueryAccess)
+	if err != nil {
+		return nil, err
+	}
+	return &mgr.Service{Name: name, Handle: h}, nil
+}
+
 // probeAggregate is the channel payload from the SCM/registry worker.
 type probeAggregate struct {
 	entries     []ServiceEntry
@@ -78,7 +147,7 @@ func ProbeServices(ctx context.Context, now func() time.Time) ServicesResult {
 // natively — the timeout is enforced at the ProbeServices select
 // boundary above (Codex iter-4 P1 absorb).
 func runServicesProbeBlocking() probeAggregate {
-	scmManager, err := mgr.Connect()
+	scmManager, err := connectSCMReadOnly()
 	if err != nil {
 		// SCM unreachable globally — entire probe fails closed.
 		// Codex 019e8302 iter-2 #2 absorb: don't all-UNKNOWN every
@@ -122,7 +191,7 @@ func probeOneService(
 		StartupMode: StartupModeUnknown,
 	}
 
-	service, err := scmManager.OpenService(name)
+	service, err := openServiceQueryOnly(scmManager, name)
 	if err != nil {
 		// ERROR_SERVICE_DOES_NOT_EXIST is the "service not installed"
 		// case (Codex 019e8302 iter-2 #4 absorb): emit Present=false,

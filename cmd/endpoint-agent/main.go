@@ -516,6 +516,24 @@ func handleDiagnoseCommand(args []string) {
 		if err := json.NewEncoder(os.Stdout).Encode(snapshot); err != nil {
 			log.Fatalf("diagnose hardware encode failed: %v", err)
 		}
+	case "services":
+		// AG-039 — critical services inventory probe (field smoke).
+		//
+		// Read-only: opens each allowlisted service via the SCM with a
+		// query-only access mask (SERVICE_QUERY_STATUS|SERVICE_QUERY_CONFIG)
+		// and reports {name, present, state, startupMode} plus typed probe
+		// errors. Mirrors the COLLECT_INVENTORY details.inventory.services
+		// payload exactly, so an operator can diff a live probe against a
+		// stored snapshot when triaging a hidden "Hizmetler" table or a
+		// probeComplete=false fail-closed state.
+		//
+		// Exit code is 0 regardless of probe outcome — error isolation lives
+		// in the JSON payload (probeComplete + probeErrors[]), not the exit
+		// status (same contract as diagnose hardware/software).
+		result := inventory.ProbeServices(context.Background(), time.Now)
+		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+			log.Fatalf("diagnose services encode failed: %v", err)
+		}
 	default:
 		printDiagnoseUsage()
 		os.Exit(2)
@@ -523,5 +541,5 @@ func handleDiagnoseCommand(args []string) {
 }
 
 func printDiagnoseUsage() {
-	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users|software|winget|winget-egress|hardware>")
+	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users|software|winget|winget-egress|hardware|services>")
 }
