@@ -62,12 +62,17 @@ func TestRunSelfUpdateActivateRejectsInvalidStagingInput(t *testing.T) {
 
 func writeActivationPlanForMainTest(t *testing.T, root, stagingID, currentPath string, stagedPayload []byte) selfupdate.StagingPaths {
 	t.Helper()
-	paths, code, reason := selfupdate.BuildStagingPaths(root, stagingID)
-	if code != "" {
-		t.Fatalf("BuildStagingPaths: code=%q reason=%q", code, reason)
+	paths, code, reason := selfupdate.PrepareProtectedStagingDir(root, stagingID)
+	if code == selfupdate.ErrUnsupportedPlatform {
+		paths, code, reason = selfupdate.BuildStagingPaths(root, stagingID)
+		if code == "" {
+			if err := os.MkdirAll(paths.Directory, 0o700); err != nil {
+				t.Fatalf("mkdir staging: %v", err)
+			}
+		}
 	}
-	if err := os.MkdirAll(paths.Directory, 0o700); err != nil {
-		t.Fatalf("mkdir staging: %v", err)
+	if code != "" {
+		t.Fatalf("prepare staging: code=%q reason=%q", code, reason)
 	}
 	if err := os.WriteFile(paths.BinaryPath, stagedPayload, 0o600); err != nil {
 		t.Fatalf("write staged binary: %v", err)
