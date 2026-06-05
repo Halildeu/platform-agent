@@ -13,20 +13,8 @@ import (
 	"golang.org/x/sys/windows"
 
 	"platform-agent/internal/autoenroll"
+	"platform-agent/internal/platform/windows/acl"
 )
-
-// hardenedSDDL pins the DACL applied to the persisted config file. It
-// gives full access to LocalSystem and to BUILTIN\Administrators, and
-// denies everyone else by default (`D:P` makes the DACL protected — no
-// inheritance from the parent directory).
-//
-// Decoded:
-//   O:SY                Owner = LocalSystem
-//   G:SY                Group = LocalSystem
-//   D:P                 DACL is protected (no inheritance)
-//   (A;;FA;;;SY)        Allow Full Access — SY = LocalSystem
-//   (A;;FA;;;BA)        Allow Full Access — BA = BUILTIN\Administrators
-const hardenedSDDL = "O:SY G:SY D:P(A;;FA;;;SY)(A;;FA;;;BA)"
 
 // Read implements autoenroll.ConfigStore. ENOENT is translated into
 // autoenroll.ErrEmptyStore so the runner can distinguish first-run from
@@ -167,29 +155,10 @@ func Unprotect(cipher, entropy []byte) ([]byte, error) {
 	return buf, nil
 }
 
-// setHardenedACL applies hardenedSDDL to path using
-// SetNamedSecurityInfo. The DACL replaces any existing one; ownership is
-// forced to SYSTEM so a tampered owner cannot regrant access to itself.
+// SetHardenedACL preserves the historical DPAPI package API while delegating
+// the ACL primitive to a dependency-light package. Self-update staging imports
+// the lower-level ACL package directly to avoid commands -> selfupdate -> dpapi
+// -> autoenroll -> commands cycles.
 func SetHardenedACL(path string) error {
-	sd, err := windows.SecurityDescriptorFromString(hardenedSDDL)
-	if err != nil {
-		return fmt.Errorf("parse sddl: %w", err)
-	}
-	owner, _, err := sd.Owner()
-	if err != nil {
-		return fmt.Errorf("read owner from sddl: %w", err)
-	}
-	group, _, err := sd.Group()
-	if err != nil {
-		return fmt.Errorf("read group from sddl: %w", err)
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil {
-		return fmt.Errorf("read dacl from sddl: %w", err)
-	}
-	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION |
-		windows.OWNER_SECURITY_INFORMATION |
-		windows.GROUP_SECURITY_INFORMATION |
-		windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, owner, group, dacl, nil)
+	return acl.SetHardenedACL(path)
 }

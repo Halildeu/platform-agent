@@ -12,6 +12,7 @@ import (
 	"platform-agent/internal/hmacstore"
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
+	"platform-agent/internal/selfupdate"
 	"platform-agent/internal/state"
 )
 
@@ -61,10 +62,28 @@ func NewRunner(cfg config.Config, client *protocol.Client, logger *log.Logger) *
 	return &Runner{
 		Config:       cfg,
 		Client:       client,
-		Executor:     commands.NewLocalExecutor(capabilities, cfg.AgentVersion),
+		Executor:     newExecutor(cfg, capabilities),
 		StateTracker: state.NewTracker(state.StateStarting),
 		Logger:       logger,
 	}
+}
+
+func newExecutor(cfg config.Config, capabilities []protocol.CommandType) *commands.LocalExecutor {
+	executor := commands.NewLocalExecutor(capabilities, cfg.AgentVersion)
+	executor.ConfigureSelfUpdate(commands.SelfUpdateConfig{
+		Enabled:           cfg.SelfUpdateEnabled,
+		StagingRoot:       cfg.SelfUpdateStagingRoot,
+		CurrentBinaryPath: cfg.SelfUpdateCurrentBinaryPath,
+		ServiceName:       cfg.SelfUpdateServiceName,
+		AllowedHosts:      cfg.SelfUpdateAllowedHosts,
+		MaxRedirects:      cfg.SelfUpdateMaxRedirects,
+		SignerThumbprints: cfg.SelfUpdateSignerThumbprints,
+		AllowLabOnly:      cfg.SelfUpdateAllowLabOnly,
+		DomainJoined:      cfg.SelfUpdateDomainJoined,
+		MaxSeenVersion:    cfg.SelfUpdateMaxSeenVersion,
+		Verifier:          selfupdate.NewNativeAuthenticodeVerifier(),
+	})
+	return executor
 }
 
 func (r *Runner) RunOnce(ctx context.Context) error {

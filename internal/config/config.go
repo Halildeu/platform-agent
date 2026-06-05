@@ -15,18 +15,18 @@ type Config struct {
 	SigningPathPrefix string
 	// CredentialID + Secret are the device credential (X-Device-Credential-Id
 	// and the HMAC key) issued by enrollment. DeviceID is the enrolled device.
-	CredentialID           string
-	Secret                 string
-	DeviceID               string
-	InstallID              string
-	EnrollmentToken        string
-	AgentVersion           string
-	LogDir                 string
-	HeartbeatInterval      time.Duration
-	CommandPollInterval    time.Duration
-	InventoryInterval      time.Duration
-	JitterPercent          int
-	CommandTimeout         time.Duration
+	CredentialID        string
+	Secret              string
+	DeviceID            string
+	InstallID           string
+	EnrollmentToken     string
+	AgentVersion        string
+	LogDir              string
+	HeartbeatInterval   time.Duration
+	CommandPollInterval time.Duration
+	InventoryInterval   time.Duration
+	JitterPercent       int
+	CommandTimeout      time.Duration
 	// InstallCommandTimeout overrides CommandTimeout specifically for
 	// the AG-027 INSTALL_SOFTWARE command type. The default 120s
 	// CommandTimeout was sized for quick read-only commands (inventory,
@@ -35,7 +35,7 @@ type Config struct {
 	// bundles. Codex 019e6c0d iter-2 P1 absorb: bound effective install
 	// timeout at the documented 30-min hard cap so the agent and the
 	// docs/COMMAND-CONTRACT.md §11.5 narrative agree.
-	InstallCommandTimeout  time.Duration
+	InstallCommandTimeout time.Duration
 	// UninstallCommandTimeout overrides CommandTimeout for the AG-028
 	// (Faz 22.5.6) UNINSTALL_SOFTWARE command type. MSI uninstall paths
 	// can run repair / custom-action / network wait phases that push
@@ -43,8 +43,22 @@ type Config struct {
 	// install hard cap (Codex 019e8de2 iter-1 absorb: keep parity, do
 	// not optimise downward without LIVE evidence).
 	UninstallCommandTimeout time.Duration
-	NonceSkewWindow        time.Duration
-	NonceReplayCacheWindow time.Duration
+	// SelfUpdate* fields gate AG-029 UPDATE_AGENT advertisement and
+	// source-side staging. They are local trust configuration: the backend
+	// command payload cannot widen hosts, signer thumbprints, or lab-tier
+	// consent. Empty signer/host/staging/current-binary values mean disabled.
+	SelfUpdateEnabled           bool
+	SelfUpdateStagingRoot       string
+	SelfUpdateCurrentBinaryPath string
+	SelfUpdateServiceName       string
+	SelfUpdateAllowedHosts      []string
+	SelfUpdateMaxRedirects      int
+	SelfUpdateSignerThumbprints []string
+	SelfUpdateAllowLabOnly      bool
+	SelfUpdateDomainJoined      bool
+	SelfUpdateMaxSeenVersion    string
+	NonceSkewWindow             time.Duration
+	NonceReplayCacheWindow      time.Duration
 
 	// AutoEnrollAPIURL is the full canonical mTLS base path used by the
 	// --auto-enroll mode (ADR-0029 Katman 3). Empty means use the
@@ -82,18 +96,20 @@ func defaultAgentVersion() string {
 
 func Default() Config {
 	return Config{
-		AgentName:              "endpoint-agent",
-		APIURL:                 "https://localhost/api/v1/endpoint-agent",
-		AgentVersion:           defaultAgentVersion(),
-		HeartbeatInterval:      60 * time.Second,
-		CommandPollInterval:    30 * time.Second,
-		InventoryInterval:      60 * time.Minute,
-		JitterPercent:          20,
+		AgentName:               "endpoint-agent",
+		APIURL:                  "https://localhost/api/v1/endpoint-agent",
+		AgentVersion:            defaultAgentVersion(),
+		HeartbeatInterval:       60 * time.Second,
+		CommandPollInterval:     30 * time.Second,
+		InventoryInterval:       60 * time.Minute,
+		JitterPercent:           20,
 		CommandTimeout:          120 * time.Second,
 		InstallCommandTimeout:   30 * time.Minute,
 		UninstallCommandTimeout: 30 * time.Minute,
+		SelfUpdateServiceName:   "EndpointAgent",
+		SelfUpdateMaxRedirects:  5,
 		NonceSkewWindow:         5 * time.Minute,
-		NonceReplayCacheWindow: 10 * time.Minute,
+		NonceReplayCacheWindow:  10 * time.Minute,
 	}
 }
 
@@ -115,6 +131,16 @@ func LoadFromEnv() Config {
 	cfg.CommandTimeout = envDuration("ENDPOINT_AGENT_COMMAND_TIMEOUT", cfg.CommandTimeout)
 	cfg.InstallCommandTimeout = envDuration("ENDPOINT_AGENT_INSTALL_COMMAND_TIMEOUT", cfg.InstallCommandTimeout)
 	cfg.UninstallCommandTimeout = envDuration("ENDPOINT_AGENT_UNINSTALL_COMMAND_TIMEOUT", cfg.UninstallCommandTimeout)
+	cfg.SelfUpdateEnabled = envBool("ENDPOINT_AGENT_SELF_UPDATE_ENABLED", cfg.SelfUpdateEnabled)
+	cfg.SelfUpdateStagingRoot = envString("ENDPOINT_AGENT_SELF_UPDATE_STAGING_ROOT", cfg.SelfUpdateStagingRoot)
+	cfg.SelfUpdateCurrentBinaryPath = envString("ENDPOINT_AGENT_SELF_UPDATE_CURRENT_BINARY_PATH", cfg.SelfUpdateCurrentBinaryPath)
+	cfg.SelfUpdateServiceName = envString("ENDPOINT_AGENT_SELF_UPDATE_SERVICE_NAME", cfg.SelfUpdateServiceName)
+	cfg.SelfUpdateAllowedHosts = envStringList("ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS", cfg.SelfUpdateAllowedHosts)
+	cfg.SelfUpdateMaxRedirects = envInt("ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS", cfg.SelfUpdateMaxRedirects)
+	cfg.SelfUpdateSignerThumbprints = envStringList("ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS", cfg.SelfUpdateSignerThumbprints)
+	cfg.SelfUpdateAllowLabOnly = envBool("ENDPOINT_AGENT_SELF_UPDATE_ALLOW_LAB_ONLY", cfg.SelfUpdateAllowLabOnly)
+	cfg.SelfUpdateDomainJoined = envBool("ENDPOINT_AGENT_SELF_UPDATE_DOMAIN_JOINED", cfg.SelfUpdateDomainJoined)
+	cfg.SelfUpdateMaxSeenVersion = envString("ENDPOINT_AGENT_SELF_UPDATE_MAX_SEEN_VERSION", cfg.SelfUpdateMaxSeenVersion)
 	cfg.NonceSkewWindow = envDuration("ENDPOINT_AGENT_NONCE_SKEW_WINDOW", cfg.NonceSkewWindow)
 	cfg.NonceReplayCacheWindow = envDuration("ENDPOINT_AGENT_NONCE_REPLAY_CACHE_WINDOW", cfg.NonceReplayCacheWindow)
 	cfg.JitterPercent = envInt("ENDPOINT_AGENT_JITTER_PERCENT", cfg.JitterPercent)
@@ -155,4 +181,39 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func envStringList(key string, fallback []string) []string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\t'
+	})
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
 }

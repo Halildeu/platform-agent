@@ -72,6 +72,40 @@ func TestLoadFromEnv_AutoEnrollDefaultsEmpty(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnv_SelfUpdateOverrides(t *testing.T) {
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_ENABLED", "true")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_STAGING_ROOT", `C:\ProgramData\EndpointAgent\updates`)
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_CURRENT_BINARY_PATH", `C:\Program Files\EndpointAgent\endpoint-agent.exe`)
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_SERVICE_NAME", "EndpointAgent")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS", "github.com,objects.githubusercontent.com")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS", "3")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS", "AA:BB;CCDD")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_ALLOW_LAB_ONLY", "1")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_DOMAIN_JOINED", "yes")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_MAX_SEEN_VERSION", "1.2.3")
+
+	cfg := LoadFromEnv()
+
+	if !cfg.SelfUpdateEnabled || !cfg.SelfUpdateAllowLabOnly || !cfg.SelfUpdateDomainJoined {
+		t.Fatalf("self-update bools not parsed: %+v", cfg)
+	}
+	if cfg.SelfUpdateStagingRoot != `C:\ProgramData\EndpointAgent\updates` {
+		t.Fatalf("SelfUpdateStagingRoot=%q", cfg.SelfUpdateStagingRoot)
+	}
+	if cfg.SelfUpdateCurrentBinaryPath != `C:\Program Files\EndpointAgent\endpoint-agent.exe` {
+		t.Fatalf("SelfUpdateCurrentBinaryPath=%q", cfg.SelfUpdateCurrentBinaryPath)
+	}
+	if cfg.SelfUpdateServiceName != "EndpointAgent" || cfg.SelfUpdateMaxRedirects != 3 || cfg.SelfUpdateMaxSeenVersion != "1.2.3" {
+		t.Fatalf("self-update scalar config not parsed: %+v", cfg)
+	}
+	if len(cfg.SelfUpdateAllowedHosts) != 2 || cfg.SelfUpdateAllowedHosts[1] != "objects.githubusercontent.com" {
+		t.Fatalf("SelfUpdateAllowedHosts=%v", cfg.SelfUpdateAllowedHosts)
+	}
+	if len(cfg.SelfUpdateSignerThumbprints) != 2 || cfg.SelfUpdateSignerThumbprints[0] != "AA:BB" {
+		t.Fatalf("SelfUpdateSignerThumbprints=%v", cfg.SelfUpdateSignerThumbprints)
+	}
+}
+
 // AG-027 (Codex 019e6c0d iter-2 absorb) — INSTALL_SOFTWARE needs a
 // longer effective timeout than the lightweight 120s default
 // CommandTimeout. Default ships at 30 min; the env override is

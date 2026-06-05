@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
+	"platform-agent/internal/selfupdate"
 	"platform-agent/internal/users"
 	"platform-agent/internal/winget"
 )
@@ -32,6 +35,25 @@ type LocalExecutor struct {
 	Capabilities []protocol.CommandType
 	AgentVersion string
 	Now          func() time.Time
+	SelfUpdate   SelfUpdateConfig
+}
+
+// SelfUpdateConfig is LOCAL trust configuration for AG-029. The backend
+// UPDATE_AGENT payload is audit/input data; it cannot widen any of these
+// values. When Ready() is false the executor does not advertise UPDATE_AGENT.
+type SelfUpdateConfig struct {
+	Enabled           bool
+	StagingRoot       string
+	CurrentBinaryPath string
+	ServiceName       string
+	AllowedHosts      []string
+	MaxRedirects      int
+	SignerThumbprints []string
+	AllowLabOnly      bool
+	DomainJoined      bool
+	MaxSeenVersion    string
+	Transport         http.RoundTripper
+	Verifier          selfupdate.AuthenticodeVerifier
 }
 
 func NewLocalExecutor(capabilities []protocol.CommandType, agentVersion string) *LocalExecutor {
@@ -39,6 +61,13 @@ func NewLocalExecutor(capabilities []protocol.CommandType, agentVersion string) 
 		Capabilities: capabilities,
 		AgentVersion: agentVersion,
 		Now:          time.Now,
+	}
+}
+
+func (e *LocalExecutor) ConfigureSelfUpdate(cfg SelfUpdateConfig) {
+	e.SelfUpdate = cfg
+	if cfg.Ready() && !hasCapability(e.Capabilities, protocol.CommandUpdateAgent) {
+		e.Capabilities = append(e.Capabilities, protocol.CommandUpdateAgent)
 	}
 }
 
@@ -255,12 +284,63 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 		result.Status = mapUninstallStatusToCommandStatus(uninstallResult.FinalStatus)
 		result.Summary = fmt.Sprintf("UNINSTALL_SOFTWARE %s", uninstallResult.FinalStatus)
 		result.Details = map[string]interface{}{"uninstall": uninstallResult}
+	case protocol.CommandUpdateAgent:
+		stageResult := e.stageSelfUpdate(ctx, command)
+		result.Status = mapUpdateStageStatusToCommandStatus(stageResult)
+		result.Summary = fmt.Sprintf("UPDATE_AGENT %s", stageResult.StageStatus)
+		result.Details = map[string]interface{}{"update": stageResult}
 	default:
 		result.Status = protocol.CommandStatusUnsupported
 		result.Summary = "Command is not implemented by this agent build"
 	}
 	result.FinishedAt = e.now()
 	return result
+}
+
+func (cfg SelfUpdateConfig) Ready() bool {
+	return cfg.Enabled &&
+		runtime.GOOS == "windows" &&
+		strings.TrimSpace(cfg.StagingRoot) != "" &&
+		strings.TrimSpace(cfg.CurrentBinaryPath) != "" &&
+		strings.TrimSpace(cfg.ServiceName) != "" &&
+		len(cfg.AllowedHosts) > 0 &&
+		len(cfg.SignerThumbprints) > 0
+}
+
+func (e *LocalExecutor) stageSelfUpdate(ctx context.Context, command protocol.AgentCommand) selfupdate.StageResult {
+	if !e.SelfUpdate.Ready() {
+		return selfupdate.Failed(selfupdate.ErrUnsupportedPlatform, "self-update staging is not configured")
+	}
+	payload, err := unmarshalUpdateAgentPayload(command.Payload)
+	if err != nil {
+		return selfupdate.Failed(selfupdate.ErrCatalogMismatch, err.Error())
+	}
+	verifier := e.SelfUpdate.Verifier
+	if verifier == nil {
+		verifier = selfupdate.NewNativeAuthenticodeVerifier()
+	}
+	stageResult, _ := selfupdate.StageCandidateFromDownloadWithVerifier(ctx, selfupdate.StageCandidateInput{
+		Preflight: selfupdate.PreflightInput{
+			Platform:       runtime.GOOS,
+			CurrentVersion: e.AgentVersion,
+			MaxSeenVersion: e.SelfUpdate.MaxSeenVersion,
+			Payload:        payload,
+			URLPolicy: selfupdate.URLPolicy{
+				AllowedHosts: e.SelfUpdate.AllowedHosts,
+				MaxRedirects: e.SelfUpdate.MaxRedirects,
+			},
+			TierPolicy: selfupdate.TierPolicy{
+				AllowLabOnly: e.SelfUpdate.AllowLabOnly,
+				DomainJoined: e.SelfUpdate.DomainJoined,
+			},
+		},
+		StagingRoot:       e.SelfUpdate.StagingRoot,
+		StagingID:         command.CommandID,
+		CurrentBinaryPath: e.SelfUpdate.CurrentBinaryPath,
+		ServiceName:       e.SelfUpdate.ServiceName,
+		SignerAllowlist:   selfupdate.SignerAllowlist{Thumbprints: e.SelfUpdate.SignerThumbprints},
+	}, e.SelfUpdate.Transport, verifier)
+	return stageResult
 }
 
 func (e *LocalExecutor) now() time.Time {
@@ -357,6 +437,24 @@ func unmarshalUninstallRequest(payload map[string]interface{}) (winget.Uninstall
 	return req, nil
 }
 
+func unmarshalUpdateAgentPayload(payload map[string]interface{}) (selfupdate.UpdateAgentPayload, error) {
+	if payload == nil {
+		return selfupdate.UpdateAgentPayload{}, errors.New("UPDATE_AGENT payload is empty")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return selfupdate.UpdateAgentPayload{}, fmt.Errorf("UPDATE_AGENT payload re-marshal failed: %w", err)
+	}
+	var req selfupdate.UpdateAgentPayload
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return selfupdate.UpdateAgentPayload{}, fmt.Errorf("UPDATE_AGENT payload decode failed: %w", err)
+	}
+	if code, reason := req.ValidateShape(); code != "" {
+		return selfupdate.UpdateAgentPayload{}, fmt.Errorf("UPDATE_AGENT payload invalid: %s", reason)
+	}
+	return req, nil
+}
+
 // mapUninstallStatusToCommandStatus mirrors mapInstallStatusToCommandStatus
 // for AG-028. SUCCEEDED_VERIFIED + SKIP_ALREADY_ABSENT → SUCCEEDED;
 // FAILED_UNSUPPORTED_* + UNSUPPORTED probe state → UNSUPPORTED; all
@@ -371,6 +469,22 @@ func mapUninstallStatusToCommandStatus(finalStatus string) protocol.CommandStatu
 	case winget.UninstallFinalStatusFailedUnsupportedPlatform,
 		winget.UninstallFinalStatusFailedUnsupportedVerification:
 		return protocol.CommandStatusUnsupported
+	default:
+		return protocol.CommandStatusFailed
+	}
+}
+
+func mapUpdateStageStatusToCommandStatus(stage selfupdate.StageResult) protocol.CommandStatus {
+	switch stage.StageStatus {
+	case selfupdate.StageReady, selfupdate.StageNoopCurrent:
+		return protocol.CommandStatusSucceeded
+	case selfupdate.StageFailed:
+		switch stage.ErrorCode {
+		case selfupdate.ErrUnsupportedPlatform, selfupdate.ErrLabTierRefused:
+			return protocol.CommandStatusUnsupported
+		default:
+			return protocol.CommandStatusFailed
+		}
 	default:
 		return protocol.CommandStatusFailed
 	}

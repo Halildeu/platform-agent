@@ -2,8 +2,8 @@
 
 package selfupdate
 
-import "platform-agent/internal/platform/windows/dpapi"
+import "platform-agent/internal/platform/windows/acl"
 
 func hardenStagedFile(path string) error {
-	return dpapi.SetHardenedACL(path)
+	return acl.SetHardenedACL(path)
 }

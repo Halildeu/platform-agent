@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"platform-agent/internal/platform/windows/dpapi"
+	"platform-agent/internal/platform/windows/acl"
 )
 
 // PrepareProtectedStagingDir creates the per-request staging directory and
@@ -21,7 +21,7 @@ func PrepareProtectedStagingDir(root, stagingID string) (StagingPaths, ErrorCode
 	if err := os.MkdirAll(paths.Directory, 0o700); err != nil {
 		return StagingPaths{}, ErrStagingIO, "create protected staging directory failed"
 	}
-	if err := dpapi.SetHardenedACL(paths.Directory); err != nil {
+	if err := acl.SetHardenedACL(paths.Directory); err != nil {
 		return StagingPaths{}, ErrStagingIO, fmt.Sprintf("harden protected staging directory acl failed: %v", err)
 	}
 	return paths, "", ""

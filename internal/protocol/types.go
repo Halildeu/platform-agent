@@ -47,6 +47,12 @@ const (
 	// See internal/winget/uninstall_winget.go for the canonical
 	// wire-shape.
 	CommandUninstallSoftware CommandType = "UNINSTALL_SOFTWARE"
+	// AG-029 (Faz 22.5.7): signed agent self-update staging command.
+	// The agent downloads only a backend release-catalog URL, verifies hash,
+	// Authenticode, local signer allowlist, and writes a local activation plan.
+	// It does NOT replace the running service binary in the command result
+	// phase. Activation/rollback is a later two-phase helper.
+	CommandUpdateAgent CommandType = "UPDATE_AGENT"
 )
 
 type CommandStatus string
@@ -187,7 +193,7 @@ func (r CommandResult) ToWire() CommandResultWire {
 
 func (t CommandType) RequiresReason() bool {
 	switch t {
-	case CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile:
+	case CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent:
 		return true
 	default:
 		return false
