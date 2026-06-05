@@ -31,6 +31,7 @@ import (
 	winservice "platform-agent/internal/platform/windows/service"
 	"platform-agent/internal/protocol"
 	"platform-agent/internal/security"
+	"platform-agent/internal/selfupdate"
 	"platform-agent/internal/software"
 	"platform-agent/internal/state"
 	"platform-agent/internal/users"
@@ -75,6 +76,10 @@ func main() {
 	}
 	if len(flag.Args()) > 0 && flag.Args()[0] == "diagnose" {
 		handleDiagnoseCommand(flag.Args()[1:])
+		return
+	}
+	if len(flag.Args()) > 0 && flag.Args()[0] == "self-update" {
+		handleSelfUpdateCommand(flag.Args()[1:], cfg)
 		return
 	}
 
@@ -420,6 +425,82 @@ func handleServiceCommand(args []string) {
 
 func printServiceUsage() {
 	fmt.Fprintln(os.Stderr, "usage: endpoint-agent service <install|uninstall|start|stop|status> [--name name] [--display-name label] [--description text] [--maintenance-token token]")
+}
+
+type selfUpdateActivateOptions struct {
+	StagingRoot string
+	StagingID   string
+	MaxBytes    int64
+}
+
+func handleSelfUpdateCommand(args []string, cfg config.Config) {
+	if len(args) == 0 {
+		printSelfUpdateUsage()
+		os.Exit(2)
+	}
+
+	switch args[0] {
+	case "activate":
+		flags := flag.NewFlagSet("self-update activate", flag.ExitOnError)
+		opts := selfUpdateActivateOptions{
+			StagingRoot: cfg.SelfUpdateStagingRoot,
+			MaxBytes:    selfupdate.DefaultMaxUpdateBytes,
+		}
+		timeout := flags.Duration("timeout", 2*time.Minute, "activation timeout")
+		flags.StringVar(&opts.StagingRoot, "staging-root", opts.StagingRoot, "self-update staging root")
+		flags.StringVar(&opts.StagingID, "staging-id", "", "self-update staging identifier / command id")
+		flags.Int64Var(&opts.MaxBytes, "max-bytes", opts.MaxBytes, "maximum staged binary bytes")
+		if err := flags.Parse(args[1:]); err != nil {
+			log.Fatalf("self-update activate parse failed: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		defer cancel()
+
+		outcome := runSelfUpdateActivate(ctx, opts, windowsServiceActivationController{})
+		if err := json.NewEncoder(os.Stdout).Encode(outcome); err != nil {
+			log.Fatalf("self-update activate encode failed: %v", err)
+		}
+		if outcome.Status != selfupdate.ActivationActivated {
+			os.Exit(1)
+		}
+	default:
+		printSelfUpdateUsage()
+		os.Exit(2)
+	}
+}
+
+func printSelfUpdateUsage() {
+	fmt.Fprintln(os.Stderr, "usage: endpoint-agent self-update activate --staging-id id [--staging-root path] [--max-bytes n] [--timeout duration]")
+}
+
+func runSelfUpdateActivate(ctx context.Context, opts selfUpdateActivateOptions, service selfupdate.ActivationServiceController) selfupdate.ActivationOutcome {
+	paths, code, reason := selfupdate.BuildStagingPaths(strings.TrimSpace(opts.StagingRoot), strings.TrimSpace(opts.StagingID))
+	if code != "" {
+		return selfupdate.ActivationOutcome{Status: selfupdate.ActivationFailed, Reason: reason}
+	}
+	return selfupdate.ActivatePreparedUpdate(ctx, paths, opts.MaxBytes, service)
+}
+
+type windowsServiceActivationController struct{}
+
+func (windowsServiceActivationController) Stop(ctx context.Context, serviceName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := winservice.Stop(winservice.Options{Name: serviceName}); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+func (windowsServiceActivationController) Start(ctx context.Context, serviceName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := winservice.Start(winservice.Options{Name: serviceName}); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func requireMaintenanceToken(token string, hashOverride string) error {
