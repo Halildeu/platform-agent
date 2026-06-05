@@ -85,6 +85,8 @@ COLLECT_EVENT_LOG_SUMMARY
 OSQUERY_QUERY
 RESTART_AGENT
 INSTALL_SOFTWARE       (AG-027 / Faz 22.5 — see Section 11)
+UNINSTALL_SOFTWARE     (AG-028 / Faz 22.5.6)
+UPDATE_AGENT           (AG-029 / Faz 22.5.7 — see Section 21)
 ```
 
 Yasak:
@@ -1989,3 +1991,204 @@ separate slice (V26 migration adding `endpoint_app_control_snapshots` +
 GET endpoint) that will be tracked under its own PR; the agent block above
 is the exact wire shape the backend will need to deserialize.
 
+-------------------------------------------------------------------------------
+## 21. AG-029 — UPDATE_AGENT Command Contract (Faz 22.5.7)
+-------------------------------------------------------------------------------
+
+`UPDATE_AGENT` is the signed self-update staging command. It is NOT a raw
+download URL command and it is NOT an activation result. The backend selects
+a release from an approved release catalog; the agent independently verifies
+the candidate with local trust policy before writing a local activation plan.
+
+### 21.1 Capability advertisement
+
+The agent advertises `UPDATE_AGENT` only when all local trust configuration is
+present and the process is running on Windows:
+
+```text
+ENDPOINT_AGENT_SELF_UPDATE_ENABLED=true
+ENDPOINT_AGENT_SELF_UPDATE_STAGING_ROOT=<local staging root>
+ENDPOINT_AGENT_SELF_UPDATE_CURRENT_BINARY_PATH=<current endpoint-agent.exe>
+ENDPOINT_AGENT_SELF_UPDATE_SERVICE_NAME=EndpointAgent
+ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS=<comma-separated exact host allowlist>
+ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS=<comma-separated local signer allowlist>
+```
+
+Optional local-only controls:
+
+```text
+ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS=5
+ENDPOINT_AGENT_SELF_UPDATE_ALLOW_LAB_ONLY=false
+ENDPOINT_AGENT_SELF_UPDATE_DOMAIN_JOINED=true|false
+ENDPOINT_AGENT_SELF_UPDATE_MAX_SEEN_VERSION=<semver high-water mark>
+```
+
+The backend payload cannot widen these values. In particular, a payload cannot
+add an allowed host, add a signer thumbprint, enable lab-only signing, or
+disable version replay protection.
+
+### 21.2 Request payload
+
+Wire shape:
+
+```json
+{
+  "type": "UPDATE_AGENT",
+  "requestedBy": "admin@example.local",
+  "reason": "Approved agent self-update rollout",
+  "payload": {
+    "releaseId": "endpoint-agent-1.2.3",
+    "channel": "stable",
+    "ring": "pilot",
+    "targetVersion": "1.2.3",
+    "binaryUrl": "https://updates.example.invalid/endpoint-agent/1.2.3/endpoint-agent.exe",
+    "claimedSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "claimedSignerThumbprint": "AABBCCDDEEFF0011223344556677889900AABBCC",
+    "signingTier": "TRUSTED",
+    "maxBytes": 104857600
+  }
+}
+```
+
+Field rules:
+
+| Field | Rule |
+|---|---|
+| `releaseId` | Backend release-catalog identifier. Audit/correlation only on the agent. |
+| `channel` / `ring` | Backend rollout context. Audit/correlation only on the agent. |
+| `targetVersion` | Required SemVer target. Agent rejects downgrade/replay/unparseable versions. |
+| `binaryUrl` | Required candidate source after backend catalog resolution. Agent still applies local HTTPS/host/redirect policy. |
+| `claimedSha256` | Required audit evidence. Agent recomputes the actual SHA256 and rejects mismatch. |
+| `claimedSignerThumbprint` | Audit evidence only. Agent trusts only the verified signer in its local allowlist. |
+| `signingTier` | `TRUSTED` or `LAB_ONLY_EVIDENCE`; production accepts `TRUSTED` only. |
+| `acceptLabOnlySigning` | Optional wire field accepted for audit but ignored as authority. Local opt-in is required. |
+| `maxBytes` | Optional size cap. Agent applies its configured/default cap if absent. |
+
+The admin surface must not let an operator type a raw URL or arbitrary package
+metadata directly into an agent command. Raw URL entry would bypass the release
+catalog boundary and is out of contract.
+
+### 21.3 Staging result payload
+
+The command result carries `details.update` and only reports the staging phase.
+Activation is a later phase and must not be represented in this result.
+
+Successful staging:
+
+```json
+{
+  "status": "SUCCEEDED",
+  "summary": "UPDATE_AGENT STAGED_ACTIVATION_READY",
+  "details": {
+    "update": {
+      "stageStatus": "STAGED_ACTIVATION_READY",
+      "stagingId": "8f716fe5-1f1a-4d6c-b18b-4cb26e86cf3d",
+      "activationPlanId": "8f716fe5-1f1a-4d6c-b18b-4cb26e86cf3d",
+      "oldVersion": "1.2.2",
+      "targetVersion": "1.2.3",
+      "actualSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "actualSignerThumbprint": "AABBCCDDEEFF0011223344556677889900AABBCC",
+      "signingTier": "TRUSTED",
+      "reason": "staged activation ready"
+    }
+  }
+}
+```
+
+No-op staging:
+
+```json
+{
+  "details": {
+    "update": {
+      "stageStatus": "NOOP_ALREADY_CURRENT",
+      "oldVersion": "1.2.3",
+      "targetVersion": "1.2.3",
+      "reason": "already at target version"
+    }
+  }
+}
+```
+
+Failed staging:
+
+```json
+{
+  "status": "FAILED",
+  "summary": "UPDATE_AGENT FAILED_STAGE",
+  "details": {
+    "update": {
+      "stageStatus": "FAILED_STAGE",
+      "errorCode": "SIGNER_NOT_ALLOWED",
+      "reason": "verified signer is not in local allowlist"
+    }
+  }
+}
+```
+
+`stagingId` and `activationPlanId` are opaque handles, not filesystem paths.
+The result must never include local paths such as `C:\ProgramData\...` or
+`C:\Program Files\...`.
+
+### 21.4 Bounded staging error taxonomy
+
+Allowed staging `errorCode` values:
+
+```text
+POLICY_UNSUPPORTED_PLATFORM
+POLICY_LAB_TIER_REFUSED
+POLICY_VERSION_DOWNGRADE
+POLICY_VERSION_REPLAY
+POLICY_VERSION_UNPARSEABLE
+POLICY_URL_REJECTED
+DOWNLOAD_FAILED
+DOWNLOAD_TOO_LARGE
+HASH_MISMATCH
+SIGNATURE_INVALID
+SIGNER_NOT_ALLOWED
+CATALOG_MISMATCH
+CREDENTIAL_PREFLIGHT_FAILED
+STAGING_IO_FAILED
+ACTIVATION_PLAN_WRITE_FAILED
+```
+
+Backends should reject unknown codes in persisted command-result mirrors. The
+agent bounds `reason` and redacts any path-like token before it reaches the
+wire.
+
+### 21.5 Activation phase
+
+Activation happens only after the staging result has been posted. Local helper
+commands:
+
+```powershell
+endpoint-agent self-update preflight --staging-id <stagingId>
+endpoint-agent self-update activate --staging-id <stagingId> --timeout 2m
+```
+
+Activation output uses `activationStatus`, not `stageStatus`:
+
+```json
+{
+  "status": "ACTIVATED",
+  "activationPlanId": "8f716fe5-1f1a-4d6c-b18b-4cb26e86cf3d",
+  "targetVersion": "1.2.3",
+  "newSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "backupSha256": "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+  "reason": "activation applied"
+}
+```
+
+Allowed activation statuses:
+
+```text
+ACTIVATED
+ROLLED_BACK
+PENDING_REBOOT
+ACTIVATION_FAILED
+```
+
+The green acceptance path is not merely `ACTIVATED`; it also requires the
+service to restart cleanly and the next backend heartbeat to report
+`AgentVersion == targetVersion`. See `docs/AG-029-self-update-live-smoke.md`
+for the full live-smoke evidence matrix.
