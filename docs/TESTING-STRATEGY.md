@@ -263,3 +263,27 @@ AG-026A hard boundary (Codex 019e6b5d plan-time AGREE kilit sart +
 9. Non-Windows build: `DetectSourceEgress` Supported=false doner,
    hicbir probe calistirilmaz (`source_egress_other_test.go`).
 ```
+
+-------------------------------------------------------------------------------
+## 8. Signed Self-Update Live Smoke (AG-029, Faz 22.5)
+-------------------------------------------------------------------------------
+
+AG-029 acceptance is not covered by source tests alone. The live Windows
+evidence runbook is `docs/AG-029-self-update-live-smoke.md`.
+
+Minimum acceptance evidence:
+
+```text
+1. backend-issued UPDATE_AGENT result reports STAGED_ACTIVATION_READY
+2. endpoint-agent self-update preflight returns path-free READY
+3. endpoint-agent self-update activate returns path-free ACTIVATED
+4. EndpointAgent service is running after activation
+5. next backend heartbeat reports AgentVersion == targetVersion
+6. audit/result rows correlate to the original command id and actor
+7. tampered staged binary preflight fails closed with HASH_MISMATCH
+```
+
+If backend command-create PR4 is not available yet, only the source-slice
+preflight/activation readiness mode may be used. That mode must not be used to
+claim backend catalog, maker-checker, production rollout, or domain-wide
+self-update readiness.
