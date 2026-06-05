@@ -83,6 +83,17 @@ const (
 	StageFailed      StageStatus = "FAILED_STAGE"
 )
 
+// IsKnownStageStatus reports whether s is one of the bounded staging statuses.
+// A StageResult returned to a caller must always carry a known status (Codex
+// 019e9912 #2); the empty/zero value is NOT a valid staging outcome.
+func IsKnownStageStatus(s StageStatus) bool {
+	switch s {
+	case StageReady, StageNoopCurrent, StageFailed:
+		return true
+	}
+	return false
+}
+
 // ActivationStatus is the bounded outcome of the ACTIVATION phase, reported
 // LATER via the new agent's heartbeat / a dedicated update-state evidence
 // surface (PR3) — NOT via the staging command result. Defined here so the
@@ -119,12 +130,61 @@ type StageResult struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// Failed builds a FAILED_STAGE result with a bounded reason.
+// Failed builds a FAILED_STAGE result with a bounded, path-sanitized reason.
 func Failed(code ErrorCode, reason string) StageResult {
-	return StageResult{StageStatus: StageFailed, ErrorCode: code, Reason: reason}
+	return StageResult{StageStatus: StageFailed, ErrorCode: code, Reason: sanitizeReason(reason)}
 }
 
 // Noop builds a NOOP_ALREADY_CURRENT result (target == current).
 func Noop(current string) StageResult {
 	return StageResult{StageStatus: StageNoopCurrent, OldVersion: current, TargetVersion: current, Reason: "already at target version"}
+}
+
+// maxReasonBytes bounds a wire reason.
+const maxReasonBytes = 200
+
+// sanitizeReason mechanically enforces the "no path / bounded reason" wire
+// invariant (Codex 019e9912 #3): a reason that contains a filesystem-path-like
+// token is replaced wholesale (so a future PR1/PR3 I/O error reason can never
+// leak a local path), control characters are stripped, and the result is
+// length-capped. PR0's own reasons are already static + safe; this guards the
+// later phases that surface real I/O error text.
+func sanitizeReason(s string) string {
+	if looksPathish(s) {
+		return "(reason redacted: contained a path-like token)"
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+		if b.Len() >= maxReasonBytes {
+			break
+		}
+	}
+	return b.String()
+}
+
+// looksPathish reports whether s contains an obvious filesystem-path token
+// (a backslash, a "<drive>:/" or "<drive>:\\" prefix, or a well-known
+// per-machine/per-user directory name).
+func looksPathish(s string) bool {
+	if strings.Contains(s, `\`) {
+		return true
+	}
+	low := strings.ToLower(s)
+	for _, tok := range []string{"c:/", "/users/", "/home/", "programdata", "appdata"} {
+		if strings.Contains(low, tok) {
+			return true
+		}
+	}
+	for i := 0; i+2 < len(s); i++ {
+		c := s[i]
+		isAlpha := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+		if isAlpha && s[i+1] == ':' && (s[i+2] == '/' || s[i+2] == '\\') {
+			return true
+		}
+	}
+	return false
 }

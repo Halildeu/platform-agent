@@ -12,15 +12,27 @@ type PreflightInput struct {
 	TierPolicy     TierPolicy
 }
 
+// PreflightEvidence is the non-secret evidence carried when preflight is clean
+// and PR1 should proceed to download + stage. It is SEPARATE from StageResult
+// (Codex 019e9912 #2) so that a StageResult always carries a valid, bounded
+// stageStatus — a clean preflight is "policy says go", not a staging outcome.
+type PreflightEvidence struct {
+	OldVersion    string
+	TargetVersion string
+	SigningTier   SigningTier
+}
+
 // PreflightDecision is the outcome of EvaluatePreflight.
-//   - Proceed=true: all non-I/O gates passed; PR1 may download → hash →
-//     authenticode → signer-allowlist → credential-preflight → stage.
-//   - Noop=true: target == current; nothing to do.
-//   - otherwise Result is a FAILED_STAGE with a bounded ErrorCode.
+//   - Proceed=true: all non-I/O gates passed; Evidence is populated and PR1 may
+//     download → hash → authenticode → signer-allowlist → credential-preflight
+//     → stage. Result is the zero value in this case.
+//   - Noop=true: target == current; Result is a NOOP_ALREADY_CURRENT.
+//   - otherwise (both false): Result is a FAILED_STAGE with a bounded ErrorCode.
 type PreflightDecision struct {
-	Proceed bool
-	Noop    bool
-	Result  StageResult
+	Proceed  bool
+	Noop     bool
+	Result   StageResult
+	Evidence PreflightEvidence
 }
 
 // EvaluatePreflight runs the fail-closed, NON-I/O policy gates in canonical
@@ -53,11 +65,10 @@ func EvaluatePreflight(in PreflightInput) PreflightDecision {
 	}
 	return PreflightDecision{
 		Proceed: true,
-		Result: StageResult{
-			TargetVersion: in.Payload.TargetVersion,
+		Evidence: PreflightEvidence{
 			OldVersion:    in.CurrentVersion,
+			TargetVersion: in.Payload.TargetVersion,
 			SigningTier:   in.Payload.SigningTier,
-			Reason:        "preflight policy clean; staging proceeds",
 		},
 	}
 }

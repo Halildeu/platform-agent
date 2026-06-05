@@ -27,8 +27,8 @@ func TestEvaluatePreflight_HappyProceed(t *testing.T) {
 	if !d.Proceed || d.Noop {
 		t.Fatalf("expected Proceed, got %+v", d)
 	}
-	if d.Result.TargetVersion != "1.1.0" || d.Result.OldVersion != "1.0.0" {
-		t.Errorf("result evidence wrong: %+v", d.Result)
+	if d.Evidence.TargetVersion != "1.1.0" || d.Evidence.OldVersion != "1.0.0" {
+		t.Errorf("proceed evidence wrong: %+v", d.Evidence)
 	}
 }
 

@@ -106,3 +106,43 @@ func TestEvaluateVersionPolicy(t *testing.T) {
 		})
 	}
 }
+
+// TestCompare_NumericPrereleaseArbitraryPrecision pins Codex 019e9912 #1: a
+// numeric prerelease identifier that overflows uint64 must STILL sort as a
+// number (numeric < alphanumeric; longer-digits = larger), not fall through to
+// an alphanumeric string compare.
+func TestCompare_NumericPrereleaseArbitraryPrecision(t *testing.T) {
+	const huge = "18446744073709551616"   // math.MaxUint64 + 1
+	const bigger = "18446744073709551617" // + 2
+	mustLess := func(a, b string) {
+		t.Helper()
+		va, err := ParseVersion(a)
+		if err != nil {
+			t.Fatalf("parse %q: %v", a, err)
+		}
+		vb, err := ParseVersion(b)
+		if err != nil {
+			t.Fatalf("parse %q: %v", b, err)
+		}
+		if Compare(va, vb) != -1 || Compare(vb, va) != 1 {
+			t.Errorf("expected %q < %q", a, b)
+		}
+	}
+	mustLess("1.0.0-"+huge, "1.0.0-0alpha")  // huge numeric < alphanumeric
+	mustLess("1.0.0-2", "1.0.0-"+huge)       // small numeric < huge numeric
+	mustLess("1.0.0-"+huge, "1.0.0-"+bigger) // huge < huge+1 (equal length, lexical)
+}
+
+// TestEvaluateVersionPolicy_OverflowNoBypass: the uint64-overflow comparator
+// bug must not let a downgrade or replay through the version gate.
+func TestEvaluateVersionPolicy_OverflowNoBypass(t *testing.T) {
+	const huge = "18446744073709551616"
+	// target numeric-prerelease < current alphanumeric-prerelease ⇒ downgrade
+	if d := EvaluateVersionPolicy("1.0.0-0alpha", "1.0.0-"+huge, ""); d.Code != ErrVersionDowngrade {
+		t.Errorf("overflow downgrade not refused: %+v", d)
+	}
+	// target numeric-prerelease ≤ alphanumeric maxSeen ⇒ replay
+	if d := EvaluateVersionPolicy("1.0.0-0", "1.0.0-"+huge, "1.0.0-0alpha"); d.Code != ErrVersionReplay {
+		t.Errorf("overflow replay not refused: %+v", d)
+	}
+}

@@ -180,12 +180,19 @@ func comparePrerelease(a, b []string) int {
 // compareIdent: numeric identifiers compare numerically; numeric always has
 // lower precedence than alphanumeric; two alphanumerics compare in ASCII
 // order.
+//
+// Codex 019e9912 #1 (security boundary): numeric identifiers are compared at
+// ARBITRARY PRECISION (length-then-lexical, valid because the parser forbids
+// leading zeros), NOT via uint64. A prerelease identifier that overflows
+// uint64 must still sort as a NUMBER — otherwise it would fall through to an
+// alphanumeric string compare and a downgrade/replay could slip past the
+// version policy.
 func compareIdent(a, b string) int {
-	an, aNum := asNumeric(a)
-	bn, bNum := asNumeric(b)
+	aNum := isNumericIdent(a)
+	bNum := isNumericIdent(b)
 	switch {
 	case aNum && bNum:
-		return cmpUint(an, bn)
+		return compareNumericIdent(a, b)
 	case aNum:
 		return -1
 	case bNum:
@@ -195,17 +202,28 @@ func compareIdent(a, b string) int {
 	}
 }
 
-func asNumeric(id string) (uint64, bool) {
+// isNumericIdent reports whether id is a non-empty all-ASCII-digit identifier.
+func isNumericIdent(id string) bool {
+	if id == "" {
+		return false
+	}
 	for i := 0; i < len(id); i++ {
 		if id[i] < '0' || id[i] > '9' {
-			return 0, false
+			return false
 		}
 	}
-	n, err := strconv.ParseUint(id, 10, 64)
-	if err != nil {
-		return 0, false
+	return true
+}
+
+// compareNumericIdent compares two all-digit identifiers as arbitrary-precision
+// non-negative integers. The parser guarantees no leading zeros, so the longer
+// string is the larger number; equal lengths compare lexically (ASCII digit
+// order matches numeric order at equal length).
+func compareNumericIdent(a, b string) int {
+	if len(a) != len(b) {
+		return cmpInt(len(a), len(b))
 	}
-	return n, true
+	return strings.Compare(a, b)
 }
 
 func cmpUint(a, b uint64) int {

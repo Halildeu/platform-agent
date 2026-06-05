@@ -109,3 +109,44 @@ func TestIsKnownTier(t *testing.T) {
 		t.Errorf("unknown tier reported as known")
 	}
 }
+
+func TestIsKnownStageStatus(t *testing.T) {
+	for _, s := range []StageStatus{StageReady, StageNoopCurrent, StageFailed} {
+		if !IsKnownStageStatus(s) {
+			t.Errorf("%q should be known", s)
+		}
+	}
+	if IsKnownStageStatus(StageStatus("")) || IsKnownStageStatus(StageStatus("X")) {
+		t.Errorf("unknown stage status reported as known")
+	}
+}
+
+func TestSanitizeReason(t *testing.T) {
+	pathy := []string{
+		`staging failed at C:\ProgramData\EndpointAgent\x`,
+		"download failed: /Users/alice/x",
+		"drive D:/foo",
+		`\\server\share\foo`,
+	}
+	for _, in := range pathy {
+		if r := sanitizeReason(in); !strings.Contains(r, "redacted") {
+			t.Errorf("path-ish reason not redacted: in=%q out=%q", in, r)
+		}
+	}
+	if r := sanitizeReason("a clean static reason"); r != "a clean static reason" {
+		t.Errorf("clean reason altered: %q", r)
+	}
+	if r := sanitizeReason(strings.Repeat("a", 500)); len(r) > maxReasonBytes+4 {
+		t.Errorf("reason not length-bounded: %d", len(r))
+	}
+}
+
+func TestFailedRedactsPathReason(t *testing.T) {
+	r := Failed(ErrStagingIO, `C:\Users\bob\agent.exe`)
+	if strings.Contains(r.Reason, `\`) || strings.Contains(strings.ToLower(r.Reason), "users") {
+		t.Errorf("Failed() leaked a path in reason: %q", r.Reason)
+	}
+	if r.StageStatus != StageFailed || r.ErrorCode != ErrStagingIO {
+		t.Errorf("Failed() result wrong: %+v", r)
+	}
+}
