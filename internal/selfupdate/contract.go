@@ -107,6 +107,18 @@ const (
 	ActivationFailed        ActivationStatus = "ACTIVATION_FAILED"
 )
 
+// IsKnownActivationStatus reports whether s is one of the bounded activation
+// statuses. Activation evidence may be persisted locally after service
+// mutation, so the zero value must fail closed rather than becoming an
+// ambiguous status file.
+func IsKnownActivationStatus(s ActivationStatus) bool {
+	switch s {
+	case ActivationActivated, ActivationRolledBack, ActivationPendingReboot, ActivationFailed:
+		return true
+	}
+	return false
+}
+
 // StageResult is the structured result a STAGING Execute() returns under
 // `details.update`. It carries opaque identifiers + bounded evidence — never
 // a filesystem path (Codex 019e94fd must-fix #5): the backend has no need for

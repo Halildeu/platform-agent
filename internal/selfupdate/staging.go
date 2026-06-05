@@ -14,11 +14,12 @@ const (
 	// binary. The backend may set a lower cap in the release catalog payload.
 	DefaultMaxUpdateBytes int64 = 250 * 1024 * 1024
 
-	stagedBinaryName        = "endpoint-agent.exe"
-	activationPlanFileName  = "activation-plan.json"
-	rollbackBackupFileName  = "endpoint-agent.rollback.exe"
-	rollbackPlanFileName    = "rollback-plan.json"
-	maxStagingIdentifierLen = 128
+	stagedBinaryName          = "endpoint-agent.exe"
+	activationPlanFileName    = "activation-plan.json"
+	activationOutcomeFileName = "activation-outcome.json"
+	rollbackBackupFileName    = "endpoint-agent.rollback.exe"
+	rollbackPlanFileName      = "rollback-plan.json"
+	maxStagingIdentifierLen   = 128
 )
 
 // HashResult is the bounded evidence produced by streaming a candidate binary.
@@ -216,7 +217,10 @@ func removeStagedArtifacts(paths StagingPaths) {
 	}
 	_ = os.Remove(paths.BinaryPath + ".tmp")
 	_ = os.Remove(paths.BinaryPath)
+	_ = os.Remove(paths.ActivationPlanPath + ".tmp")
 	_ = os.Remove(paths.ActivationPlanPath)
+	_ = os.Remove(activationOutcomePath(paths) + ".tmp")
+	_ = os.Remove(activationOutcomePath(paths))
 	_ = os.Remove(rollbackBackupPath(paths) + ".tmp")
 	_ = os.Remove(rollbackBackupPath(paths))
 	_ = os.Remove(rollbackPlanPath(paths) + ".tmp")
@@ -253,6 +257,10 @@ func pathWithinRoot(root, candidate string) bool {
 
 func rollbackBackupPath(paths StagingPaths) string {
 	return filepath.Join(paths.Directory, rollbackBackupFileName)
+}
+
+func activationOutcomePath(paths StagingPaths) string {
+	return filepath.Join(paths.Directory, activationOutcomeFileName)
 }
 
 func rollbackPlanPath(paths StagingPaths) string {

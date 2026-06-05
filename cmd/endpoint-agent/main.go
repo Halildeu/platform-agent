@@ -538,7 +538,11 @@ func runSelfUpdateActivate(ctx context.Context, opts selfUpdateActivateOptions, 
 	if code != "" {
 		return selfupdate.ActivationOutcome{Status: selfupdate.ActivationFailed, Reason: reason}
 	}
-	return selfupdate.ActivatePreparedUpdate(ctx, paths, opts.MaxBytes, service)
+	outcome := selfupdate.ActivatePreparedUpdate(ctx, paths, opts.MaxBytes, service)
+	if code, reason := selfupdate.WriteActivationOutcome(paths, outcome); code != "" && outcome.Status == selfupdate.ActivationActivated {
+		outcome.Reason = "activation applied; outcome persistence failed: " + string(code) + " " + reason
+	}
+	return outcome
 }
 
 type windowsServiceActivationController struct{}

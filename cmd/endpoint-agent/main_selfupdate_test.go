@@ -48,6 +48,13 @@ func TestRunSelfUpdateActivateSwapsPreparedBinary(t *testing.T) {
 	if strings.Contains(string(raw), root) || strings.Contains(string(raw), currentPath) {
 		t.Fatalf("activation outcome leaked local path: %s", raw)
 	}
+	outcomeRaw, err := os.ReadFile(filepath.Join(paths.Directory, "activation-outcome.json"))
+	if err != nil {
+		t.Fatalf("activation outcome evidence not persisted: %v", err)
+	}
+	if strings.Contains(string(outcomeRaw), root) || strings.Contains(string(outcomeRaw), currentPath) {
+		t.Fatalf("persisted activation outcome leaked local path: %s", outcomeRaw)
+	}
 }
 
 func TestRunSelfUpdateActivateRejectsInvalidStagingInput(t *testing.T) {
