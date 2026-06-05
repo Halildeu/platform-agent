@@ -1,6 +1,9 @@
 package selfupdate
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCheckURL(t *testing.T) {
 	pol := URLPolicy{AllowedHosts: []string{"github.com", "objects.githubusercontent.com"}, MaxRedirects: 5}
@@ -39,6 +42,27 @@ func TestCheckURL(t *testing.T) {
 				t.Errorf("CheckURL(%q) code=%q, want POLICY_URL_REJECTED", c.url, code)
 			}
 		})
+	}
+}
+
+// TestCheckURL_IPLiteralReason pins Codex 019e9912 residual: an IP literal in
+// any form is rejected AS an ip-literal (not merely as off-allowlist) — the
+// IP-literal gate fires BEFORE the host allowlist, so even an (accidentally)
+// allowlisted IP form is refused.
+func TestCheckURL_IPLiteralReason(t *testing.T) {
+	pol := URLPolicy{AllowedHosts: []string{"2130706433", "127.1", "0x7f000001", "0177.0.0.1", "93.184.216.34"}}
+	for _, u := range []string{
+		"https://2130706433/x", "https://127.1/x", "https://0x7f000001/x",
+		"https://0177.0.0.1/x", "https://93.184.216.34/x",
+	} {
+		_, code, reason := CheckURL(u, pol)
+		if code != ErrURLRejected || !strings.Contains(reason, "ip-literal") {
+			t.Errorf("CheckURL(%q) = code=%q reason=%q; want ip-literal rejection", u, code, reason)
+		}
+	}
+	// A real hostname with digits + dots must NOT be misclassified as an IP.
+	if isForbiddenIPLiteralHost("github.com") || isForbiddenIPLiteralHost("v2.api.example") {
+		t.Errorf("real hostname misclassified as ip-literal")
 	}
 }
 

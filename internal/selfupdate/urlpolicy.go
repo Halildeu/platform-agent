@@ -66,7 +66,7 @@ func CheckURL(rawURL string, pol URLPolicy) (CanonicalURL, ErrorCode, string) {
 		return CanonicalURL{}, ErrURLRejected, "non-ascii host (idn must be punycode-encoded)"
 	}
 	host = strings.ToLower(host)
-	if net.ParseIP(host) != nil {
+	if isForbiddenIPLiteralHost(host) {
 		return CanonicalURL{}, ErrURLRejected, "ip-literal host not allowed"
 	}
 	port := u.Port()
@@ -106,4 +106,38 @@ func isASCII(s string) bool {
 		}
 	}
 	return true
+}
+
+// isForbiddenIPLiteralHost rejects an IP literal in ANY form (Codex 019e9912
+// residual: align the test name with the implementation + defense-in-depth, so
+// rejection does not rely solely on the exact host allowlist). It catches the
+// canonical v4/v6 forms (net.ParseIP) plus the non-canonical encodings that
+// net.ParseIP does NOT recognize but which are never valid DNS hostnames: a
+// `0x...` hex literal, and any all-numeric / dotted-numeric host (decimal
+// `2130706433`, octal `0177.0.0.1`, short-form `127.1`). A real DNS name
+// always contains a non-digit, non-dot label character, so this never rejects
+// a legitimate hostname.
+func isForbiddenIPLiteralHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if strings.HasPrefix(host, "0x") {
+		return true
+	}
+	hasDigit := false
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		switch {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case c == '.':
+			// allowed separator
+		default:
+			return false // a non-digit/non-dot label char => a real hostname
+		}
+	}
+	return hasDigit
 }
