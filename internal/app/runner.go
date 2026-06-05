@@ -27,12 +27,23 @@ type CredentialStore interface {
 	Invalidate(ctx context.Context) error
 }
 
+// SelfUpdateActivationHook is the runner's post-result view of AG-029
+// activation. Production wiring can point this to a service-safe helper that
+// uses selfupdate.ActivatePreparedUpdate; tests use a fake hook to pin
+// sequencing without live service mutation.
+type SelfUpdateActivationHook func(ctx context.Context, paths selfupdate.StagingPaths, maxBytes int64) selfupdate.ActivationOutcome
+
 type Runner struct {
 	Config       config.Config
 	Client       *protocol.Client
 	Executor     *commands.LocalExecutor
 	StateTracker *state.Tracker
 	Logger       *log.Logger
+	// SelfUpdateActivation is intentionally injected rather than default-wired
+	// here. Staging command execution must first POST its StageResult to the
+	// backend; only then can a local activation helper run. A nil hook leaves
+	// staging-only behavior intact.
+	SelfUpdateActivation SelfUpdateActivationHook
 	// CredStore persists the HMAC device credential across service
 	// restarts (AG-026D). On non-Windows builds the store returns
 	// hmacstore.ErrUnsupportedOS for Read/Write; the runner treats
@@ -182,11 +193,54 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		r.StateTracker.RecordFailure(time.Now())
 		return err
 	}
+	r.maybeActivateSelfUpdateAfterResult(ctx, command, result)
 	r.logf("command %s finished with %s", command.CommandID, result.Status)
 	if result.Status != protocol.CommandStatusSucceeded {
 		r.logf("command %s detail: summary=%q details=%v", command.CommandID, result.Summary, result.Details)
 	}
 	return nil
+}
+
+func (r *Runner) maybeActivateSelfUpdateAfterResult(ctx context.Context, command protocol.AgentCommand, result protocol.CommandResult) {
+	if command.Type != protocol.CommandUpdateAgent || result.Status != protocol.CommandStatusSucceeded {
+		return
+	}
+	update, ok := result.Details["update"].(selfupdate.StageResult)
+	if !ok || update.StageStatus != selfupdate.StageReady {
+		return
+	}
+	if r.SelfUpdateActivation == nil {
+		r.logf("self-update activation pending: activation hook not configured activationPlanId=%s targetVersion=%s", update.ActivationPlanID, update.TargetVersion)
+		return
+	}
+	paths, code, reason := selfupdate.BuildStagingPaths(r.Config.SelfUpdateStagingRoot, command.CommandID)
+	if code != "" {
+		r.logf("self-update activation skipped: staging path rebuild failed code=%s reason=%s", code, reason)
+		return
+	}
+	outcome := r.SelfUpdateActivation(ctx, paths, selfUpdateMaxBytes(command.Payload))
+	r.logf("self-update activation outcome status=%s activationPlanId=%s targetVersion=%s", outcome.Status, outcome.ActivationPlanID, outcome.TargetVersion)
+}
+
+func selfUpdateMaxBytes(payload map[string]interface{}) int64 {
+	if payload == nil {
+		return selfupdate.DefaultMaxUpdateBytes
+	}
+	switch v := payload["maxBytes"].(type) {
+	case int:
+		if v > 0 {
+			return int64(v)
+		}
+	case int64:
+		if v > 0 {
+			return v
+		}
+	case float64:
+		if v > 0 {
+			return int64(v)
+		}
+	}
+	return selfupdate.DefaultMaxUpdateBytes
 }
 
 func (r *Runner) RunLoop(ctx context.Context) error {
