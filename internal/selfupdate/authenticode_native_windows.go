@@ -22,6 +22,10 @@ var (
 	modcrypt32           = windows.NewLazySystemDLL("crypt32.dll")
 	procCryptMsgGetParam = modcrypt32.NewProc("CryptMsgGetParam")
 	procCryptMsgClose    = modcrypt32.NewProc("CryptMsgClose")
+
+	modwintrust                        = windows.NewLazySystemDLL("wintrust.dll")
+	procWTHelperProvDataFromStateData  = modwintrust.NewProc("WTHelperProvDataFromStateData")
+	procWTHelperGetProvSignerFromChain = modwintrust.NewProc("WTHelperGetProvSignerFromChain")
 )
 
 // NewNativeAuthenticodeVerifier returns the Windows Authenticode verifier used
@@ -36,20 +40,26 @@ func (nativeAuthenticodeVerifier) VerifyAuthenticode(path string) (AuthenticodeE
 	if strings.TrimSpace(path) == "" {
 		return AuthenticodeEvidence{}, ErrSignatureInvalid, "candidate path is required for authenticode verification"
 	}
-	if code, reason := verifyWinTrust(path); code != "" {
+	trustEvidence, code, reason := verifyWinTrust(path)
+	if code != "" {
 		return AuthenticodeEvidence{}, code, reason
 	}
 	leaf, code, reason := extractPrimarySignerCertificate(path)
 	if code != "" {
 		return AuthenticodeEvidence{}, code, reason
 	}
-	return certificateToAuthenticodeEvidence(leaf, time.Now()), "", ""
+	return certificateToAuthenticodeEvidence(leaf, time.Now(), trustEvidence), "", ""
 }
 
-func verifyWinTrust(path string) (ErrorCode, string) {
+type winTrustEvidence struct {
+	Timestamped bool
+	SigningTime time.Time
+}
+
+func verifyWinTrust(path string) (winTrustEvidence, ErrorCode, string) {
 	path16, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return ErrSignatureInvalid, "encode candidate path failed"
+		return winTrustEvidence{}, ErrSignatureInvalid, "encode candidate path failed"
 	}
 	file := &windows.WinTrustFileInfo{
 		Size:     uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})),
@@ -67,12 +77,70 @@ func verifyWinTrust(path string) (ErrorCode, string) {
 		UIContext: windows.WTD_UICONTEXT_EXECUTE,
 	}
 	verifyErr := windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
+	evidence := winTrustTimestampEvidence(data.StateData)
 	data.StateAction = windows.WTD_STATEACTION_CLOSE
 	_ = windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
 	if verifyErr != nil {
-		return ErrSignatureInvalid, "authenticode trust verification failed"
+		return winTrustEvidence{}, ErrSignatureInvalid, "authenticode trust verification failed"
 	}
-	return "", ""
+	return evidence, "", ""
+}
+
+func winTrustTimestampEvidence(state windows.Handle) winTrustEvidence {
+	if state == 0 {
+		return winTrustEvidence{}
+	}
+	provData := wTHelperProvDataFromStateData(state)
+	if provData == 0 {
+		return winTrustEvidence{}
+	}
+	signerPtr := wTHelperGetProvSignerFromChain(provData, 0, false, 0)
+	if signerPtr == 0 {
+		return winTrustEvidence{}
+	}
+	signer := (*cryptProviderSgnr)(unsafe.Pointer(signerPtr))
+	counterSignerPtr := uintptr(0)
+	if signer.CsCounterSigners > 0 {
+		counterSignerPtr = wTHelperGetProvSignerFromChain(provData, 0, true, 0)
+	}
+	if signer.CsCounterSigners == 0 && counterSignerPtr == 0 {
+		return winTrustEvidence{}
+	}
+	if zeroFiletime(signer.SftVerifyAsOf) {
+		return winTrustEvidence{Timestamped: true}
+	}
+	return winTrustEvidence{
+		Timestamped: true,
+		SigningTime: filetimeToTime(signer.SftVerifyAsOf),
+	}
+}
+
+func wTHelperProvDataFromStateData(state windows.Handle) uintptr {
+	r1, _, _ := syscall.SyscallN(procWTHelperProvDataFromStateData.Addr(), uintptr(state))
+	return r1
+}
+
+func wTHelperGetProvSignerFromChain(provData uintptr, signerIndex uint32, counterSigner bool, counterSignerIndex uint32) uintptr {
+	var isCounterSigner uintptr
+	if counterSigner {
+		isCounterSigner = 1
+	}
+	r1, _, _ := syscall.SyscallN(
+		procWTHelperGetProvSignerFromChain.Addr(),
+		provData,
+		uintptr(signerIndex),
+		isCounterSigner,
+		uintptr(counterSignerIndex),
+	)
+	return r1
+}
+
+func zeroFiletime(ft windows.Filetime) bool {
+	return ft.LowDateTime == 0 && ft.HighDateTime == 0
+}
+
+func filetimeToTime(ft windows.Filetime) time.Time {
+	return time.Unix(0, ft.Nanoseconds()).UTC()
 }
 
 func extractPrimarySignerCertificate(path string) (*x509.Certificate, ErrorCode, string) {
@@ -139,16 +207,21 @@ func extractPrimarySignerCertificate(path string) (*x509.Certificate, ErrorCode,
 	return cert, "", ""
 }
 
-func certificateToAuthenticodeEvidence(cert *x509.Certificate, now time.Time) AuthenticodeEvidence {
+func certificateToAuthenticodeEvidence(cert *x509.Certificate, now time.Time, trust winTrustEvidence) AuthenticodeEvidence {
 	sum := sha1.Sum(cert.Raw)
-	return AuthenticodeEvidence{
+	ev := AuthenticodeEvidence{
 		ChainValid:        true,
 		HasCodeSigningEKU: hasCodeSigningEKU(cert),
 		SignerThumbprint:  strings.ToUpper(hex.EncodeToString(sum[:])),
-		Timestamped:       false,
-		SigningTimeValid:  false,
 		CurrentTimeValid:  !now.Before(cert.NotBefore) && !now.After(cert.NotAfter),
 	}
+	if trust.Timestamped {
+		ev.Timestamped = true
+		ev.SigningTimeValid = !trust.SigningTime.IsZero() &&
+			!trust.SigningTime.Before(cert.NotBefore) &&
+			!trust.SigningTime.After(cert.NotAfter)
+	}
+	return ev
 }
 
 func hasCodeSigningEKU(cert *x509.Certificate) bool {
@@ -220,4 +293,20 @@ type cryptAttribute struct {
 	ObjID  *byte
 	Count  uint32
 	Values *windows.CryptAttrBlob
+}
+
+// cryptProviderSgnr mirrors the prefix of WinTrust's CRYPT_PROVIDER_SGNR. AG-029
+// only reads sftVerifyAsOf + countersigner count to preserve Authenticode
+// timestamp semantics after WinVerifyTrust has already validated the signature.
+type cryptProviderSgnr struct {
+	CbStruct          uint32
+	SftVerifyAsOf     windows.Filetime
+	CsCertChain       uint32
+	PasCertChain      uintptr
+	DwSignerType      uint32
+	PsSigner          uintptr
+	DwError           uint32
+	CsCounterSigners  uint32
+	PasCounterSigners uintptr
+	PChainContext     uintptr
 }
