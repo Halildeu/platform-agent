@@ -8,6 +8,7 @@ import (
 )
 
 func TestWriteActivationOutcomePersistsPathFreeEvidence(t *testing.T) {
+	withNoopStagedFileHardener(t)
 	root := t.TempDir()
 	paths, code, reason := BuildStagingPaths(root, "req-outcome")
 	if code != "" {
@@ -50,6 +51,7 @@ func TestWriteActivationOutcomePersistsPathFreeEvidence(t *testing.T) {
 }
 
 func TestWriteActivationOutcomeRejectsUnknownStatus(t *testing.T) {
+	withNoopStagedFileHardener(t)
 	root := t.TempDir()
 	paths, code, reason := BuildStagingPaths(root, "req-bad-outcome")
 	if code != "" {
