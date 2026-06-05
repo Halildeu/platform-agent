@@ -16,6 +16,8 @@ const (
 
 	stagedBinaryName        = "endpoint-agent.exe"
 	activationPlanFileName  = "activation-plan.json"
+	rollbackBackupFileName  = "endpoint-agent.rollback.exe"
+	rollbackPlanFileName    = "rollback-plan.json"
 	maxStagingIdentifierLen = 128
 )
 
@@ -215,6 +217,10 @@ func removeStagedArtifacts(paths StagingPaths) {
 	_ = os.Remove(paths.BinaryPath + ".tmp")
 	_ = os.Remove(paths.BinaryPath)
 	_ = os.Remove(paths.ActivationPlanPath)
+	_ = os.Remove(rollbackBackupPath(paths) + ".tmp")
+	_ = os.Remove(rollbackBackupPath(paths))
+	_ = os.Remove(rollbackPlanPath(paths) + ".tmp")
+	_ = os.Remove(rollbackPlanPath(paths))
 }
 
 func validStagingID(id string) bool {
@@ -243,4 +249,12 @@ func pathWithinRoot(root, candidate string) bool {
 		return false
 	}
 	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
+
+func rollbackBackupPath(paths StagingPaths) string {
+	return filepath.Join(paths.Directory, rollbackBackupFileName)
+}
+
+func rollbackPlanPath(paths StagingPaths) string {
+	return filepath.Join(paths.Directory, rollbackPlanFileName)
 }
