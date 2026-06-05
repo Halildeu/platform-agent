@@ -17,6 +17,7 @@ const rollbackPlanSchemaVersion = 1
 type RollbackPlan struct {
 	SchemaVersion     int    `json:"schemaVersion"`
 	ActivationPlanID  string `json:"activationPlanId"`
+	ServiceName       string `json:"serviceName"`
 	CurrentBinaryPath string `json:"currentBinaryPath"`
 	BackupBinaryPath  string `json:"backupBinaryPath"`
 	RollbackPlanPath  string `json:"rollbackPlanPath"`
@@ -60,6 +61,7 @@ func PrepareRollbackBackup(paths StagingPaths, maxBytes int64) (RollbackPlan, Ro
 	rollbackPlan := RollbackPlan{
 		SchemaVersion:     rollbackPlanSchemaVersion,
 		ActivationPlanID:  activationPlan.ActivationPlanID,
+		ServiceName:       activationPlan.ServiceName,
 		CurrentBinaryPath: activationPlan.CurrentBinaryPath,
 		BackupBinaryPath:  backupPath,
 		RollbackPlanPath:  rollbackPlanPath(paths),
@@ -158,7 +160,7 @@ func validateRollbackPlanForWrite(paths StagingPaths, plan RollbackPlan) (ErrorC
 	if !validStagingID(paths.StagingID) || plan.ActivationPlanID != paths.StagingID {
 		return ErrActivationPlanWrite, "rollback plan identifier does not match staging paths"
 	}
-	if strings.TrimSpace(plan.CurrentBinaryPath) == "" || plan.BackupBinaryPath != rollbackBackupPath(paths) || plan.RollbackPlanPath != rollbackPlanPath(paths) {
+	if strings.TrimSpace(plan.ServiceName) == "" || strings.TrimSpace(plan.CurrentBinaryPath) == "" || plan.BackupBinaryPath != rollbackBackupPath(paths) || plan.RollbackPlanPath != rollbackPlanPath(paths) {
 		return ErrActivationPlanWrite, "rollback plan local paths do not match staging paths"
 	}
 	if code, reason := VerifyClaimedSHA256(plan.BackupSha256, plan.BackupSha256); code != "" {
