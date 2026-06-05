@@ -79,13 +79,27 @@ func OpenDownload(ctx context.Context, rawURL string, pol URLPolicy, transport h
 // activation; it only turns the already-authorized catalog URL into a bounded
 // candidate stream.
 func StageCandidateFromDownload(ctx context.Context, in StageCandidateInput, transport http.RoundTripper) (StageResult, ActivationPlan) {
+	return stageCandidateFromDownload(ctx, in, transport, fixedAuthenticodeVerifier(in.Authenticode))
+}
+
+// StageCandidateFromDownloadWithVerifier combines URL-policy checked download
+// with staged-path Authenticode extraction. It still does not execute a
+// command or activate a binary.
+func StageCandidateFromDownloadWithVerifier(ctx context.Context, in StageCandidateInput, transport http.RoundTripper, verifier AuthenticodeVerifier) (StageResult, ActivationPlan) {
+	if verifier == nil {
+		return Failed(ErrSignatureInvalid, "authenticode verifier is required"), ActivationPlan{}
+	}
+	return stageCandidateFromDownload(ctx, in, transport, verifier)
+}
+
+func stageCandidateFromDownload(ctx context.Context, in StageCandidateInput, transport http.RoundTripper, verifier AuthenticodeVerifier) (StageResult, ActivationPlan) {
 	dl, code, reason := OpenDownload(ctx, in.Preflight.Payload.BinaryURL, in.Preflight.URLPolicy, transport)
 	if code != "" {
 		return Failed(code, reason), ActivationPlan{}
 	}
 	defer dl.Body.Close()
 	in.Candidate = dl.Body
-	return StageCandidateFromReader(in)
+	return stageCandidateFromReader(in, verifier)
 }
 
 func resolveAndValidateRedirect(initial, current, location string, prior []string, pol URLPolicy) (string, ErrorCode, string) {

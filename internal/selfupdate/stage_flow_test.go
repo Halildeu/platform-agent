@@ -141,6 +141,71 @@ func TestStageCandidateFromReaderSignerFailureRemovesFinalBinary(t *testing.T) {
 	assertNoStagingFiles(t, paths)
 }
 
+func TestStageCandidateFromReaderWithVerifierUsesStagedPath(t *testing.T) {
+	root := t.TempDir()
+	withTestStagingHooks(t)
+
+	payload := []byte("payload")
+	sum := sha256.Sum256(payload)
+	var seenPath string
+	result, plan := StageCandidateFromReaderWithVerifier(
+		testStageCandidateInput(root, payload, hex.EncodeToString(sum[:]), AuthenticodeEvidence{}),
+		AuthenticodeVerifierFunc(func(path string) (AuthenticodeEvidence, ErrorCode, string) {
+			seenPath = path
+			if !strings.HasSuffix(path, "endpoint-agent.exe") {
+				return AuthenticodeEvidence{}, ErrSignatureInvalid, "unexpected staged path"
+			}
+			return AuthenticodeEvidence{
+				ChainValid:        true,
+				HasCodeSigningEKU: true,
+				SignerThumbprint:  "AA:BB CC",
+				Timestamped:       true,
+				SigningTimeValid:  true,
+			}, "", ""
+		}),
+	)
+
+	if result.StageStatus != StageReady {
+		t.Fatalf("result=%+v", result)
+	}
+	if seenPath == "" || seenPath != plan.StagedBinaryPath {
+		t.Fatalf("verifier path=%q plan=%+v", seenPath, plan)
+	}
+}
+
+func TestStageCandidateFromReaderWithVerifierFailureRemovesBinary(t *testing.T) {
+	root := t.TempDir()
+	withTestStagingHooks(t)
+
+	payload := []byte("payload")
+	sum := sha256.Sum256(payload)
+	result, plan := StageCandidateFromReaderWithVerifier(
+		testStageCandidateInput(root, payload, hex.EncodeToString(sum[:]), AuthenticodeEvidence{}),
+		AuthenticodeVerifierFunc(func(string) (AuthenticodeEvidence, ErrorCode, string) {
+			return AuthenticodeEvidence{}, ErrSignatureInvalid, "signature verification failed"
+		}),
+	)
+
+	if result.StageStatus != StageFailed || result.ErrorCode != ErrSignatureInvalid {
+		t.Fatalf("result=%+v, want SIGNATURE_INVALID failure", result)
+	}
+	if plan.StagedBinaryPath != "" {
+		t.Fatalf("failure produced activation plan: %+v", plan)
+	}
+	paths, _, _ := BuildStagingPaths(root, "req-stage")
+	assertNoStagingFiles(t, paths)
+}
+
+func TestStageCandidateFromReaderWithVerifierRejectsNilVerifier(t *testing.T) {
+	result, plan := StageCandidateFromReaderWithVerifier(StageCandidateInput{}, nil)
+	if result.StageStatus != StageFailed || result.ErrorCode != ErrSignatureInvalid {
+		t.Fatalf("result=%+v, want SIGNATURE_INVALID failure", result)
+	}
+	if plan.StagedBinaryPath != "" {
+		t.Fatalf("nil verifier produced activation plan: %+v", plan)
+	}
+}
+
 func withTestStagingHooks(t *testing.T) {
 	t.Helper()
 	withNoopStagedFileHardener(t)

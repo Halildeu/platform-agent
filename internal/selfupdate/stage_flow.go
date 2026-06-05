@@ -27,6 +27,21 @@ type StageCandidateInput struct {
 // hash gate but fails signature/signer policy is removed from staging before
 // returning, so rejected bytes are not left as an activation candidate.
 func StageCandidateFromReader(in StageCandidateInput) (StageResult, ActivationPlan) {
+	return stageCandidateFromReader(in, fixedAuthenticodeVerifier(in.Authenticode))
+}
+
+// StageCandidateFromReaderWithVerifier stages a supplied candidate stream and
+// asks verifier to extract Authenticode evidence from the staged binary before
+// local signer policy is evaluated. This is the PR1 integration seam for the
+// later Windows-native verifier slice.
+func StageCandidateFromReaderWithVerifier(in StageCandidateInput, verifier AuthenticodeVerifier) (StageResult, ActivationPlan) {
+	if verifier == nil {
+		return Failed(ErrSignatureInvalid, "authenticode verifier is required"), ActivationPlan{}
+	}
+	return stageCandidateFromReader(in, verifier)
+}
+
+func stageCandidateFromReader(in StageCandidateInput, verifier AuthenticodeVerifier) (StageResult, ActivationPlan) {
 	decision := EvaluatePreflight(in.Preflight)
 	if decision.Noop || !decision.Proceed {
 		return decision.Result, ActivationPlan{}
@@ -45,16 +60,22 @@ func StageCandidateFromReader(in StageCandidateInput) (StageResult, ActivationPl
 		return Failed(code, reason), ActivationPlan{}
 	}
 
-	if d := EvaluateAuthenticodePolicy(in.Authenticode, in.Preflight.Payload.SigningTier); !d.Allowed {
+	evidence, code, reason := verifier.VerifyAuthenticode(paths.BinaryPath)
+	if code != "" {
+		removeStagedArtifacts(paths)
+		return Failed(code, reason), ActivationPlan{}
+	}
+
+	if d := EvaluateAuthenticodePolicy(evidence, in.Preflight.Payload.SigningTier); !d.Allowed {
 		removeStagedArtifacts(paths)
 		return Failed(d.Code, d.Reason), ActivationPlan{}
 	}
-	if d := EvaluateSignerPolicy(in.Authenticode.SignerThumbprint, in.SignerAllowlist); !d.Allowed {
+	if d := EvaluateSignerPolicy(evidence.SignerThumbprint, in.SignerAllowlist); !d.Allowed {
 		removeStagedArtifacts(paths)
 		return Failed(d.Code, d.Reason), ActivationPlan{}
 	}
 
-	ready, code, reason := BuildReadyStageResult(paths, decision.Evidence, hash.ActualSha256, in.Authenticode.SignerThumbprint)
+	ready, code, reason := BuildReadyStageResult(paths, decision.Evidence, hash.ActualSha256, evidence.SignerThumbprint)
 	if code != "" {
 		removeStagedArtifacts(paths)
 		return Failed(code, reason), ActivationPlan{}

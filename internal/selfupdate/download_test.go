@@ -126,6 +126,36 @@ func TestStageCandidateFromDownload(t *testing.T) {
 	}
 }
 
+func TestStageCandidateFromDownloadWithVerifier(t *testing.T) {
+	withTestStagingHooks(t)
+	payload := []byte("downloaded signed agent")
+	sum := sha256.Sum256(payload)
+	in := testStageCandidateInput(t.TempDir(), nil, hex.EncodeToString(sum[:]), AuthenticodeEvidence{})
+	in.Preflight.Payload.BinaryURL = "https://updates.example.com/agent.exe"
+	in.Preflight.URLPolicy = testDownloadPolicy()
+	transport := fakeDownloadTransport(map[string]fakeDownloadResponse{
+		"https://updates.example.com/agent.exe": {status: http.StatusOK, body: string(payload)},
+	})
+	var verifierSawPath bool
+
+	result, plan := StageCandidateFromDownloadWithVerifier(context.Background(), in, transport, AuthenticodeVerifierFunc(func(path string) (AuthenticodeEvidence, ErrorCode, string) {
+		verifierSawPath = strings.HasSuffix(path, "endpoint-agent.exe")
+		return AuthenticodeEvidence{
+			ChainValid:        true,
+			HasCodeSigningEKU: true,
+			SignerThumbprint:  "AABBCC",
+			Timestamped:       true,
+			SigningTimeValid:  true,
+		}, "", ""
+	}))
+	if result.StageStatus != StageReady {
+		t.Fatalf("result=%+v", result)
+	}
+	if !verifierSawPath || plan.StagedBinaryPath == "" {
+		t.Fatalf("verifierSawPath=%v plan=%+v", verifierSawPath, plan)
+	}
+}
+
 func testDownloadPolicy() URLPolicy {
 	return URLPolicy{AllowedHosts: []string{"updates.example.com", "objects.example.com"}, MaxRedirects: 2}
 }
