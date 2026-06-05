@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -14,6 +15,9 @@ import (
 )
 
 func TestRunSelfUpdateActivateSwapsPreparedBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cmd-level activation swap test relies on non-elevated temp ACLs; internal/selfupdate covers Windows activation sequencing with hooks")
+	}
 	root := t.TempDir()
 	currentPath := filepath.Join(root, "current-agent.exe")
 	if err := os.WriteFile(currentPath, []byte("old-agent"), 0o600); err != nil {
