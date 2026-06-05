@@ -22,10 +22,6 @@ var (
 	modcrypt32           = windows.NewLazySystemDLL("crypt32.dll")
 	procCryptMsgGetParam = modcrypt32.NewProc("CryptMsgGetParam")
 	procCryptMsgClose    = modcrypt32.NewProc("CryptMsgClose")
-
-	modwintrust                        = windows.NewLazySystemDLL("wintrust.dll")
-	procWTHelperProvDataFromStateData  = modwintrust.NewProc("WTHelperProvDataFromStateData")
-	procWTHelperGetProvSignerFromChain = modwintrust.NewProc("WTHelperGetProvSignerFromChain")
 )
 
 // NewNativeAuthenticodeVerifier returns the Windows Authenticode verifier used
@@ -94,16 +90,15 @@ func winTrustTimestampEvidence(state windows.Handle) winTrustEvidence {
 	if provData == 0 {
 		return winTrustEvidence{}
 	}
-	signerPtr := wTHelperGetProvSignerFromChain(provData, 0, false, 0)
-	if signerPtr == 0 {
+	signer := wTHelperGetProvSignerFromChain(provData, 0, false, 0)
+	if signer == nil {
 		return winTrustEvidence{}
 	}
-	signer := (*cryptProviderSgnr)(unsafe.Pointer(signerPtr))
-	counterSignerPtr := uintptr(0)
+	var counterSigner *cryptProviderSgnr
 	if signer.CsCounterSigners > 0 {
-		counterSignerPtr = wTHelperGetProvSignerFromChain(provData, 0, true, 0)
+		counterSigner = wTHelperGetProvSignerFromChain(provData, 0, true, 0)
 	}
-	if signer.CsCounterSigners == 0 && counterSignerPtr == 0 {
+	if signer.CsCounterSigners == 0 && counterSigner == nil {
 		return winTrustEvidence{}
 	}
 	if zeroFiletime(signer.SftVerifyAsOf) {
@@ -113,26 +108,6 @@ func winTrustTimestampEvidence(state windows.Handle) winTrustEvidence {
 		Timestamped: true,
 		SigningTime: filetimeToTime(signer.SftVerifyAsOf),
 	}
-}
-
-func wTHelperProvDataFromStateData(state windows.Handle) uintptr {
-	r1, _, _ := syscall.SyscallN(procWTHelperProvDataFromStateData.Addr(), uintptr(state))
-	return r1
-}
-
-func wTHelperGetProvSignerFromChain(provData uintptr, signerIndex uint32, counterSigner bool, counterSignerIndex uint32) uintptr {
-	var isCounterSigner uintptr
-	if counterSigner {
-		isCounterSigner = 1
-	}
-	r1, _, _ := syscall.SyscallN(
-		procWTHelperGetProvSignerFromChain.Addr(),
-		provData,
-		uintptr(signerIndex),
-		isCounterSigner,
-		uintptr(counterSignerIndex),
-	)
-	return r1
 }
 
 func zeroFiletime(ft windows.Filetime) bool {
@@ -293,20 +268,4 @@ type cryptAttribute struct {
 	ObjID  *byte
 	Count  uint32
 	Values *windows.CryptAttrBlob
-}
-
-// cryptProviderSgnr mirrors the prefix of WinTrust's CRYPT_PROVIDER_SGNR. AG-029
-// only reads sftVerifyAsOf + countersigner count to preserve Authenticode
-// timestamp semantics after WinVerifyTrust has already validated the signature.
-type cryptProviderSgnr struct {
-	CbStruct          uint32
-	SftVerifyAsOf     windows.Filetime
-	CsCertChain       uint32
-	PasCertChain      uintptr
-	DwSignerType      uint32
-	PsSigner          uintptr
-	DwError           uint32
-	CsCounterSigners  uint32
-	PasCounterSigners uintptr
-	PChainContext     uintptr
 }
