@@ -74,7 +74,22 @@ param(
     # environment). Parallels VMs and workgroup machines are the
     # explicit lab target. Override only when the lab itself is
     # domain-joined.
-    [switch]$AllowLabOnDomainJoined
+    [switch]$AllowLabOnDomainJoined,
+    # AG-029 self-update config. These values are written to the
+    # service-specific Environment regkey only when -SelfUpdateEnabled is
+    # explicitly passed. Defaults stay disabled so ordinary installs never
+    # advertise UPDATE_AGENT by accident.
+    [switch]$SelfUpdateEnabled,
+    [string]$SelfUpdateStagingRoot = "",
+    [string]$SelfUpdateCurrentBinaryPath = "",
+    [string]$SelfUpdateAllowedHosts = "",
+    [int]$SelfUpdateMaxRedirects = 5,
+    [string]$SelfUpdateSignerThumbprints = "",
+    [switch]$SelfUpdateAllowLabOnly,
+    [switch]$SelfUpdateDomainJoined,
+    [string]$SelfUpdateMaxSeenVersion = "",
+    [switch]$SelfUpdateAutoActivate,
+    [string]$SelfUpdateActivationTimeout = "2m"
 )
 
 Set-StrictMode -Version Latest
@@ -537,6 +552,53 @@ $originalValues = @{}
 $copiedBinary = $false
 $installedService = $false
 $resolvedMaintenanceTokenHash = Resolve-MaintenanceTokenHash -Token $MaintenanceToken -Hash $MaintenanceTokenHash
+$resolvedSelfUpdateEnabled = ""
+$resolvedSelfUpdateStagingRoot = ""
+$resolvedSelfUpdateCurrentBinaryPath = ""
+$resolvedSelfUpdateServiceName = ""
+$resolvedSelfUpdateAllowedHosts = ""
+$resolvedSelfUpdateMaxRedirects = ""
+$resolvedSelfUpdateSignerThumbprints = ""
+$resolvedSelfUpdateAllowLabOnly = ""
+$resolvedSelfUpdateDomainJoined = ""
+$resolvedSelfUpdateMaxSeenVersion = ""
+$resolvedSelfUpdateAutoActivate = ""
+$resolvedSelfUpdateActivationTimeout = ""
+
+if ($SelfUpdateAutoActivate -and -not $SelfUpdateEnabled) {
+    throw "-SelfUpdateAutoActivate requires -SelfUpdateEnabled."
+}
+if ($SelfUpdateEnabled) {
+    if ([string]::IsNullOrWhiteSpace($SelfUpdateAllowedHosts)) {
+        throw "-SelfUpdateAllowedHosts is required when -SelfUpdateEnabled is set."
+    }
+    if ([string]::IsNullOrWhiteSpace($SelfUpdateSignerThumbprints)) {
+        throw "-SelfUpdateSignerThumbprints is required when -SelfUpdateEnabled is set."
+    }
+    if ($SelfUpdateMaxRedirects -lt 0) {
+        throw "-SelfUpdateMaxRedirects must be >= 0."
+    }
+    if ([string]::IsNullOrWhiteSpace($SelfUpdateStagingRoot)) {
+        $resolvedSelfUpdateStagingRoot = Join-Path $env:ProgramData "EndpointAgent\updates"
+    } else {
+        $resolvedSelfUpdateStagingRoot = $SelfUpdateStagingRoot
+    }
+    if ([string]::IsNullOrWhiteSpace($SelfUpdateCurrentBinaryPath)) {
+        $resolvedSelfUpdateCurrentBinaryPath = $targetBinary
+    } else {
+        $resolvedSelfUpdateCurrentBinaryPath = $SelfUpdateCurrentBinaryPath
+    }
+    $resolvedSelfUpdateEnabled = "true"
+    $resolvedSelfUpdateServiceName = $ServiceName
+    $resolvedSelfUpdateAllowedHosts = $SelfUpdateAllowedHosts
+    $resolvedSelfUpdateMaxRedirects = [string]$SelfUpdateMaxRedirects
+    $resolvedSelfUpdateSignerThumbprints = $SelfUpdateSignerThumbprints
+    $resolvedSelfUpdateAllowLabOnly = if ($SelfUpdateAllowLabOnly) { "true" } else { "false" }
+    $resolvedSelfUpdateDomainJoined = if ($SelfUpdateDomainJoined) { "true" } else { "false" }
+    $resolvedSelfUpdateMaxSeenVersion = $SelfUpdateMaxSeenVersion
+    $resolvedSelfUpdateAutoActivate = if ($SelfUpdateAutoActivate) { "true" } else { "false" }
+    $resolvedSelfUpdateActivationTimeout = if ([string]::IsNullOrWhiteSpace($SelfUpdateActivationTimeout)) { "2m" } else { $SelfUpdateActivationTimeout }
+}
 
 try {
     # Codex 019e7314 iter-2 P1: non-destructive existence check FIRST.
@@ -638,6 +700,18 @@ try {
         "ENDPOINT_AGENT_INSTALL_ID" = $InstallId
         "ENDPOINT_AGENT_LOG_DIR" = $LogDir
         "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" = $resolvedMaintenanceTokenHash
+        "ENDPOINT_AGENT_SELF_UPDATE_ENABLED" = $resolvedSelfUpdateEnabled
+        "ENDPOINT_AGENT_SELF_UPDATE_STAGING_ROOT" = $resolvedSelfUpdateStagingRoot
+        "ENDPOINT_AGENT_SELF_UPDATE_CURRENT_BINARY_PATH" = $resolvedSelfUpdateCurrentBinaryPath
+        "ENDPOINT_AGENT_SELF_UPDATE_SERVICE_NAME" = $resolvedSelfUpdateServiceName
+        "ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS" = $resolvedSelfUpdateAllowedHosts
+        "ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS" = $resolvedSelfUpdateMaxRedirects
+        "ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS" = $resolvedSelfUpdateSignerThumbprints
+        "ENDPOINT_AGENT_SELF_UPDATE_ALLOW_LAB_ONLY" = $resolvedSelfUpdateAllowLabOnly
+        "ENDPOINT_AGENT_SELF_UPDATE_DOMAIN_JOINED" = $resolvedSelfUpdateDomainJoined
+        "ENDPOINT_AGENT_SELF_UPDATE_MAX_SEEN_VERSION" = $resolvedSelfUpdateMaxSeenVersion
+        "ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE" = $resolvedSelfUpdateAutoActivate
+        "ENDPOINT_AGENT_SELF_UPDATE_ACTIVATION_TIMEOUT" = $resolvedSelfUpdateActivationTimeout
     }
 
     Write-Step "installing service: $ServiceName"

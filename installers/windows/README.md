@@ -99,6 +99,28 @@ Installer ile install:
   -Start
 ```
 
+AG-029 self-update live smoke icin servis env regkey'e opt-in self-update
+konfiguru da yazilabilir. Bu ayarlar yalniz `-SelfUpdateEnabled` verildiginde
+yazilir; normal install `UPDATE_AGENT` advertise etmez.
+
+```powershell
+.\install.ps1 `
+  -ApiUrl "https://backend.example.local/api/v1/endpoint-agent" `
+  -EnrollmentToken "<token>" `
+  -MaintenanceToken "<one-time-maintenance-token>" `
+  -SelfUpdateEnabled `
+  -SelfUpdateAllowedHosts "github.com,objects.githubusercontent.com" `
+  -SelfUpdateSignerThumbprints "<trusted-or-lab-signer-thumbprint>" `
+  -SelfUpdateMaxSeenVersion "0.1.0" `
+  -SelfUpdateAutoActivate `
+  -Start
+```
+
+`-SelfUpdateAllowedHosts` ve `-SelfUpdateSignerThumbprints` zorunludur. Lab
+imzali smoke icin `-SelfUpdateAllowLabOnly` ayrica verilmelidir; trusted
+production signing gelmeden domain-wide unattended self-update iddiasi
+uretilmez.
+
 Mevcut service'i degistirmek icin:
 
 ```powershell

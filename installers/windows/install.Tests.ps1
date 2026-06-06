@@ -177,6 +177,28 @@ Describe "Set-ServiceEnvironmentRegkey + Remove-ServiceEnvironmentEntry" {
         $got.Count | Should -Be 1
     }
 
+    It "writes AG-029 self-update opt-in service environment" {
+        Set-RegEnvAt -Path $script:fakeService -Values @{
+            "ENDPOINT_AGENT_SELF_UPDATE_ENABLED" = "true"
+            "ENDPOINT_AGENT_SELF_UPDATE_STAGING_ROOT" = "C:\\ProgramData\\EndpointAgent\\updates"
+            "ENDPOINT_AGENT_SELF_UPDATE_CURRENT_BINARY_PATH" = "C:\\Program Files\\EndpointAgent\\endpoint-agent.exe"
+            "ENDPOINT_AGENT_SELF_UPDATE_SERVICE_NAME" = "EndpointAgent"
+            "ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS" = "github.com,objects.githubusercontent.com"
+            "ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS" = "5"
+            "ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS" = "AABBCC"
+            "ENDPOINT_AGENT_SELF_UPDATE_ALLOW_LAB_ONLY" = "true"
+            "ENDPOINT_AGENT_SELF_UPDATE_DOMAIN_JOINED" = "false"
+            "ENDPOINT_AGENT_SELF_UPDATE_MAX_SEEN_VERSION" = "0.1.0"
+            "ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE" = "true"
+            "ENDPOINT_AGENT_SELF_UPDATE_ACTIVATION_TIMEOUT" = "2m"
+        }
+        $got = (Get-ItemProperty -Path $script:fakeService -Name 'Environment').Environment
+        $got.Count | Should -Be 12
+        ($got -match "ENDPOINT_AGENT_SELF_UPDATE_ENABLED=true").Count | Should -BeGreaterThan 0
+        ($got -match "ENDPOINT_AGENT_SELF_UPDATE_CURRENT_BINARY_PATH=C:\\Program Files\\EndpointAgent\\endpoint-agent.exe").Count | Should -BeGreaterThan 0
+        ($got -match "ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE=true").Count | Should -BeGreaterThan 0
+    }
+
     It "removes only the specified token entry, preserving non-secret env" {
         Set-RegEnvAt -Path $script:fakeService -Values @{
             "ENDPOINT_AGENT_API_URL" = "https://test.example.com/api/v1/endpoint-agent"

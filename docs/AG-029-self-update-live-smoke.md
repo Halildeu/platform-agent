@@ -27,14 +27,29 @@ endpoint-agent self-update activate   --staging-id <id>
 endpoint-agent self-update status     --staging-id <id>
 ```
 
-The full backend-issued live chain still requires the backend command-create
-surface described in platform-agent issue #55 PR4.
+The full backend-issued live chain requires the backend command-create surface
+from platform-backend PR #489 (BE-032) to be merged and deployed. That PR adds
+the dedicated release-catalog-bound `UPDATE_AGENT` dispatch endpoint; this
+runbook must not use the generic command endpoint for self-update.
 
 PR #59 also adds an opt-in service wiring switch:
 
 ```text
 ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE=true
 ENDPOINT_AGENT_SELF_UPDATE_ACTIVATION_TIMEOUT=2m
+```
+
+The Windows installer can write this opt-in plus the rest of the AG-029 local
+trust policy into the service-specific Environment regkey:
+
+```powershell
+.\install.ps1 `
+  -SelfUpdateEnabled `
+  -SelfUpdateAllowedHosts "github.com,objects.githubusercontent.com" `
+  -SelfUpdateSignerThumbprints "<thumbprint>" `
+  -SelfUpdateMaxSeenVersion "0.1.0" `
+  -SelfUpdateAutoActivate `
+  -Start
 ```
 
 With this switch enabled, the runner starts a separate
