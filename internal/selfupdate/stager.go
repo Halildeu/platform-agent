@@ -79,6 +79,13 @@ type StagingStore interface {
 	Commit(ctx context.Context, tempPath, stagingID string) (stagedPath string, err error)
 }
 
+type tempDirPreparingStagingStore interface {
+	// PrepareTempDir returns a hardened directory suitable for the pre-verify
+	// download temp file. Windows production staging implements this so the
+	// verify->commit path never uses a user-writable temp directory.
+	PrepareTempDir(ctx context.Context) (string, error)
+}
+
 // Stager runs the PR1 verify+stage pipeline. All collaborators are injected so
 // the security ordering is testable with fakes; production wiring (PR2) injects
 // the real Windows implementations.
@@ -165,7 +172,17 @@ func (s *Stager) Stage(ctx context.Context, payload UpdateAgentPayload, currentV
 	}
 
 	// --- download to a temp file while streaming the SHA-256.
-	tmp, err := os.CreateTemp(s.TempDir, "agent-update-*.tmp")
+	tempDir := s.TempDir
+	if preparer, ok := s.Staging.(tempDirPreparingStagingStore); ok {
+		prepared, prepErr := preparer.PrepareTempDir(ctx)
+		if prepErr != nil {
+			return Failed(ErrStagingIO, "could not prepare hardened temp directory")
+		}
+		if strings.TrimSpace(prepared) != "" {
+			tempDir = prepared
+		}
+	}
+	tmp, err := os.CreateTemp(tempDir, "agent-update-*.tmp")
 	if err != nil {
 		return Failed(ErrStagingIO, "could not create temp download file")
 	}
