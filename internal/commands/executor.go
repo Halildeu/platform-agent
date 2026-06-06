@@ -10,6 +10,7 @@ import (
 
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
+	"platform-agent/internal/selfupdate"
 	"platform-agent/internal/users"
 	"platform-agent/internal/winget"
 )
@@ -28,10 +29,79 @@ var installWinGetFn = winget.InstallWinGet
 // winget invocation.
 var uninstallWinGetFn = winget.UninstallWinGet
 
+// updateAgentStageFn is the AG-029 executor seam. Production passes a
+// selfupdate.Stager configured from local trust policy; tests override this
+// function so the command wire can be exercised without network, Authenticode
+// or filesystem staging side effects.
+var updateAgentStageFn = func(ctx context.Context, stager *selfupdate.Stager, payload selfupdate.UpdateAgentPayload, currentVersion string) selfupdate.StageResult {
+	if stager == nil {
+		return selfupdate.Failed(selfupdate.ErrStagingIO, "self-update stager is not configured")
+	}
+	return stager.Stage(ctx, payload, currentVersion)
+}
+
+type UpdateAgentStagerOptions struct {
+	AllowedHosts        []string
+	SignerThumbprints   []string
+	AllowLabOnlySigning bool
+	MaxRedirects        int
+	HardMaxBytes        int64
+	Verifier            selfupdate.AuthenticodeVerifier
+	VersionReader       selfupdate.PEVersionReader
+	Downloader          selfupdate.BinaryDownloader
+	Staging             selfupdate.StagingStore
+}
+
+func NewPolicyAwareExecutor(agentVersion string, selfUpdateLocalPolicyReady bool, updateOpts UpdateAgentStagerOptions) *LocalExecutor {
+	selfUpdateEnabled := selfUpdateLocalPolicyReady && updateOpts.RuntimeReady()
+	executor := NewLocalExecutor(inventory.RuntimeCapabilitiesWithOptions(inventory.RuntimeCapabilityOptions{
+		EnableUpdateAgent: selfUpdateEnabled,
+	}), agentVersion)
+	if selfUpdateEnabled {
+		executor.UpdateAgentStager = NewUpdateAgentStager(updateOpts)
+	}
+	return executor
+}
+
+func (opts UpdateAgentStagerOptions) RuntimeReady() bool {
+	return opts.Verifier != nil &&
+		opts.VersionReader != nil &&
+		opts.Downloader != nil &&
+		opts.Staging != nil &&
+		len(opts.AllowedHosts) > 0 &&
+		len(opts.SignerThumbprints) > 0 &&
+		opts.HardMaxBytes > 0 &&
+		opts.MaxRedirects >= 0
+}
+
+func NewUpdateAgentStager(opts UpdateAgentStagerOptions) *selfupdate.Stager {
+	if !opts.RuntimeReady() {
+		return nil
+	}
+	return &selfupdate.Stager{
+		Verifier:      opts.Verifier,
+		VersionReader: opts.VersionReader,
+		Downloader:    opts.Downloader,
+		Staging:       opts.Staging,
+		Allowlist: selfupdate.SignerAllowlist{
+			Thumbprints: opts.SignerThumbprints,
+		},
+		TierPolicy: selfupdate.TierPolicy{
+			AllowLabOnly: opts.AllowLabOnlySigning,
+		},
+		URLPolicy: selfupdate.URLPolicy{
+			AllowedHosts: opts.AllowedHosts,
+			MaxRedirects: opts.MaxRedirects,
+		},
+		HardMaxBytes: opts.HardMaxBytes,
+	}
+}
+
 type LocalExecutor struct {
-	Capabilities []protocol.CommandType
-	AgentVersion string
-	Now          func() time.Time
+	Capabilities      []protocol.CommandType
+	AgentVersion      string
+	Now               func() time.Time
+	UpdateAgentStager *selfupdate.Stager
 }
 
 func NewLocalExecutor(capabilities []protocol.CommandType, agentVersion string) *LocalExecutor {
@@ -255,6 +325,17 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 		result.Status = mapUninstallStatusToCommandStatus(uninstallResult.FinalStatus)
 		result.Summary = fmt.Sprintf("UNINSTALL_SOFTWARE %s", uninstallResult.FinalStatus)
 		result.Details = map[string]interface{}{"uninstall": uninstallResult}
+	case protocol.CommandUpdateAgent:
+		req, payloadErr := unmarshalUpdateAgentPayload(command.Payload)
+		if payloadErr != nil {
+			result.Status = protocol.CommandStatusFailed
+			result.Summary = payloadErr.Error()
+			break
+		}
+		stageResult := updateAgentStageFn(ctx, e.UpdateAgentStager, req, e.AgentVersion)
+		result.Status = mapUpdateStageStatusToCommandStatus(stageResult.StageStatus)
+		result.Summary = fmt.Sprintf("UPDATE_AGENT %s", stageResult.StageStatus)
+		result.Details = map[string]interface{}{"update": stageResult}
 	default:
 		result.Status = protocol.CommandStatusUnsupported
 		result.Summary = "Command is not implemented by this agent build"
@@ -371,6 +452,30 @@ func mapUninstallStatusToCommandStatus(finalStatus string) protocol.CommandStatu
 	case winget.UninstallFinalStatusFailedUnsupportedPlatform,
 		winget.UninstallFinalStatusFailedUnsupportedVerification:
 		return protocol.CommandStatusUnsupported
+	default:
+		return protocol.CommandStatusFailed
+	}
+}
+
+func unmarshalUpdateAgentPayload(payload map[string]interface{}) (selfupdate.UpdateAgentPayload, error) {
+	if payload == nil {
+		return selfupdate.UpdateAgentPayload{}, errors.New("UPDATE_AGENT payload is empty")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return selfupdate.UpdateAgentPayload{}, fmt.Errorf("UPDATE_AGENT payload re-marshal failed: %w", err)
+	}
+	var req selfupdate.UpdateAgentPayload
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return selfupdate.UpdateAgentPayload{}, fmt.Errorf("UPDATE_AGENT payload decode failed: %w", err)
+	}
+	return req, nil
+}
+
+func mapUpdateStageStatusToCommandStatus(stageStatus selfupdate.StageStatus) protocol.CommandStatus {
+	switch stageStatus {
+	case selfupdate.StageReady, selfupdate.StageNoopCurrent:
+		return protocol.CommandStatusSucceeded
 	default:
 		return protocol.CommandStatusFailed
 	}

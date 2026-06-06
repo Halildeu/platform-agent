@@ -91,6 +91,8 @@ type Config struct {
 	// 5-min install median; 30-min default matches the agent-side
 	// hard cap in winget.RunUninstall (Codex 019e8de2 iter-3 absorb).
 	UninstallCommandTimeout time.Duration
+	// SelfUpdateCommandTimeout caps AG-029 UPDATE_AGENT staging.
+	SelfUpdateCommandTimeout time.Duration
 	// HTTPTimeout caps individual mTLS request time.
 	HTTPTimeout time.Duration
 
@@ -113,18 +115,19 @@ type Config struct {
 // (typically APIURL and AgentVersion).
 func Defaults() Config {
 	return Config{
-		AgentVersion:          "0.2.0-dev",
-		APIURL:                "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin",
-		CertFilter:            DefaultCertFilter(),
-		HeartbeatInterval:     60 * time.Second,
-		CommandPollInterval:   30 * time.Second,
-		CommandTimeout:          120 * time.Second,
-		InstallCommandTimeout:   30 * time.Minute,
-		UninstallCommandTimeout: 30 * time.Minute,
-		HTTPTimeout:             30 * time.Second,
-		TokenRefreshWindow:    2 * time.Hour,
-		CertRenewalWindow:     7 * 24 * time.Hour,
-		NoCertBackoff:         60 * time.Minute,
+		AgentVersion:             "0.2.0-dev",
+		APIURL:                   "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin",
+		CertFilter:               DefaultCertFilter(),
+		HeartbeatInterval:        60 * time.Second,
+		CommandPollInterval:      30 * time.Second,
+		CommandTimeout:           120 * time.Second,
+		InstallCommandTimeout:    30 * time.Minute,
+		UninstallCommandTimeout:  30 * time.Minute,
+		SelfUpdateCommandTimeout: 30 * time.Minute,
+		HTTPTimeout:              30 * time.Second,
+		TokenRefreshWindow:       2 * time.Hour,
+		CertRenewalWindow:        7 * 24 * time.Hour,
+		NoCertBackoff:            60 * time.Minute,
 	}
 }
 
@@ -558,6 +561,10 @@ func (r *Runner) pollAndExecute(ctx context.Context, persisted PersistedConfig) 
 	case protocol.CommandUninstallSoftware:
 		if r.Config.UninstallCommandTimeout > 0 {
 			commandTimeout = r.Config.UninstallCommandTimeout
+		}
+	case protocol.CommandUpdateAgent:
+		if r.Config.SelfUpdateCommandTimeout > 0 {
+			commandTimeout = r.Config.SelfUpdateCommandTimeout
 		}
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)

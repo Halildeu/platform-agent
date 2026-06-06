@@ -323,6 +323,30 @@ func TestRuntimeCapabilitiesInstallSoftwareAdvertisedOnWindowsOnly(t *testing.T)
 	}
 }
 
+func TestRuntimeCapabilitiesUpdateAgentRequiresWindowsAndOptIn(t *testing.T) {
+	defaultCaps := RuntimeCapabilities()
+	for _, c := range defaultCaps {
+		if c == protocol.CommandUpdateAgent {
+			t.Fatalf("AG-029: UPDATE_AGENT must not be in default RuntimeCapabilities(); got %v", defaultCaps)
+		}
+	}
+
+	optInCaps := RuntimeCapabilitiesWithOptions(RuntimeCapabilityOptions{EnableUpdateAgent: true})
+	found := false
+	for _, c := range optInCaps {
+		if c == protocol.CommandUpdateAgent {
+			found = true
+			break
+		}
+	}
+	if runtime.GOOS == "windows" && !found {
+		t.Fatalf("AG-029: expected UPDATE_AGENT with explicit opt-in on Windows; got %v", optInCaps)
+	}
+	if runtime.GOOS != "windows" && found {
+		t.Fatalf("AG-029: UPDATE_AGENT must not be advertised on non-Windows; got %v", optInCaps)
+	}
+}
+
 // AG-035 — IncludeHardware wire-up tests.
 //
 // Codex 019e709c iter-1 acceptance criteria:

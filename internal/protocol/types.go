@@ -47,6 +47,12 @@ const (
 	// See internal/winget/uninstall_winget.go for the canonical
 	// wire-shape.
 	CommandUninstallSoftware CommandType = "UNINSTALL_SOFTWARE"
+	// AG-029 (Faz 22.5.7): signed self-update staging command. Backend
+	// may issue this ONLY through the release-catalog-bound dedicated
+	// endpoint; generic command surfaces stay fail-closed. The agent
+	// stages a verified binary and returns a bounded StageResult. It does
+	// not stop/replace the running service in this PR2 command wire.
+	CommandUpdateAgent CommandType = "UPDATE_AGENT"
 )
 
 type CommandStatus string
@@ -187,7 +193,7 @@ func (r CommandResult) ToWire() CommandResultWire {
 
 func (t CommandType) RequiresReason() bool {
 	switch t {
-	case CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile:
+	case CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent:
 		return true
 	default:
 		return false
@@ -196,7 +202,7 @@ func (t CommandType) RequiresReason() bool {
 
 func (t CommandType) IsSensitive() bool {
 	switch t {
-	case CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile:
+	case CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent:
 		return true
 	default:
 		return false

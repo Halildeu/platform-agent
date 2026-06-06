@@ -38,3 +38,18 @@ func TestValidateRequiresReasonForSensitiveCommands(t *testing.T) {
 		t.Fatalf("err = %v, want ErrMissingReason", err)
 	}
 }
+
+func TestValidateRequiresReasonForUpdateAgent(t *testing.T) {
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-update",
+		ClaimID:        "claim-update",
+		AttemptNumber:  1,
+		Type:           protocol.CommandUpdateAgent,
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	err := Validate(command, []protocol.CommandType{protocol.CommandUpdateAgent}, time.Now())
+	if !errors.Is(err, ErrMissingReason) {
+		t.Fatalf("err = %v, want ErrMissingReason", err)
+	}
+}

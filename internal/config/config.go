@@ -15,18 +15,18 @@ type Config struct {
 	SigningPathPrefix string
 	// CredentialID + Secret are the device credential (X-Device-Credential-Id
 	// and the HMAC key) issued by enrollment. DeviceID is the enrolled device.
-	CredentialID           string
-	Secret                 string
-	DeviceID               string
-	InstallID              string
-	EnrollmentToken        string
-	AgentVersion           string
-	LogDir                 string
-	HeartbeatInterval      time.Duration
-	CommandPollInterval    time.Duration
-	InventoryInterval      time.Duration
-	JitterPercent          int
-	CommandTimeout         time.Duration
+	CredentialID        string
+	Secret              string
+	DeviceID            string
+	InstallID           string
+	EnrollmentToken     string
+	AgentVersion        string
+	LogDir              string
+	HeartbeatInterval   time.Duration
+	CommandPollInterval time.Duration
+	InventoryInterval   time.Duration
+	JitterPercent       int
+	CommandTimeout      time.Duration
 	// InstallCommandTimeout overrides CommandTimeout specifically for
 	// the AG-027 INSTALL_SOFTWARE command type. The default 120s
 	// CommandTimeout was sized for quick read-only commands (inventory,
@@ -35,7 +35,7 @@ type Config struct {
 	// bundles. Codex 019e6c0d iter-2 P1 absorb: bound effective install
 	// timeout at the documented 30-min hard cap so the agent and the
 	// docs/COMMAND-CONTRACT.md §11.5 narrative agree.
-	InstallCommandTimeout  time.Duration
+	InstallCommandTimeout time.Duration
 	// UninstallCommandTimeout overrides CommandTimeout for the AG-028
 	// (Faz 22.5.6) UNINSTALL_SOFTWARE command type. MSI uninstall paths
 	// can run repair / custom-action / network wait phases that push
@@ -43,8 +43,13 @@ type Config struct {
 	// install hard cap (Codex 019e8de2 iter-1 absorb: keep parity, do
 	// not optimise downward without LIVE evidence).
 	UninstallCommandTimeout time.Duration
-	NonceSkewWindow        time.Duration
-	NonceReplayCacheWindow time.Duration
+	// SelfUpdateCommandTimeout caps AG-029 UPDATE_AGENT staging. It
+	// mirrors install/uninstall's long-running command budget because a
+	// signed binary download + verification + protected staging can exceed
+	// the lightweight 120s command timeout.
+	SelfUpdateCommandTimeout time.Duration
+	NonceSkewWindow          time.Duration
+	NonceReplayCacheWindow   time.Duration
 
 	// AutoEnrollAPIURL is the full canonical mTLS base path used by the
 	// --auto-enroll mode (ADR-0029 Katman 3). Empty means use the
@@ -64,6 +69,16 @@ type Config struct {
 	// URI:adcomputer:{objectGUID} so "adcomputer:" is the production
 	// suffix.
 	AutoEnrollCertSANURIPrefix string
+
+	// AG-029 signed self-update local policy. Capability advertisement is
+	// opt-in: UPDATE_AGENT is reported only when SelfUpdateEnabled is true.
+	// The backend payload cannot widen these local trust anchors.
+	SelfUpdateEnabled             bool
+	SelfUpdateAllowedHosts        []string
+	SelfUpdateSignerThumbprints   []string
+	SelfUpdateAllowLabOnlySigning bool
+	SelfUpdateHardMaxBytes        int64
+	SelfUpdateMaxRedirects        int
 }
 
 // BuildVersion is overridden at build time via
@@ -82,18 +97,21 @@ func defaultAgentVersion() string {
 
 func Default() Config {
 	return Config{
-		AgentName:              "endpoint-agent",
-		APIURL:                 "https://localhost/api/v1/endpoint-agent",
-		AgentVersion:           defaultAgentVersion(),
-		HeartbeatInterval:      60 * time.Second,
-		CommandPollInterval:    30 * time.Second,
-		InventoryInterval:      60 * time.Minute,
-		JitterPercent:          20,
-		CommandTimeout:          120 * time.Second,
-		InstallCommandTimeout:   30 * time.Minute,
-		UninstallCommandTimeout: 30 * time.Minute,
-		NonceSkewWindow:         5 * time.Minute,
-		NonceReplayCacheWindow: 10 * time.Minute,
+		AgentName:                "endpoint-agent",
+		APIURL:                   "https://localhost/api/v1/endpoint-agent",
+		AgentVersion:             defaultAgentVersion(),
+		HeartbeatInterval:        60 * time.Second,
+		CommandPollInterval:      30 * time.Second,
+		InventoryInterval:        60 * time.Minute,
+		JitterPercent:            20,
+		CommandTimeout:           120 * time.Second,
+		InstallCommandTimeout:    30 * time.Minute,
+		UninstallCommandTimeout:  30 * time.Minute,
+		SelfUpdateCommandTimeout: 30 * time.Minute,
+		NonceSkewWindow:          5 * time.Minute,
+		NonceReplayCacheWindow:   10 * time.Minute,
+		SelfUpdateHardMaxBytes:   100 * 1024 * 1024,
+		SelfUpdateMaxRedirects:   5,
 	}
 }
 
@@ -115,6 +133,7 @@ func LoadFromEnv() Config {
 	cfg.CommandTimeout = envDuration("ENDPOINT_AGENT_COMMAND_TIMEOUT", cfg.CommandTimeout)
 	cfg.InstallCommandTimeout = envDuration("ENDPOINT_AGENT_INSTALL_COMMAND_TIMEOUT", cfg.InstallCommandTimeout)
 	cfg.UninstallCommandTimeout = envDuration("ENDPOINT_AGENT_UNINSTALL_COMMAND_TIMEOUT", cfg.UninstallCommandTimeout)
+	cfg.SelfUpdateCommandTimeout = envDuration("ENDPOINT_AGENT_SELF_UPDATE_COMMAND_TIMEOUT", cfg.SelfUpdateCommandTimeout)
 	cfg.NonceSkewWindow = envDuration("ENDPOINT_AGENT_NONCE_SKEW_WINDOW", cfg.NonceSkewWindow)
 	cfg.NonceReplayCacheWindow = envDuration("ENDPOINT_AGENT_NONCE_REPLAY_CACHE_WINDOW", cfg.NonceReplayCacheWindow)
 	cfg.JitterPercent = envInt("ENDPOINT_AGENT_JITTER_PERCENT", cfg.JitterPercent)
@@ -122,7 +141,23 @@ func LoadFromEnv() Config {
 	cfg.AutoEnrollConfigPath = envString("ENDPOINT_AGENT_AUTO_ENROLL_CONFIG_PATH", cfg.AutoEnrollConfigPath)
 	cfg.AutoEnrollCertSubjectSuffix = envString("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX", cfg.AutoEnrollCertSubjectSuffix)
 	cfg.AutoEnrollCertSANURIPrefix = envString("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX", cfg.AutoEnrollCertSANURIPrefix)
+	cfg.SelfUpdateEnabled = envBool("ENDPOINT_AGENT_SELF_UPDATE_ENABLED", cfg.SelfUpdateEnabled)
+	cfg.SelfUpdateAllowedHosts = envCSV("ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS", cfg.SelfUpdateAllowedHosts)
+	cfg.SelfUpdateSignerThumbprints = envCSV("ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS", cfg.SelfUpdateSignerThumbprints)
+	cfg.SelfUpdateAllowLabOnlySigning = envBool("ENDPOINT_AGENT_SELF_UPDATE_ALLOW_LAB_ONLY_SIGNING", cfg.SelfUpdateAllowLabOnlySigning)
+	cfg.SelfUpdateHardMaxBytes = envInt64("ENDPOINT_AGENT_SELF_UPDATE_HARD_MAX_BYTES", cfg.SelfUpdateHardMaxBytes)
+	cfg.SelfUpdateMaxRedirects = envInt("ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS", cfg.SelfUpdateMaxRedirects)
 	return cfg
+}
+
+func (cfg Config) SelfUpdateCapabilityEnabled() bool {
+	// Timeout is intentionally not part of this gate: it has a safe default.
+	// SelfUpdateMaxRedirects=0 is valid and means "no redirects".
+	return cfg.SelfUpdateEnabled &&
+		len(cfg.SelfUpdateAllowedHosts) > 0 &&
+		len(cfg.SelfUpdateSignerThumbprints) > 0 &&
+		cfg.SelfUpdateHardMaxBytes > 0 &&
+		cfg.SelfUpdateMaxRedirects >= 0
 }
 
 func envString(key string, fallback string) string {
@@ -155,4 +190,47 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func envInt64(key string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func envCSV(key string, fallback []string) []string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }

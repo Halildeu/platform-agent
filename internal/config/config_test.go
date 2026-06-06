@@ -92,3 +92,51 @@ func TestLoadFromEnv_InstallCommandTimeoutEnvOverride(t *testing.T) {
 		t.Fatalf("InstallCommandTimeout = %s, want 45m", cfg.InstallCommandTimeout)
 	}
 }
+
+func TestLoadFromEnv_SelfUpdatePolicy(t *testing.T) {
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_ENABLED", "true")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS", "github.com, objects.githubusercontent.com ")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS", "AA:BB,ccddee")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_ALLOW_LAB_ONLY_SIGNING", "1")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_HARD_MAX_BYTES", "12345")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS", "4")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_COMMAND_TIMEOUT", "40m")
+
+	cfg := LoadFromEnv()
+
+	if !cfg.SelfUpdateEnabled || !cfg.SelfUpdateAllowLabOnlySigning {
+		t.Fatalf("self-update bool env not loaded: %#v", cfg)
+	}
+	if len(cfg.SelfUpdateAllowedHosts) != 2 || cfg.SelfUpdateAllowedHosts[1] != "objects.githubusercontent.com" {
+		t.Fatalf("SelfUpdateAllowedHosts = %#v", cfg.SelfUpdateAllowedHosts)
+	}
+	if len(cfg.SelfUpdateSignerThumbprints) != 2 || cfg.SelfUpdateSignerThumbprints[0] != "AA:BB" {
+		t.Fatalf("SelfUpdateSignerThumbprints = %#v", cfg.SelfUpdateSignerThumbprints)
+	}
+	if cfg.SelfUpdateHardMaxBytes != 12345 || cfg.SelfUpdateMaxRedirects != 4 {
+		t.Fatalf("self-update numeric policy not loaded: maxBytes=%d redirects=%d", cfg.SelfUpdateHardMaxBytes, cfg.SelfUpdateMaxRedirects)
+	}
+	if cfg.SelfUpdateCommandTimeout != 40*time.Minute {
+		t.Fatalf("SelfUpdateCommandTimeout = %s", cfg.SelfUpdateCommandTimeout)
+	}
+	if !cfg.SelfUpdateCapabilityEnabled() {
+		t.Fatal("complete local self-update policy should enable capability advertisement")
+	}
+}
+
+func TestSelfUpdateCapabilityRequiresLocalTrustPolicy(t *testing.T) {
+	cfg := Default()
+	cfg.SelfUpdateEnabled = true
+	if cfg.SelfUpdateCapabilityEnabled() {
+		t.Fatal("enabled=true alone must not advertise UPDATE_AGENT")
+	}
+	cfg.SelfUpdateAllowedHosts = []string{"github.com"}
+	cfg.SelfUpdateSignerThumbprints = []string{"AABB"}
+	if !cfg.SelfUpdateCapabilityEnabled() {
+		t.Fatal("complete local policy should advertise UPDATE_AGENT")
+	}
+	cfg.SelfUpdateMaxRedirects = -1
+	if cfg.SelfUpdateCapabilityEnabled() {
+		t.Fatal("negative redirect cap must disable UPDATE_AGENT advertisement")
+	}
+}
