@@ -100,7 +100,16 @@ New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
 
 ## 4. Mode A: full backend-issued chain
 
-Use this mode after the backend PR4 command-create surface exists.
+Use this mode only after the backend BE-031/BE-032 command-create surface is
+merged and deployed. Current source references:
+
+- BE-031: `POST /api/v1/admin/endpoint-agent-update-releases`
+- BE-031: `POST /api/v1/admin/endpoint-agent-update-releases/{releaseId}/approve`
+- BE-032: `POST /api/v1/admin/endpoint-devices/{deviceId}/agent-updates`
+
+The old generic command endpoints are intentionally out of scope for
+self-update. A smoke that creates `UPDATE_AGENT` through
+`/endpoint-commands` or `/endpoint-devices/{deviceId}/commands` is invalid.
 
 ### 4.1 Baseline
 
@@ -113,11 +122,72 @@ Get-FileHash $Agent -Algorithm SHA256 |
   Out-File -Encoding utf8 "$EvidenceRoot\03-current-hash-before.txt"
 ```
 
-### 4.2 Backend command issue
+### 4.2 Release catalog seed and approval
+
+Create or update an agent update release catalog row before dispatch. The
+release row is where URL, hash, signer and signing-tier evidence lives. The
+device dispatch request must not carry those trust fields.
+
+Example request body for `POST /api/v1/admin/endpoint-agent-update-releases`:
+
+```json
+{
+  "releaseId": "endpoint-agent-1.2.3",
+  "channel": "PILOT",
+  "targetVersion": "1.2.3",
+  "binaryUrl": "https://approved.example.invalid/releases/endpoint-agent.exe",
+  "manifestUrl": "https://approved.example.invalid/releases/endpoint-agent.json",
+  "sha256": "<64 lowercase or uppercase hex chars>",
+  "sha512": "<128 lowercase or uppercase hex chars, optional>",
+  "signerThumbprint": "<allowed signer thumbprint>",
+  "signingTier": "TRUSTED_SIGNED",
+  "maxBytes": 104857600,
+  "releaseNotes": "AG-029 live smoke candidate"
+}
+```
+
+Approval is maker-checker. The approver must be a different manager subject
+from the creator:
+
+```text
+POST /api/v1/admin/endpoint-agent-update-releases/endpoint-agent-1.2.3/approve
+```
+
+Reject the smoke if:
+
+- the release remains `DRAFT`,
+- `enabled=false`,
+- creator and approver are the same subject,
+- `signingTier=LAB_ONLY_EVIDENCE` is used for a domain-wide or production
+  self-update claim,
+- the release URL, signer or hash differs from the artifact provenance.
+
+### 4.3 Backend command issue
 
 Create an `UPDATE_AGENT` command from the approved backend release catalog.
 The admin request must not carry a raw URL or raw installer argument. It should
 select a catalog release/channel/ring and a target version.
+
+BE-032 request body for
+`POST /api/v1/admin/endpoint-devices/{deviceId}/agent-updates`:
+
+```json
+{
+  "releaseId": "endpoint-agent-1.2.3",
+  "idempotencyKey": "ag029-smoke-001",
+  "reason": "AG-029 live self-update smoke",
+  "requiredDeploymentRing": "PILOT",
+  "notBefore": "2026-06-06T10:00:00Z",
+  "expiresAt": "2026-06-06T11:00:00Z"
+}
+```
+
+`idempotencyKey`, `requiredDeploymentRing`, `notBefore` and `expiresAt` can be
+omitted when the smoke needs immediate dispatch, but `releaseId` and `reason`
+are required. The backend resolves the trust-sensitive fields from the approved
+release catalog. The request must not contain `binaryUrl`, `claimedSha256`,
+`claimedSignerThumbprint`, `signingTier`, raw PowerShell, raw installer args or
+a caller-supplied payload map.
 
 Expected backend command payload shape after catalog resolution:
 
@@ -137,7 +207,7 @@ Expected backend command payload shape after catalog resolution:
 The agent is still the authority for hash, signer, URL policy, tier policy,
 and version policy. Backend claims are evidence, not trust authority.
 
-### 4.3 Wait for staged result
+### 4.4 Wait for staged result
 
 Poll the backend command result until it reports:
 
@@ -167,7 +237,7 @@ Save this JSON as:
 Reject the smoke if the result contains a local filesystem path such as
 `C:\ProgramData\EndpointAgent\updates\...`.
 
-### 4.4 Activation preflight
+### 4.5 Activation preflight
 
 ```powershell
 $StagingId = "<stagingId-from-command-result>"
@@ -188,7 +258,7 @@ Accept only:
 Reject if `05-preflight.json` contains `C:\`, `Program Files`, or
 `ProgramData`.
 
-### 4.5 Activation
+### 4.6 Activation
 
 The activation command stops/starts the service. Run it from an elevated shell
 or a service-safe helper process, not from inside the running service process.
@@ -219,7 +289,7 @@ staging id so the operator does not need to copy a `ProgramData` path into the
 evidence bundle. This file is support evidence only; it does not replace the
 post-activation service + backend heartbeat acceptance gates.
 
-### 4.6 Post-activation proof
+### 4.7 Post-activation proof
 
 ```powershell
 Start-Sleep -Seconds 10
