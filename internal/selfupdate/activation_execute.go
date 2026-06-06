@@ -27,6 +27,7 @@ type ActivationOutcome struct {
 	NewSha256              string           `json:"newSha256,omitempty"`
 	BackupSha256           string           `json:"backupSha256,omitempty"`
 	ServiceRunningVerified bool             `json:"serviceRunningVerified,omitempty"`
+	EvidencePersisted      bool             `json:"evidencePersisted"`
 	Reason                 string           `json:"reason,omitempty"`
 }
 

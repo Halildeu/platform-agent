@@ -277,8 +277,8 @@ Minimum acceptance evidence:
 1. backend-issued UPDATE_AGENT result reports STAGED_ACTIVATION_READY
 2. endpoint-agent self-update preflight returns path-free READY
 3. if ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE=true, helper launch is recorded after result POST
-4. endpoint-agent self-update activate returns path-free ACTIVATED with serviceRunningVerified=true
-5. endpoint-agent self-update status returns the persisted path-free activation outcome with the same serviceRunningVerified value
+4. endpoint-agent self-update activate returns path-free ACTIVATED with serviceRunningVerified=true and evidencePersisted=true
+5. endpoint-agent self-update status returns the persisted path-free activation outcome with the same serviceRunningVerified/evidencePersisted values
 6. EndpointAgent service is running after activation
 7. next backend heartbeat reports AgentVersion == targetVersion
 8. audit/result rows correlate to the original command id and actor

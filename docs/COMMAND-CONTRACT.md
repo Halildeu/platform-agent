@@ -2160,7 +2160,7 @@ Backends should reject unknown codes in persisted command-result mirrors. The
 agent bounds `reason` and redacts any path-like token before it reaches the
 wire.
 
-### 21.5 Activation phase
+### 22.5 Activation phase
 
 Activation happens only after the staging result has been posted. Local helper
 commands:
@@ -2187,6 +2187,8 @@ Activation output uses `activationStatus`, not `stageStatus`:
   "targetVersion": "1.2.3",
   "newSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "backupSha256": "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+  "serviceRunningVerified": true,
+  "evidencePersisted": true,
   "reason": "activation applied"
 }
 ```
@@ -2211,6 +2213,7 @@ ACTIVATION_FAILED
 ```
 
 The green acceptance path is not `ACTIVATION_HELPER_STARTED` and is not merely
-`ACTIVATED`; it also requires the service to restart cleanly and the next
-backend heartbeat to report `AgentVersion == targetVersion`. See
+`ACTIVATED`; it also requires `serviceRunningVerified=true`,
+`evidencePersisted=true`, the service to restart cleanly, and the next backend
+heartbeat to report `AgentVersion == targetVersion`. See
 `docs/AG-029-self-update-live-smoke.md` for the full live-smoke evidence matrix.

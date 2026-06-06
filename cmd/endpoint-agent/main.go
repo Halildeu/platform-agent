@@ -492,7 +492,7 @@ func handleSelfUpdateCommand(args []string, cfg config.Config) {
 		if err := json.NewEncoder(os.Stdout).Encode(outcome); err != nil {
 			log.Fatalf("self-update activate encode failed: %v", err)
 		}
-		if outcome.Status != selfupdate.ActivationActivated {
+		if !selfUpdateActivationAccepted(outcome) {
 			os.Exit(1)
 		}
 	case "preflight":
@@ -570,10 +570,22 @@ func runSelfUpdateActivate(ctx context.Context, opts selfUpdateActivateOptions, 
 		return selfupdate.ActivationOutcome{Status: selfupdate.ActivationFailed, Reason: reason}
 	}
 	outcome := selfupdate.ActivatePreparedUpdate(ctx, paths, opts.MaxBytes, service)
-	if code, reason := selfupdate.WriteActivationOutcome(paths, outcome); code != "" && outcome.Status == selfupdate.ActivationActivated {
-		outcome.Reason = "activation applied; outcome persistence failed: " + string(code) + " " + reason
+	outcome.EvidencePersisted = true
+	if code, reason := persistSelfUpdateActivationOutcome(paths, outcome); code != "" {
+		outcome.EvidencePersisted = false
+		if outcome.Status == selfupdate.ActivationActivated {
+			outcome.Reason = "activation applied; outcome persistence failed: " + string(code) + " " + reason
+		}
 	}
 	return outcome
+}
+
+var persistSelfUpdateActivationOutcome = selfupdate.WriteActivationOutcome
+
+func selfUpdateActivationAccepted(outcome selfupdate.ActivationOutcome) bool {
+	return outcome.Status == selfupdate.ActivationActivated &&
+		outcome.ServiceRunningVerified &&
+		outcome.EvidencePersisted
 }
 
 func runSelfUpdateStatus(opts selfUpdateStatusOptions) (selfupdate.ActivationOutcome, bool) {

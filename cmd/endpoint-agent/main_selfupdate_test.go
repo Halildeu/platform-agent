@@ -35,6 +35,9 @@ func TestRunSelfUpdateActivateSwapsPreparedBinary(t *testing.T) {
 	if outcome.Status != selfupdate.ActivationActivated {
 		t.Fatalf("activation status=%s reason=%q", outcome.Status, outcome.Reason)
 	}
+	if !selfUpdateActivationAccepted(outcome) {
+		t.Fatalf("activation should be accepted when service is running and evidence persisted: %+v", outcome)
+	}
 	if got, err := os.ReadFile(currentPath); err != nil || string(got) != "new-agent" {
 		t.Fatalf("current binary not swapped: got=%q err=%v", string(got), err)
 	}
@@ -54,6 +57,45 @@ func TestRunSelfUpdateActivateSwapsPreparedBinary(t *testing.T) {
 	}
 	if strings.Contains(string(outcomeRaw), root) || strings.Contains(string(outcomeRaw), currentPath) {
 		t.Fatalf("persisted activation outcome leaked local path: %s", outcomeRaw)
+	}
+	if !strings.Contains(string(outcomeRaw), `"evidencePersisted": true`) {
+		t.Fatalf("persisted activation outcome should record durable evidence gate: %s", outcomeRaw)
+	}
+}
+
+func TestRunSelfUpdateActivateDoesNotAcceptWithoutPersistedEvidence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cmd-level activation swap test relies on non-elevated temp ACLs; internal/selfupdate covers Windows activation sequencing with hooks")
+	}
+	root := t.TempDir()
+	currentPath := filepath.Join(root, "current-agent.exe")
+	if err := os.WriteFile(currentPath, []byte("old-agent"), 0o600); err != nil {
+		t.Fatalf("write current binary: %v", err)
+	}
+	paths := writeActivationPlanForMainTest(t, root, "cmd-activate-no-evidence", currentPath, []byte("new-agent"))
+	oldPersist := persistSelfUpdateActivationOutcome
+	persistSelfUpdateActivationOutcome = func(selfupdate.StagingPaths, selfupdate.ActivationOutcome) (selfupdate.ErrorCode, string) {
+		return selfupdate.ErrActivationPlanWrite, "forced persistence failure"
+	}
+	t.Cleanup(func() { persistSelfUpdateActivationOutcome = oldPersist })
+
+	outcome := runSelfUpdateActivate(context.Background(), selfUpdateActivateOptions{
+		StagingRoot: root,
+		StagingID:   paths.StagingID,
+		MaxBytes:    1024,
+	}, &fakeSelfUpdateServiceController{})
+
+	if outcome.Status != selfupdate.ActivationActivated || !outcome.ServiceRunningVerified {
+		t.Fatalf("fixture should still exercise an applied activation: %+v", outcome)
+	}
+	if outcome.EvidencePersisted {
+		t.Fatalf("evidencePersisted should be false after persistence failure: %+v", outcome)
+	}
+	if selfUpdateActivationAccepted(outcome) {
+		t.Fatalf("activation must not be accepted without durable evidence: %+v", outcome)
+	}
+	if !strings.Contains(outcome.Reason, "outcome persistence failed") {
+		t.Fatalf("reason should identify evidence persistence failure: %q", outcome.Reason)
 	}
 }
 
