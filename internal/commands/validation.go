@@ -40,3 +40,13 @@ func hasCapability(capabilities []protocol.CommandType, target protocol.CommandT
 	}
 	return false
 }
+
+func withoutCapability(capabilities []protocol.CommandType, target protocol.CommandType) []protocol.CommandType {
+	filtered := capabilities[:0]
+	for _, capability := range capabilities {
+		if capability != target {
+			filtered = append(filtered, capability)
+		}
+	}
+	return filtered
+}

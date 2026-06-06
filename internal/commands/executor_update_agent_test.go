@@ -80,6 +80,24 @@ func TestSelfUpdateCapabilityAdvertisableRequiresWindows(t *testing.T) {
 	}
 }
 
+func TestConfigureSelfUpdateRemovesUpdateAgentWhenConfigStopsBeingAdvertisable(t *testing.T) {
+	executor := NewLocalExecutor([]protocol.CommandType{
+		protocol.CommandCollectInventory,
+		protocol.CommandUpdateAgent,
+	}, "1.2.3")
+
+	disabled := testSelfUpdateConfig()
+	disabled.Enabled = false
+	executor.ConfigureSelfUpdate(disabled)
+
+	if hasCapability(executor.Capabilities, protocol.CommandUpdateAgent) {
+		t.Fatalf("UPDATE_AGENT capability must be removed when self-update is not advertisable; caps=%v", executor.Capabilities)
+	}
+	if !hasCapability(executor.Capabilities, protocol.CommandCollectInventory) {
+		t.Fatalf("non-self-update capability should be preserved; caps=%v", executor.Capabilities)
+	}
+}
+
 func TestLocalExecutorUpdateAgentRequiresReason(t *testing.T) {
 	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandUpdateAgent}, "1.0.0")
 	command := updateAgentTestCommand()

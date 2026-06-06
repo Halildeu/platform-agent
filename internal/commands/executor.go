@@ -66,8 +66,12 @@ func NewLocalExecutor(capabilities []protocol.CommandType, agentVersion string) 
 
 func (e *LocalExecutor) ConfigureSelfUpdate(cfg SelfUpdateConfig) {
 	e.SelfUpdate = cfg
-	if selfUpdateCapabilityAdvertisable(cfg, e.AgentVersion, runtime.GOOS) &&
-		!hasCapability(e.Capabilities, protocol.CommandUpdateAgent) {
+	advertisable := selfUpdateCapabilityAdvertisable(cfg, e.AgentVersion, runtime.GOOS)
+	if !advertisable {
+		e.Capabilities = withoutCapability(e.Capabilities, protocol.CommandUpdateAgent)
+		return
+	}
+	if !hasCapability(e.Capabilities, protocol.CommandUpdateAgent) {
 		e.Capabilities = append(e.Capabilities, protocol.CommandUpdateAgent)
 	}
 }
