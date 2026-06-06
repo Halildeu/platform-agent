@@ -5,10 +5,11 @@ package inventory
 import (
 	"context"
 	"errors"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"platform-agent/internal/winget"
 )
 
 // NOTE: The pure WinGet `upgrade` table parsing (parseUpgradeOutput /
@@ -121,23 +122,11 @@ func ProbeOutdatedSoftware(ctx context.Context, now func() time.Time) OutdatedSo
 	return result
 }
 
-var outdatedSoftwareLocator = func() (string, error) {
-	path, err := exec.LookPath("winget")
-	if err == nil {
-		return path, nil
-	}
-	locAppData := os.Getenv("LOCALAPPDATA")
-	if locAppData != "" {
-		winApps := locAppData + `\Microsoft\WindowsApps`
-		cmd := exec.Command("cmd", "/c", "dir", "/b", winApps+`\winget.exe`)
-		out, _ := cmd.Output()
-		trimmed := strings.TrimSpace(string(out))
-		if trimmed != "" && !strings.Contains(trimmed, "File Not Found") {
-			return winApps + `\` + trimmed, nil
-		}
-	}
-	return "", err
-}
+// Use the same production WinGet locator as AG-026/AG-026A and install
+// execution. HALILKOOLUB735 live evidence showed LocalSystem can miss
+// winget on PATH while App Installer's system-wide WindowsApps package
+// contains a working winget.exe.
+var outdatedSoftwareLocator = winget.LocateExecutable
 
 func finalizeOutdatedSoftware(result *OutdatedSoftwareResult, start time.Time, now func() time.Time) {
 	deriveOutdatedSoftwareSummary(result)

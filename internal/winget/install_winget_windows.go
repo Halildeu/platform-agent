@@ -21,7 +21,7 @@ import (
 // so agent shutdown / command-timeout signals propagate.
 func InstallWinGet(ctx context.Context, req InstallRequest) InstallResult {
 	opts := InstallOptions{
-		Locator: defaultLocator,
+		Locator: LocateExecutable,
 		EgressVerify: func(probeCtx context.Context) SourceEgressReadiness {
 			_ = probeCtx
 			return DetectSourceEgress(time.Now())
@@ -56,8 +56,8 @@ func InstallWinGet(ctx context.Context, req InstallRequest) InstallResult {
 //
 // Timeout strategy (Codex 019e6c0d iter-1 P1#3 absorb):
 //
-//   - The runner uses `exec.Command` (NOT `exec.CommandContext`)
-//     + manual `Start()` + a goroutine that watches `cmd.Wait()`.
+//   - The runner uses `exec.Command` (NOT `exec.CommandContext`) with
+//     manual `Start()` + a goroutine that watches `cmd.Wait()`.
 //     A parent `ctx.Done()` triggers `killProcessTree(cmd)` while
 //     the parent process is still alive; only then do we drain
 //     `Wait()`. This is the documented anti-pattern for

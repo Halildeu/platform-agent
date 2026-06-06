@@ -25,20 +25,20 @@ import (
 func Detect(now time.Time) Readiness {
 	_ = now
 	return Probe(ProbeOptions{
-		Locator: defaultLocator,
+		Locator: LocateExecutable,
 		Execute: defaultExecutor,
 		Timeout: DefaultProbeTimeout * time.Second,
 		Now:     time.Now,
 	})
 }
 
-// defaultLocator tries PATH first, then the per-user WindowsApps
+// LocateExecutable tries PATH first, then the per-user WindowsApps
 // reparse point (where Microsoft Store installs the AppX alias), then
 // the system-wide WindowsApps directory. These are the three places
 // WinGet App Installer actually lives on Windows 10/11 IT pilot
 // builds; we don't search the registry because the registry entry is
 // not reliably present under LocalSystem.
-func defaultLocator() (string, error) {
+func LocateExecutable() (string, error) {
 	if path, err := exec.LookPath("winget"); err == nil {
 		return path, nil
 	}
