@@ -12,6 +12,7 @@ import (
 	"platform-agent/internal/hmacstore"
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
+	"platform-agent/internal/selfupdate"
 	"platform-agent/internal/state"
 )
 
@@ -39,6 +40,10 @@ type Runner struct {
 	// start". Production Windows wiring populates this with
 	// *hmacstore.Store.
 	CredStore CredentialStore
+	// SelfUpdateActivationHook is called only after a successful
+	// UPDATE_AGENT staging result has been submitted to the backend. Production
+	// wiring launches a separate helper process; tests inject a recorder.
+	SelfUpdateActivationHook func(ctx context.Context, stage selfupdate.StageResult) error
 	// credentialPersisted records whether the credential currently
 	// held by Client was successfully written to the on-disk store
 	// during the most recent enroll() call in THIS process lifetime.
@@ -168,6 +173,15 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		return err
 	}
 	r.logf("command %s finished with %s", command.CommandID, result.Status)
+	if command.Type == protocol.CommandUpdateAgent && result.Status == protocol.CommandStatusSucceeded {
+		if stage, ok := result.Details["update"].(selfupdate.StageResult); ok && stage.StageStatus == selfupdate.StageReady && r.SelfUpdateActivationHook != nil {
+			if err := r.SelfUpdateActivationHook(ctx, stage); err != nil {
+				r.logf("self-update activation hook failed activationPlanId=%s: %v", stage.ActivationPlanID, err)
+			} else {
+				r.logf("self-update activation hook launched activationPlanId=%s", stage.ActivationPlanID)
+			}
+		}
+	}
 	if result.Status != protocol.CommandStatusSucceeded {
 		r.logf("command %s detail: summary=%q details=%v", command.CommandID, result.Summary, result.Details)
 	}

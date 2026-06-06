@@ -51,7 +51,10 @@ type UpdateAgentStagerOptions struct {
 	Downloader          selfupdate.BinaryDownloader
 	HighWater           selfupdate.HighWaterStore
 	Staging             selfupdate.StagingStore
+	PlanWriter          selfupdate.ActivationPlanWriter
 	TempDir             string
+	CurrentBinaryPath   string
+	ServiceName         string
 }
 
 func NewPolicyAwareExecutor(agentVersion string, selfUpdateLocalPolicyReady bool, updateOpts UpdateAgentStagerOptions) *LocalExecutor {
@@ -71,6 +74,9 @@ func (opts UpdateAgentStagerOptions) RuntimeReady() bool {
 		opts.VersionReader != nil &&
 		opts.Downloader != nil &&
 		opts.Staging != nil &&
+		opts.PlanWriter != nil &&
+		strings.TrimSpace(opts.CurrentBinaryPath) != "" &&
+		strings.TrimSpace(opts.ServiceName) != "" &&
 		len(opts.AllowedHosts) > 0 &&
 		len(opts.SignerThumbprints) > 0 &&
 		opts.HardMaxBytes > 0 &&
@@ -87,6 +93,7 @@ func NewUpdateAgentStager(opts UpdateAgentStagerOptions) *selfupdate.Stager {
 		Downloader:    opts.Downloader,
 		HighWater:     opts.HighWater,
 		Staging:       opts.Staging,
+		PlanWriter:    opts.PlanWriter,
 		Allowlist: selfupdate.SignerAllowlist{
 			Thumbprints: opts.SignerThumbprints,
 		},
@@ -97,8 +104,10 @@ func NewUpdateAgentStager(opts UpdateAgentStagerOptions) *selfupdate.Stager {
 			AllowedHosts: opts.AllowedHosts,
 			MaxRedirects: opts.MaxRedirects,
 		},
-		HardMaxBytes: opts.HardMaxBytes,
-		TempDir:      opts.TempDir,
+		HardMaxBytes:      opts.HardMaxBytes,
+		TempDir:           opts.TempDir,
+		CurrentBinaryPath: strings.TrimSpace(opts.CurrentBinaryPath),
+		ServiceName:       strings.TrimSpace(opts.ServiceName),
 	}
 }
 

@@ -73,6 +73,10 @@ func main() {
 		handleServiceCommand(flag.Args()[1:])
 		return
 	}
+	if len(flag.Args()) > 0 && flag.Args()[0] == "self-update" {
+		handleSelfUpdateCommand(flag.Args()[1:])
+		return
+	}
 	if len(flag.Args()) > 0 && flag.Args()[0] == "diagnose" {
 		handleDiagnoseCommand(flag.Args()[1:])
 		return
@@ -364,6 +368,7 @@ func newRunner(cfg config.Config, logger *log.Logger) (*app.Runner, error) {
 	// (Codex 019e7314 constraint #2) while production Windows agents
 	// get the SCM-env-cache-immune restart path.
 	runner.CredStore = hmacstore.New("", nil)
+	configureSelfUpdateActivationHook(runner, cfg, logger)
 	return runner, nil
 }
 

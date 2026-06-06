@@ -2,7 +2,12 @@
 
 package commands
 
-import "platform-agent/internal/selfupdate"
+import (
+	"os"
+
+	winservice "platform-agent/internal/platform/windows/service"
+	"platform-agent/internal/selfupdate"
+)
 
 func withDefaultUpdateAgentRuntime(opts UpdateAgentStagerOptions) UpdateAgentStagerOptions {
 	if opts.Verifier == nil {
@@ -23,6 +28,17 @@ func withDefaultUpdateAgentRuntime(opts UpdateAgentStagerOptions) UpdateAgentSta
 	}
 	if opts.HighWater == nil {
 		opts.HighWater = selfupdate.FileHighWaterStore{Path: selfupdate.DefaultWindowsHighWaterPath()}
+	}
+	if opts.PlanWriter == nil {
+		opts.PlanWriter = selfupdate.FileActivationPlanWriter{}
+	}
+	if opts.CurrentBinaryPath == "" {
+		if exe, err := os.Executable(); err == nil {
+			opts.CurrentBinaryPath = exe
+		}
+	}
+	if opts.ServiceName == "" {
+		opts.ServiceName = winservice.DefaultName
 	}
 	return opts
 }

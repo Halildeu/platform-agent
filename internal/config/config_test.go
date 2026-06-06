@@ -101,6 +101,9 @@ func TestLoadFromEnv_SelfUpdatePolicy(t *testing.T) {
 	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_HARD_MAX_BYTES", "12345")
 	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS", "4")
 	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_COMMAND_TIMEOUT", "40m")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE", "true")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_ACTIVATION_TIMEOUT", "3m")
+	t.Setenv("ENDPOINT_AGENT_SELF_UPDATE_SERVICE_NAME", "EndpointAgentTest")
 
 	cfg := LoadFromEnv()
 
@@ -118,6 +121,9 @@ func TestLoadFromEnv_SelfUpdatePolicy(t *testing.T) {
 	}
 	if cfg.SelfUpdateCommandTimeout != 40*time.Minute {
 		t.Fatalf("SelfUpdateCommandTimeout = %s", cfg.SelfUpdateCommandTimeout)
+	}
+	if !cfg.SelfUpdateAutoActivate || cfg.SelfUpdateActivationTimeout != 3*time.Minute || cfg.SelfUpdateServiceName != "EndpointAgentTest" {
+		t.Fatalf("self-update activation env not loaded: auto=%t timeout=%s service=%q", cfg.SelfUpdateAutoActivate, cfg.SelfUpdateActivationTimeout, cfg.SelfUpdateServiceName)
 	}
 	if !cfg.SelfUpdateCapabilityEnabled() {
 		t.Fatal("complete local self-update policy should enable capability advertisement")

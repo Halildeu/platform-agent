@@ -18,6 +18,9 @@ func TestPolicyAwareExecutorDefaultRuntimeDoesNotAdvertiseWithoutPolicy(t *testi
 		VersionReader:     fakeUpdateVersionReader{},
 		Downloader:        fakeUpdateDownloader{},
 		Staging:           fakeUpdateStaging{},
+		PlanWriter:        fakeActivationPlanWriter{},
+		CurrentBinaryPath: "/agent/current",
+		ServiceName:       "EndpointAgent",
 	})
 
 	if hasExecutorCapability(executor, protocol.CommandUpdateAgent) {
@@ -39,6 +42,12 @@ func TestUpdateAgentStagerOptionsRuntimeReadyRequiresAllRuntimeCollaborators(t *
 	base.VersionReader = fakeUpdateVersionReader{}
 	base.Downloader = fakeUpdateDownloader{}
 	base.Staging = fakeUpdateStaging{}
+	if base.RuntimeReady() {
+		t.Fatal("runtime-ready must fail without activation plan collaborator and local activation inputs")
+	}
+	base.PlanWriter = fakeActivationPlanWriter{}
+	base.CurrentBinaryPath = "/agent/current"
+	base.ServiceName = "EndpointAgent"
 	if !base.RuntimeReady() {
 		t.Fatal("runtime-ready should pass when all required collaborators and local policy are present")
 	}
@@ -55,8 +64,11 @@ func TestNewUpdateAgentStagerCarriesOptionalHighWaterAndTempDir(t *testing.T) {
 		VersionReader:     fakeUpdateVersionReader{},
 		Downloader:        fakeUpdateDownloader{},
 		Staging:           fakeUpdateStaging{},
+		PlanWriter:        fakeActivationPlanWriter{},
 		HighWater:         store,
 		TempDir:           t.TempDir(),
+		CurrentBinaryPath: "/agent/current",
+		ServiceName:       "EndpointAgent",
 	})
 	if stager == nil {
 		t.Fatal("expected stager")
@@ -66,6 +78,9 @@ func TestNewUpdateAgentStagerCarriesOptionalHighWaterAndTempDir(t *testing.T) {
 	}
 	if stager.TempDir == "" {
 		t.Fatal("expected temp dir to be carried")
+	}
+	if stager.PlanWriter == nil || stager.CurrentBinaryPath == "" || stager.ServiceName == "" {
+		t.Fatal("expected activation plan collaborators to be carried")
 	}
 }
 
