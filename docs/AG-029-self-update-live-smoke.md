@@ -30,6 +30,21 @@ endpoint-agent self-update status     --staging-id <id>
 The full backend-issued live chain still requires the backend command-create
 surface described in platform-agent issue #55 PR4.
 
+PR #59 also adds an opt-in service wiring switch:
+
+```text
+ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE=true
+ENDPOINT_AGENT_SELF_UPDATE_ACTIVATION_TIMEOUT=2m
+```
+
+With this switch enabled, the runner starts a separate
+`endpoint-agent self-update activate ...` helper only after the staging result
+has been posted to the backend. The intermediate
+`ACTIVATION_HELPER_STARTED` outcome is not acceptance evidence. A green smoke
+still requires the path-free activation outcome, the `EndpointAgent` service
+running after activation, and backend heartbeat/update-state proof with
+`AgentVersion == targetVersion`.
+
 ## 2. Required environment
 
 Run on an IT-owned or lab-owned Windows 11 endpoint where the operator is
@@ -60,6 +75,7 @@ New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
 | Service baseline | service status + current version | `EndpointAgent` running before staging |
 | Staging result | backend command result `details.update` | `stageStatus=STAGED_ACTIVATION_READY`; includes opaque `stagingId` + `activationPlanId`; no filesystem path |
 | Preflight | `self-update preflight` JSON | `status=READY`, `currentBinaryPresent=true`, `stagedBinaryVerified=true`; no filesystem path |
+| Helper launch | runner log or helper-start outcome | Optional `ACTIVATION_HELPER_STARTED`; support evidence only, not green acceptance |
 | Activation | `self-update activate` JSON | `status=ACTIVATED` or a reviewed rollback status; no filesystem path |
 | Durable activation evidence | local `activation-outcome.json` | Same bounded activation status persisted in staging dir; no filesystem path |
 | Post-activation service | service state + process | service running after activation |

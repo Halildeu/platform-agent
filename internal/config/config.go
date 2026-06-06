@@ -57,6 +57,12 @@ type Config struct {
 	SelfUpdateAllowLabOnly      bool
 	SelfUpdateDomainJoined      bool
 	SelfUpdateMaxSeenVersion    string
+	// SelfUpdateAutoActivate controls whether the runner launches the local
+	// service-safe activation helper after a successful UPDATE_AGENT staging
+	// result has been submitted to the backend. It is opt-in because Windows
+	// live smoke must prove service stop/swap/start and heartbeat acceptance.
+	SelfUpdateAutoActivate      bool
+	SelfUpdateActivationTimeout time.Duration
 	NonceSkewWindow             time.Duration
 	NonceReplayCacheWindow      time.Duration
 
@@ -96,20 +102,21 @@ func defaultAgentVersion() string {
 
 func Default() Config {
 	return Config{
-		AgentName:               "endpoint-agent",
-		APIURL:                  "https://localhost/api/v1/endpoint-agent",
-		AgentVersion:            defaultAgentVersion(),
-		HeartbeatInterval:       60 * time.Second,
-		CommandPollInterval:     30 * time.Second,
-		InventoryInterval:       60 * time.Minute,
-		JitterPercent:           20,
-		CommandTimeout:          120 * time.Second,
-		InstallCommandTimeout:   30 * time.Minute,
-		UninstallCommandTimeout: 30 * time.Minute,
-		SelfUpdateServiceName:   "EndpointAgent",
-		SelfUpdateMaxRedirects:  5,
-		NonceSkewWindow:         5 * time.Minute,
-		NonceReplayCacheWindow:  10 * time.Minute,
+		AgentName:                   "endpoint-agent",
+		APIURL:                      "https://localhost/api/v1/endpoint-agent",
+		AgentVersion:                defaultAgentVersion(),
+		HeartbeatInterval:           60 * time.Second,
+		CommandPollInterval:         30 * time.Second,
+		InventoryInterval:           60 * time.Minute,
+		JitterPercent:               20,
+		CommandTimeout:              120 * time.Second,
+		InstallCommandTimeout:       30 * time.Minute,
+		UninstallCommandTimeout:     30 * time.Minute,
+		SelfUpdateServiceName:       "EndpointAgent",
+		SelfUpdateMaxRedirects:      5,
+		SelfUpdateActivationTimeout: 2 * time.Minute,
+		NonceSkewWindow:             5 * time.Minute,
+		NonceReplayCacheWindow:      10 * time.Minute,
 	}
 }
 
@@ -141,6 +148,8 @@ func LoadFromEnv() Config {
 	cfg.SelfUpdateAllowLabOnly = envBool("ENDPOINT_AGENT_SELF_UPDATE_ALLOW_LAB_ONLY", cfg.SelfUpdateAllowLabOnly)
 	cfg.SelfUpdateDomainJoined = envBool("ENDPOINT_AGENT_SELF_UPDATE_DOMAIN_JOINED", cfg.SelfUpdateDomainJoined)
 	cfg.SelfUpdateMaxSeenVersion = envString("ENDPOINT_AGENT_SELF_UPDATE_MAX_SEEN_VERSION", cfg.SelfUpdateMaxSeenVersion)
+	cfg.SelfUpdateAutoActivate = envBool("ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE", cfg.SelfUpdateAutoActivate)
+	cfg.SelfUpdateActivationTimeout = envDuration("ENDPOINT_AGENT_SELF_UPDATE_ACTIVATION_TIMEOUT", cfg.SelfUpdateActivationTimeout)
 	cfg.NonceSkewWindow = envDuration("ENDPOINT_AGENT_NONCE_SKEW_WINDOW", cfg.NonceSkewWindow)
 	cfg.NonceReplayCacheWindow = envDuration("ENDPOINT_AGENT_NONCE_REPLAY_CACHE_WINDOW", cfg.NonceReplayCacheWindow)
 	cfg.JitterPercent = envInt("ENDPOINT_AGENT_JITTER_PERCENT", cfg.JitterPercent)

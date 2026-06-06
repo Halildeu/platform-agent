@@ -358,6 +358,14 @@ func newRunner(cfg config.Config, logger *log.Logger) (*app.Runner, error) {
 	}
 	client.SetIdentity(cfg.CredentialID, cfg.Secret, cfg.DeviceID)
 	runner := app.NewRunner(cfg, client, logger)
+	if cfg.SelfUpdateAutoActivate {
+		runner.SelfUpdateActivation = func(ctx context.Context, paths selfupdate.StagingPaths, maxBytes int64) selfupdate.ActivationOutcome {
+			return launchSelfUpdateActivationHelper(ctx, currentExecutablePath(), paths, maxBytes, cfg.SelfUpdateActivationTimeout)
+		}
+		if logger != nil {
+			logger.Printf("self-update auto-activation helper enabled")
+		}
+	}
 	// AG-026D: wire the HMAC credential store on every build. On
 	// non-Windows builds the Read/Write methods return
 	// hmacstore.ErrUnsupportedOS, which the runner treats as

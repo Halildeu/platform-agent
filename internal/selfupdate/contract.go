@@ -101,6 +101,7 @@ func IsKnownStageStatus(s StageStatus) bool {
 type ActivationStatus string
 
 const (
+	ActivationHelperStarted ActivationStatus = "ACTIVATION_HELPER_STARTED"
 	ActivationActivated     ActivationStatus = "ACTIVATED"
 	ActivationRolledBack    ActivationStatus = "ROLLED_BACK"
 	ActivationPendingReboot ActivationStatus = "PENDING_REBOOT"
@@ -113,7 +114,7 @@ const (
 // ambiguous status file.
 func IsKnownActivationStatus(s ActivationStatus) bool {
 	switch s {
-	case ActivationActivated, ActivationRolledBack, ActivationPendingReboot, ActivationFailed:
+	case ActivationHelperStarted, ActivationActivated, ActivationRolledBack, ActivationPendingReboot, ActivationFailed:
 		return true
 	}
 	return false

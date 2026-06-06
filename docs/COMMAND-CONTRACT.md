@@ -2021,11 +2021,15 @@ ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS=5
 ENDPOINT_AGENT_SELF_UPDATE_ALLOW_LAB_ONLY=false
 ENDPOINT_AGENT_SELF_UPDATE_DOMAIN_JOINED=true|false
 ENDPOINT_AGENT_SELF_UPDATE_MAX_SEEN_VERSION=<semver high-water mark>
+ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE=false
+ENDPOINT_AGENT_SELF_UPDATE_ACTIVATION_TIMEOUT=2m
 ```
 
 The backend payload cannot widen these values. In particular, a payload cannot
-add an allowed host, add a signer thumbprint, enable lab-only signing, or
-disable version replay protection.
+add an allowed host, add a signer thumbprint, enable lab-only signing, disable
+version replay protection, or force post-result activation. Auto-activation is a
+local opt-in that launches a separate helper process only after the staging
+result has been posted to the backend.
 
 ### 21.2 Request payload
 
@@ -2167,6 +2171,13 @@ endpoint-agent self-update activate --staging-id <stagingId> --timeout 2m
 endpoint-agent self-update status --staging-id <stagingId>
 ```
 
+When `ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE=true`, the runner launches the
+same `self-update activate` helper process after a successful
+`STAGED_ACTIVATION_READY` result POST. The launch outcome may report
+`ACTIVATION_HELPER_STARTED`; that status is support evidence only. It is not a
+green update result and it does not replace the persisted activation outcome,
+service restart proof, or backend heartbeat acceptance.
+
 Activation output uses `activationStatus`, not `stageStatus`:
 
 ```json
@@ -2192,13 +2203,14 @@ proof and heartbeat/update-state evidence.
 Allowed activation statuses:
 
 ```text
+ACTIVATION_HELPER_STARTED
 ACTIVATED
 ROLLED_BACK
 PENDING_REBOOT
 ACTIVATION_FAILED
 ```
 
-The green acceptance path is not merely `ACTIVATED`; it also requires the
-service to restart cleanly and the next backend heartbeat to report
-`AgentVersion == targetVersion`. See `docs/AG-029-self-update-live-smoke.md`
-for the full live-smoke evidence matrix.
+The green acceptance path is not `ACTIVATION_HELPER_STARTED` and is not merely
+`ACTIVATED`; it also requires the service to restart cleanly and the next
+backend heartbeat to report `AgentVersion == targetVersion`. See
+`docs/AG-029-self-update-live-smoke.md` for the full live-smoke evidence matrix.
