@@ -157,6 +157,12 @@ func (s *Stager) Stage(ctx context.Context, payload UpdateAgentPayload, currentV
 	if s.Downloader == nil || s.Verifier == nil || s.VersionReader == nil || s.Staging == nil {
 		return Failed(ErrStagingIO, "stager misconfigured: missing collaborator")
 	}
+	// A negative redirect cap disables the hop limit in CheckRedirectChain; the
+	// production contract is a positive cap, so a negative value is a
+	// misconfiguration and fails closed (Codex 019e9d35 hardening note).
+	if s.URLPolicy.MaxRedirects < 0 {
+		return Failed(ErrStagingIO, "stager misconfigured: negative redirect cap")
+	}
 
 	// --- download to a temp file while streaming the SHA-256.
 	tmp, err := os.CreateTemp(s.TempDir, "agent-update-*.tmp")
@@ -212,8 +218,13 @@ func (s *Stager) Stage(ctx context.Context, payload UpdateAgentPayload, currentV
 		return Failed(code, reason)
 	}
 
-	// --- stage atomically into the hardened directory.
-	stagingID := s.mintStagingID()
+	// --- stage atomically into the hardened directory. Mint the opaque handle
+	// FIRST and validate its shape BEFORE Commit: an RNG failure or a
+	// non-opaque/path-ish id must never reach the staging store (Codex 019e9d35).
+	stagingID, idErr := s.mintStagingID()
+	if idErr != nil || !validStagingID(stagingID) {
+		return Failed(ErrStagingIO, "could not mint an opaque staging id")
+	}
 	stagedPath, serr := s.Staging.Commit(ctx, tmpPath, stagingID)
 	if serr != nil {
 		return Failed(ErrStagingIO, "could not stage the verified binary")
@@ -262,10 +273,12 @@ func (s *Stager) effectiveMaxBytes(payloadMax int64) int64 {
 	return eff
 }
 
-// mintStagingID returns an opaque correlation handle.
-func (s *Stager) mintStagingID() string {
+// mintStagingID returns an opaque correlation handle (or an error on RNG
+// failure for the default generator). The result is shape-validated by the
+// caller before use.
+func (s *Stager) mintStagingID() (string, error) {
 	if s.NewStagingID != nil {
-		return s.NewStagingID()
+		return s.NewStagingID(), nil
 	}
 	return randomStagingID()
 }

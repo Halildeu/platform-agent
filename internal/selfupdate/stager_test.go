@@ -109,10 +109,13 @@ func newHappyStager(t *testing.T) (*Stager, *fakeDownloader, *fakeStaging) {
 		URLPolicy:     URLPolicy{AllowedHosts: []string{"github.com"}, MaxRedirects: 5},
 		HardMaxBytes:  10 << 20,
 		TempDir:       t.TempDir(),
-		NewStagingID:  func() string { return "fixed-staging-id" },
+		NewStagingID:  func() string { return fixedStagingID },
 	}
 	return s, dl, st
 }
+
+// fixedStagingID is a valid 32-hex opaque handle for deterministic tests.
+const fixedStagingID = "0123456789abcdef0123456789abcdef"
 
 func happyPayload() UpdateAgentPayload {
 	return UpdateAgentPayload{
@@ -141,7 +144,7 @@ func TestStage_HappyPath(t *testing.T) {
 	if r.ActualSignerThumbprint != goodThumb {
 		t.Errorf("ActualSignerThumbprint = %q, want %q", r.ActualSignerThumbprint, goodThumb)
 	}
-	if r.StagingID != "fixed-staging-id" || r.ActivationPlanID != "fixed-staging-id" {
+	if r.StagingID != fixedStagingID || r.ActivationPlanID != fixedStagingID {
 		t.Errorf("staging handles = %q/%q", r.StagingID, r.ActivationPlanID)
 	}
 	if r.OldVersion != "1.0.0" || r.TargetVersion != "2.0.0" {
@@ -333,5 +336,81 @@ func TestStubCollaboratorsFailClosed(t *testing.T) {
 	}
 	if _, err := (StubVersionReader{}).ReadVersion(context.Background(), "x"); err == nil {
 		t.Error("StubVersionReader must fail closed")
+	}
+}
+
+// ---- staging-id opacity (Codex 019e9d35) ----------------------------------
+
+func TestValidStagingID(t *testing.T) {
+	good := []string{
+		"0123456789abcdef0123456789abcdef",
+		"AABBCCDDEEFF00112233445566778899",
+	}
+	bad := []string{
+		"",                                  // empty
+		"rng-unavailable",                   // the old fail-open sentinel
+		"../x",                              // path traversal
+		"short",                             // too short
+		"0123456789abcdef0123456789abcde",   // 31 chars
+		"0123456789abcdef0123456789abcdef0", // 33 chars
+		"0123456789abcdef0123456789abcdeZ",  // non-hex char
+		"req-123",                           // illustrative-but-non-opaque
+	}
+	for _, g := range good {
+		if !validStagingID(g) {
+			t.Errorf("valid id rejected: %q", g)
+		}
+	}
+	for _, b := range bad {
+		if validStagingID(b) {
+			t.Errorf("invalid id accepted: %q", b)
+		}
+	}
+}
+
+// TestStage_BadStagingIDFailsClosed proves a non-opaque/path-ish minted id
+// (e.g. a bad NewStagingID injection or an RNG sentinel) fails closed with
+// STAGING_IO_FAILED and NEVER reaches the staging store.
+func TestStage_BadStagingIDFailsClosed(t *testing.T) {
+	for _, badID := range []string{"", "rng-unavailable", "../escape", "not-hex-at-all-xxxxxxxxxxxxxxxxxx"} {
+		t.Run(badID, func(t *testing.T) {
+			s, _, st := newHappyStager(t)
+			s.NewStagingID = func() string { return badID }
+			r := s.Stage(context.Background(), happyPayload(), "1.0.0")
+			if r.ErrorCode != ErrStagingIO {
+				t.Fatalf("bad staging id must fail STAGING_IO, got %q/%q", r.StageStatus, r.ErrorCode)
+			}
+			if st.committed {
+				t.Error("staging store was called with a non-opaque id")
+			}
+		})
+	}
+}
+
+// TestStage_DefaultStagingIDIsValidHex proves the default generator (no
+// injection) produces a valid 32-hex opaque handle that stages cleanly.
+func TestStage_DefaultStagingIDIsValidHex(t *testing.T) {
+	s, _, _ := newHappyStager(t)
+	s.NewStagingID = nil // use the real crypto/rand generator
+	r := s.Stage(context.Background(), happyPayload(), "1.0.0")
+	if r.StageStatus != StageReady {
+		t.Fatalf("default staging id should stage, got %q/%q", r.StageStatus, r.ErrorCode)
+	}
+	if !validStagingID(r.StagingID) {
+		t.Errorf("default staging id is not a valid opaque handle: %q", r.StagingID)
+	}
+}
+
+// TestStage_NegativeRedirectCapFailsClosed proves a misconfigured negative
+// redirect cap (which would disable the hop limit) fails closed before download.
+func TestStage_NegativeRedirectCapFailsClosed(t *testing.T) {
+	s, dl, _ := newHappyStager(t)
+	s.URLPolicy.MaxRedirects = -1
+	r := s.Stage(context.Background(), happyPayload(), "1.0.0")
+	if r.ErrorCode != ErrStagingIO {
+		t.Fatalf("negative redirect cap must fail closed STAGING_IO, got %q/%q", r.StageStatus, r.ErrorCode)
+	}
+	if dl.gotURL != "" {
+		t.Error("download happened despite a misconfigured redirect cap")
 	}
 }
