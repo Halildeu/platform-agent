@@ -123,6 +123,14 @@ func TestHTTPDownloader_URLPolicyRejectsBeforeTransport(t *testing.T) {
 			t.Fatalf("http scheme must be POLICY_URL_REJECTED, got %q", code)
 		}
 	})
+	t.Run("negative redirect cap (direct primitive use)", func(t *testing.T) {
+		pol := policyAllowing(aliasHost)
+		pol.MaxRedirects = -1
+		_, code, _ := d.Download(context.Background(), aliasURL("/x.exe"), pol, 1<<20, &buf)
+		if code != ErrURLRejected {
+			t.Fatalf("negative redirect cap must be POLICY_URL_REJECTED, got %q", code)
+		}
+	})
 }
 
 func TestHTTPDownloader_RedirectToDisallowedHostRejected(t *testing.T) {

@@ -46,6 +46,13 @@ var errTooLarge = errors.New("download exceeded byte cap")
 // or exceeds MaxRedirects aborts the request fail-closed. Range/resume is never
 // requested and a 206 Partial Content is treated as a failure.
 func (d *HTTPDownloader) Download(ctx context.Context, rawURL string, pol URLPolicy, maxBytes int64, dst io.Writer) (int64, ErrorCode, string) {
+	// Defense-in-depth: this exported primitive may be called directly (not only
+	// via Stager.Stage, which already guards this). A negative cap disables the
+	// redirect hop limit in CheckRedirect, so refuse it fail-closed (Codex
+	// 019e9d35 hardening note).
+	if pol.MaxRedirects < 0 {
+		return 0, ErrURLRejected, "negative redirect cap"
+	}
 	if _, code, reason := CheckURL(rawURL, pol); code != "" {
 		return 0, code, reason
 	}
