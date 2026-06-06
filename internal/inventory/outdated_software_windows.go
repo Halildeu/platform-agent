@@ -27,8 +27,17 @@ func runOutdatedSoftwareProbeReal(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, path, "upgrade", "--include-returning-apps", "--source", "winget")
+	cmd := exec.CommandContext(ctx, path, outdatedSoftwareArgs()...)
 	return cmd.Output()
+}
+
+func outdatedSoftwareArgs() []string {
+	return []string{
+		"upgrade",
+		"--source", "winget",
+		"--accept-source-agreements",
+		"--disable-interactivity",
+	}
 }
 
 func ProbeOutdatedSoftware(ctx context.Context, now func() time.Time) OutdatedSoftwareResult {
