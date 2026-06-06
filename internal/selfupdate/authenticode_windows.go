@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -94,7 +96,7 @@ if ($null -ne $cert) { $certRaw = [Convert]::ToBase64String($cert.RawData) }
   certRaw = $certRaw
 } | ConvertTo-Json -Compress`
 
-	cmd := exec.CommandContext(psCtx, "powershell.exe",
+	cmd := exec.CommandContext(psCtx, windowsPowerShellPath(),
 		"-NoProfile",
 		"-NonInteractive",
 		"-ExecutionPolicy", "Bypass",
@@ -113,6 +115,27 @@ if ($null -ne $cert) { $certRaw = [Convert]::ToBase64String($cert.RawData) }
 		return authenticodeSignatureFacts{}, fmt.Errorf("authenticode: signature query decode: %w", err)
 	}
 	return facts, nil
+}
+
+func windowsPowerShellPath() string {
+	candidates := []string{}
+	if root := strings.TrimSpace(os.Getenv("SystemRoot")); root != "" {
+		candidates = append(candidates,
+			filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"))
+	}
+	candidates = append(candidates,
+		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		"powershell.exe",
+	)
+	for _, candidate := range candidates {
+		if candidate == "powershell.exe" {
+			return candidate
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return "powershell.exe"
 }
 
 func classifyAuthenticodeStatus(status, message string) (bool, error) {

@@ -27,7 +27,8 @@ function Import-InstallHelper {
     if (-not $match.Success) {
         throw "Helper '$Name' not found in install.ps1"
     }
-    Invoke-Expression $match.Value
+    $definition = $match.Value -replace "function $Name", "function script:$Name"
+    Invoke-Expression $definition
 }
 
 Import-InstallHelper -Name "Wait-ForCredentialConfirmed"
@@ -47,7 +48,7 @@ Describe "Wait-ForCredentialConfirmed" {
             "endpoint-agent 2026/05/29 10:00:00 agent enrolled: device=x credential=y",
             "endpoint-agent 2026/05/29 10:00:00 hmac credential confirmed device=x credential=y"
         ) | Out-File -LiteralPath $script:tempLog -Encoding UTF8
-        Wait-ForCredentialConfirmed -LogPath $script:tempLog -TimeoutSeconds 2 -BaselineLength 0 | Should -BeTrue
+        Wait-ForCredentialConfirmed -LogPath $script:tempLog -TimeoutSeconds 2 -BaselineLength 0 | Should Be $true
     }
 
     It "returns false when degraded sentinel appears instead" {
@@ -55,11 +56,11 @@ Describe "Wait-ForCredentialConfirmed" {
             "endpoint-agent 2026/05/29 10:00:00 agent enrolled: device=x credential=y",
             "endpoint-agent 2026/05/29 10:00:00 hmac credential accepted (not persisted in this process)"
         ) | Out-File -LiteralPath $script:tempLog -Encoding UTF8
-        Wait-ForCredentialConfirmed -LogPath $script:tempLog -TimeoutSeconds 2 -BaselineLength 0 | Should -BeFalse
+        Wait-ForCredentialConfirmed -LogPath $script:tempLog -TimeoutSeconds 2 -BaselineLength 0 | Should Be $false
     }
 
     It "returns false on missing log within timeout" {
-        Wait-ForCredentialConfirmed -LogPath "C:\\does-not-exist.log" -TimeoutSeconds 1 -BaselineLength 0 | Should -BeFalse
+        Wait-ForCredentialConfirmed -LogPath "C:\\does-not-exist.log" -TimeoutSeconds 1 -BaselineLength 0 | Should Be $false
     }
 
     # Codex 019e7314 iter-1 P1.1: append-only false-positive guard.
@@ -75,7 +76,7 @@ Describe "Wait-ForCredentialConfirmed" {
         ) | Out-File -LiteralPath $script:tempLog -Encoding UTF8
         $baseline = (Get-Item -LiteralPath $script:tempLog).Length
         # Service restart appends no new content this time.
-        Wait-ForCredentialConfirmed -LogPath $script:tempLog -TimeoutSeconds 2 -BaselineLength $baseline | Should -BeFalse
+        Wait-ForCredentialConfirmed -LogPath $script:tempLog -TimeoutSeconds 2 -BaselineLength $baseline | Should Be $false
     }
 
     It "returns true when fresh sentinel appended above baseline" {
@@ -88,12 +89,55 @@ Describe "Wait-ForCredentialConfirmed" {
         # at offset > baseline.
         Add-Content -LiteralPath $script:tempLog -Value "endpoint-agent 2026/05/29 10:00:00 agent enrolled: device=new credential=new" -Encoding UTF8
         Add-Content -LiteralPath $script:tempLog -Value "endpoint-agent 2026/05/29 10:00:00 hmac credential confirmed device=new credential=new" -Encoding UTF8
-        Wait-ForCredentialConfirmed -LogPath $script:tempLog -TimeoutSeconds 2 -BaselineLength $baseline | Should -BeTrue
+        Wait-ForCredentialConfirmed -LogPath $script:tempLog -TimeoutSeconds 2 -BaselineLength $baseline | Should Be $true
     }
 }
 
 Import-InstallHelper -Name "Set-ServiceEnvironmentRegkey"
 Import-InstallHelper -Name "Remove-ServiceEnvironmentEntry"
+Import-InstallHelper -Name "Add-ServiceEnvironmentBaseVariables"
+
+Describe "Add-ServiceEnvironmentBaseVariables" {
+    It "adds the minimal non-secret OS environment needed by service child processes" {
+        $values = @{
+            "ENDPOINT_AGENT_API_URL" = "https://test.example.com/api/v1/endpoint-agent"
+        }
+
+        Add-ServiceEnvironmentBaseVariables -Values $values
+
+        $values["ENDPOINT_AGENT_API_URL"] | Should Be "https://test.example.com/api/v1/endpoint-agent"
+        $values["SystemRoot"] | Should Not BeNullOrEmpty
+        $values["windir"] | Should Be $values["SystemRoot"]
+        $values["ProgramData"] | Should Not BeNullOrEmpty
+        $values["TEMP"] | Should Not BeNullOrEmpty
+        $values["TMP"] | Should Be $values["TEMP"]
+
+        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        if (-not [string]::IsNullOrWhiteSpace($machinePath)) {
+            $values["Path"] | Should Be $machinePath
+        }
+    }
+
+    It "does not overwrite explicit service environment values" {
+        $values = @{
+            "Path" = "C:\CustomBin"
+            "SystemRoot" = "C:\CustomWindows"
+            "windir" = "C:\CustomWindows"
+            "ProgramData" = "D:\ProgramData"
+            "TEMP" = "D:\Temp"
+            "TMP" = "D:\Tmp"
+        }
+
+        Add-ServiceEnvironmentBaseVariables -Values $values
+
+        $values["Path"] | Should Be "C:\CustomBin"
+        $values["SystemRoot"] | Should Be "C:\CustomWindows"
+        $values["windir"] | Should Be "C:\CustomWindows"
+        $values["ProgramData"] | Should Be "D:\ProgramData"
+        $values["TEMP"] | Should Be "D:\Temp"
+        $values["TMP"] | Should Be "D:\Tmp"
+    }
+}
 
 Describe "Set-ServiceEnvironmentRegkey + Remove-ServiceEnvironmentEntry" {
     # Codex 019e7314 iter-1 P2: regkey helpers covered by Pester via
@@ -162,9 +206,9 @@ Describe "Set-ServiceEnvironmentRegkey + Remove-ServiceEnvironmentEntry" {
             "ENDPOINT_AGENT_LOG_DIR" = "C:\\Logs"
         }
         $got = (Get-ItemProperty -Path $script:fakeService -Name 'Environment').Environment
-        $got.Count | Should -Be 3
-        ($got -match "ENDPOINT_AGENT_API_URL=https://test.example.com").Count | Should -BeGreaterThan 0
-        ($got -match "ENDPOINT_AGENT_ENROLLMENT_TOKEN=test-token-abc").Count | Should -BeGreaterThan 0
+        $got.Count | Should Be 3
+        ($got -match "ENDPOINT_AGENT_API_URL=https://test.example.com").Count | Should BeGreaterThan 0
+        ($got -match "ENDPOINT_AGENT_ENROLLMENT_TOKEN=test-token-abc").Count | Should BeGreaterThan 0
     }
 
     It "skips empty values when building REG_MULTI_SZ" {
@@ -174,7 +218,7 @@ Describe "Set-ServiceEnvironmentRegkey + Remove-ServiceEnvironmentEntry" {
             "ENDPOINT_AGENT_SECRET" = $null
         }
         $got = (Get-ItemProperty -Path $script:fakeService -Name 'Environment').Environment
-        $got.Count | Should -Be 1
+        $got.Count | Should Be 1
     }
 
     It "removes only the specified token entry, preserving non-secret env" {
@@ -185,10 +229,10 @@ Describe "Set-ServiceEnvironmentRegkey + Remove-ServiceEnvironmentEntry" {
         }
         Remove-RegEnvKeyAt -Path $script:fakeService -Key "ENDPOINT_AGENT_ENROLLMENT_TOKEN"
         $got = (Get-ItemProperty -Path $script:fakeService -Name 'Environment').Environment
-        $got.Count | Should -Be 2
-        ($got -match "ENDPOINT_AGENT_ENROLLMENT_TOKEN").Count | Should -Be 0
-        ($got -match "ENDPOINT_AGENT_API_URL").Count | Should -BeGreaterThan 0
-        ($got -match "ENDPOINT_AGENT_LOG_DIR").Count | Should -BeGreaterThan 0
+        $got.Count | Should Be 2
+        ($got -match "ENDPOINT_AGENT_ENROLLMENT_TOKEN").Count | Should Be 0
+        ($got -match "ENDPOINT_AGENT_API_URL").Count | Should BeGreaterThan 0
+        ($got -match "ENDPOINT_AGENT_LOG_DIR").Count | Should BeGreaterThan 0
     }
 
     It "removes the Environment value entirely when last entry is stripped" {
@@ -197,6 +241,6 @@ Describe "Set-ServiceEnvironmentRegkey + Remove-ServiceEnvironmentEntry" {
         }
         Remove-RegEnvKeyAt -Path $script:fakeService -Key "ENDPOINT_AGENT_ENROLLMENT_TOKEN"
         $got = Get-ItemProperty -Path $script:fakeService -Name 'Environment' -ErrorAction SilentlyContinue
-        $got | Should -BeNullOrEmpty
+        $got | Should BeNullOrEmpty
     }
 }
