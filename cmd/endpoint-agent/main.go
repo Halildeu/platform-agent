@@ -261,13 +261,16 @@ func newAutoEnrollRunner(cfg config.Config, apiURLOverride string, logger *log.L
 	if cfg.UninstallCommandTimeout > 0 {
 		aeCfg.UninstallCommandTimeout = cfg.UninstallCommandTimeout
 	}
+	if cfg.SelfUpdateCommandTimeout > 0 {
+		aeCfg.SelfUpdateCommandTimeout = cfg.SelfUpdateCommandTimeout
+	}
 	aeCfg.CertFilter.SubjectSuffix = cfg.AutoEnrollCertSubjectSuffix
 	aeCfg.CertFilter.SANURIPrefix = cfg.AutoEnrollCertSANURIPrefix
 
 	certProvider := certstore.New()
 	configStore := dpapi.New(cfg.AutoEnrollConfigPath, nil)
 	tracker := state.NewTracker(state.StateStarting)
-	executor := commands.NewLocalExecutor(inventory.RuntimeCapabilities(), cfg.AgentVersion)
+	executor := newCommandExecutor(cfg)
 
 	return autoenroll.NewRunner(aeCfg, certProvider, registryReader, configStore, executor, tracker, logger)
 }
@@ -362,6 +365,20 @@ func newRunner(cfg config.Config, logger *log.Logger) (*app.Runner, error) {
 	// get the SCM-env-cache-immune restart path.
 	runner.CredStore = hmacstore.New("", nil)
 	return runner, nil
+}
+
+func newCommandExecutor(cfg config.Config) *commands.LocalExecutor {
+	return commands.NewPolicyAwareExecutor(
+		cfg.AgentVersion,
+		cfg.SelfUpdateCapabilityEnabled(),
+		commands.UpdateAgentStagerOptions{
+			AllowedHosts:        cfg.SelfUpdateAllowedHosts,
+			SignerThumbprints:   cfg.SelfUpdateSignerThumbprints,
+			AllowLabOnlySigning: cfg.SelfUpdateAllowLabOnlySigning,
+			MaxRedirects:        cfg.SelfUpdateMaxRedirects,
+			HardMaxBytes:        cfg.SelfUpdateHardMaxBytes,
+		},
+	)
 }
 
 func handleServiceCommand(args []string) {

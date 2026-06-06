@@ -2,11 +2,14 @@ package commands
 
 import (
 	"context"
+	"io"
+	"runtime"
 	"testing"
 	"time"
 
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
+	"platform-agent/internal/selfupdate"
 	"platform-agent/internal/winget"
 )
 
@@ -42,6 +45,56 @@ func installSoftwareSeam(t *testing.T, stub func(ctx context.Context, req winget
 	prev := installWinGetFn
 	installWinGetFn = stub
 	t.Cleanup(func() { installWinGetFn = prev })
+}
+
+func updateAgentStageSeam(t *testing.T, stub func(ctx context.Context, stager *selfupdate.Stager, payload selfupdate.UpdateAgentPayload, currentVersion string) selfupdate.StageResult) {
+	t.Helper()
+	prev := updateAgentStageFn
+	updateAgentStageFn = stub
+	t.Cleanup(func() { updateAgentStageFn = prev })
+}
+
+func updateAgentTestPayload() map[string]interface{} {
+	return map[string]interface{}{
+		"releaseId":               "release-1",
+		"channel":                 "stable",
+		"ring":                    "pilot",
+		"targetVersion":           "0.2.1",
+		"binaryUrl":               "https://objects.githubusercontent.com/releases/endpoint-agent.exe",
+		"claimedSha256":           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"claimedSignerThumbprint": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+		"signingTier":             "TRUSTED",
+		"maxBytes":                float64(104857600),
+	}
+}
+
+type fakeUpdateVerifier struct{}
+
+func (fakeUpdateVerifier) Verify(context.Context, string) (selfupdate.AuthenticodeEvidence, error) {
+	return selfupdate.AuthenticodeEvidence{
+		ChainValid:        true,
+		HasCodeSigningEKU: true,
+		SignerThumbprint:  "AABBCC",
+		CurrentTimeValid:  true,
+	}, nil
+}
+
+type fakeUpdateVersionReader struct{}
+
+func (fakeUpdateVersionReader) ReadVersion(context.Context, string) (string, error) {
+	return "0.2.1", nil
+}
+
+type fakeUpdateDownloader struct{}
+
+func (fakeUpdateDownloader) Download(context.Context, string, selfupdate.URLPolicy, int64, io.Writer) (int64, selfupdate.ErrorCode, string) {
+	return 0, "", ""
+}
+
+type fakeUpdateStaging struct{}
+
+func (fakeUpdateStaging) Commit(context.Context, string, string) (string, error) {
+	return "local-only", nil
 }
 
 // snapshotFromDetails extracts the inventory.Snapshot the executor
@@ -97,6 +150,174 @@ func TestLocalExecutorUnsupportedCommandReturnsUnsupported(t *testing.T) {
 	if result.Status != protocol.CommandStatusUnsupported {
 		t.Fatalf("status = %s, want %s", result.Status, protocol.CommandStatusUnsupported)
 	}
+}
+
+func TestLocalExecutorUpdateAgentStagesAndReturnsStructuredResult(t *testing.T) {
+	updateAgentStageSeam(t, func(_ context.Context, _ *selfupdate.Stager, payload selfupdate.UpdateAgentPayload, currentVersion string) selfupdate.StageResult {
+		if payload.TargetVersion != "0.2.1" {
+			t.Fatalf("targetVersion = %q", payload.TargetVersion)
+		}
+		if currentVersion != "0.1.0-dev" {
+			t.Fatalf("currentVersion = %q", currentVersion)
+		}
+		return selfupdate.StageResult{
+			StageStatus:            selfupdate.StageReady,
+			StagingID:              "0123456789abcdef0123456789abcdef",
+			ActivationPlanID:       "0123456789abcdef0123456789abcdef",
+			OldVersion:             currentVersion,
+			TargetVersion:          payload.TargetVersion,
+			ActualSha256:           "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			ActualSignerThumbprint: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+			SigningTier:            selfupdate.TierTrusted,
+			Reason:                 "verified and staged; awaiting activation",
+		}
+	})
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandUpdateAgent}, "0.1.0-dev")
+	executor.UpdateAgentStager = &selfupdate.Stager{}
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-update",
+		ClaimID:        "claim-update",
+		AttemptNumber:  1,
+		Type:           protocol.CommandUpdateAgent,
+		Reason:         "approved maintenance window",
+		Payload:        updateAgentTestPayload(),
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusSucceeded {
+		t.Fatalf("status = %s, want %s; summary=%q", result.Status, protocol.CommandStatusSucceeded, result.Summary)
+	}
+	if result.Summary != "UPDATE_AGENT STAGED_ACTIVATION_READY" {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+	update, ok := result.Details["update"].(selfupdate.StageResult)
+	if !ok {
+		t.Fatalf("update detail type = %T", result.Details["update"])
+	}
+	if update.StageStatus != selfupdate.StageReady || update.ActivationPlanID == "" {
+		t.Fatalf("unexpected update detail: %+v", update)
+	}
+}
+
+func TestLocalExecutorUpdateAgentFailedStageMapsFailed(t *testing.T) {
+	updateAgentStageSeam(t, func(context.Context, *selfupdate.Stager, selfupdate.UpdateAgentPayload, string) selfupdate.StageResult {
+		return selfupdate.Failed(selfupdate.ErrSignerNotAllowed, "verified signer not in local allowlist")
+	})
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandUpdateAgent}, "0.1.0-dev")
+	executor.UpdateAgentStager = &selfupdate.Stager{}
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-update",
+		ClaimID:        "claim-update",
+		AttemptNumber:  1,
+		Type:           protocol.CommandUpdateAgent,
+		Reason:         "approved maintenance window",
+		Payload:        updateAgentTestPayload(),
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusFailed {
+		t.Fatalf("status = %s, want FAILED", result.Status)
+	}
+	update := result.Details["update"].(selfupdate.StageResult)
+	if update.ErrorCode != selfupdate.ErrSignerNotAllowed {
+		t.Fatalf("errorCode = %q", update.ErrorCode)
+	}
+}
+
+func TestLocalExecutorUpdateAgentRequiresPayload(t *testing.T) {
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandUpdateAgent}, "0.1.0-dev")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-update",
+		ClaimID:        "claim-update",
+		AttemptNumber:  1,
+		Type:           protocol.CommandUpdateAgent,
+		Reason:         "approved maintenance window",
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusFailed {
+		t.Fatalf("status = %s, want FAILED", result.Status)
+	}
+	if result.Summary != "UPDATE_AGENT payload is empty" {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+}
+
+func TestLocalExecutorUpdateAgentNilStagerFailsClosed(t *testing.T) {
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandUpdateAgent}, "0.1.0-dev")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-update",
+		ClaimID:        "claim-update",
+		AttemptNumber:  1,
+		Type:           protocol.CommandUpdateAgent,
+		Reason:         "approved maintenance window",
+		Payload:        updateAgentTestPayload(),
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusFailed {
+		t.Fatalf("status = %s, want FAILED", result.Status)
+	}
+	update := result.Details["update"].(selfupdate.StageResult)
+	if update.ErrorCode != selfupdate.ErrStagingIO {
+		t.Fatalf("errorCode = %q, want %q", update.ErrorCode, selfupdate.ErrStagingIO)
+	}
+}
+
+func TestNewPolicyAwareExecutorDoesNotAdvertiseUpdateAgentWithoutRuntimeCollaborators(t *testing.T) {
+	executor := NewPolicyAwareExecutor("0.1.0-dev", true, UpdateAgentStagerOptions{
+		AllowedHosts:      []string{"github.com"},
+		SignerThumbprints: []string{"AABBCC"},
+		MaxRedirects:      5,
+		HardMaxBytes:      1000,
+	})
+
+	if hasExecutorCapability(executor, protocol.CommandUpdateAgent) {
+		t.Fatal("local policy without runtime verifier/staging collaborators must not advertise UPDATE_AGENT")
+	}
+	if executor.UpdateAgentStager != nil {
+		t.Fatal("runtime-incomplete policy must not wire an update stager")
+	}
+}
+
+func TestNewPolicyAwareExecutorCanWireUpdateAgentWhenRuntimeReady(t *testing.T) {
+	executor := NewPolicyAwareExecutor("0.1.0-dev", true, UpdateAgentStagerOptions{
+		AllowedHosts:      []string{"github.com"},
+		SignerThumbprints: []string{"AABBCC"},
+		MaxRedirects:      5,
+		HardMaxBytes:      1000,
+		Verifier:          fakeUpdateVerifier{},
+		VersionReader:     fakeUpdateVersionReader{},
+		Downloader:        fakeUpdateDownloader{},
+		Staging:           fakeUpdateStaging{},
+	})
+
+	if runtime.GOOS == "windows" && !hasExecutorCapability(executor, protocol.CommandUpdateAgent) {
+		t.Fatal("runtime-ready Windows agent should advertise UPDATE_AGENT")
+	}
+	if runtime.GOOS != "windows" && hasExecutorCapability(executor, protocol.CommandUpdateAgent) {
+		t.Fatal("non-Windows agent must not advertise UPDATE_AGENT even with test collaborators")
+	}
+	if executor.UpdateAgentStager == nil {
+		t.Fatal("runtime-ready options should wire an update stager")
+	}
+}
+
+func hasExecutorCapability(executor *LocalExecutor, target protocol.CommandType) bool {
+	for _, capability := range executor.Capabilities {
+		if capability == target {
+			return true
+		}
+	}
+	return false
 }
 
 // AG-025H — boolPayload mapping + COLLECT_INVENTORY wire shape (Codex

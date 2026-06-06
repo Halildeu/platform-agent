@@ -696,7 +696,15 @@ func RuntimeCapabilityReport() protocol.CapabilityReport {
 	}
 }
 
+type RuntimeCapabilityOptions struct {
+	EnableUpdateAgent bool
+}
+
 func RuntimeCapabilities() []protocol.CommandType {
+	return RuntimeCapabilitiesWithOptions(RuntimeCapabilityOptions{})
+}
+
+func RuntimeCapabilitiesWithOptions(opts RuntimeCapabilityOptions) []protocol.CommandType {
 	capabilities := []protocol.CommandType{
 		protocol.CommandCollectInventory,
 		protocol.CommandGetLoggedInUser,
@@ -727,6 +735,13 @@ func RuntimeCapabilities() []protocol.CommandType {
 			// dispatchable on this build (no forward-matrix).
 			protocol.CommandUninstallSoftware,
 		)
+		if opts.EnableUpdateAgent {
+			// AG-029 PR2: UPDATE_AGENT is opt-in because the command is
+			// sensitive and depends on local self-update trust policy
+			// (signer allowlist / URL allowlist / staging guardrails).
+			// Do not advertise it from a plain Windows build.
+			capabilities = append(capabilities, protocol.CommandUpdateAgent)
+		}
 	}
 	return capabilities
 }

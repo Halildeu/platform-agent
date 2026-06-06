@@ -52,7 +52,7 @@ type Runner struct {
 }
 
 func NewRunner(cfg config.Config, client *protocol.Client, logger *log.Logger) *Runner {
-	capabilities := inventory.RuntimeCapabilities()
+	executor := newExecutor(cfg)
 	// AG-038: register the live agent config so the self-diagnostics probe
 	// reports the REAL AgentVersion + a hash of the REAL APIURL (not the
 	// "unknown" placeholder). CredentialID is recorded for credential-presence
@@ -61,7 +61,7 @@ func NewRunner(cfg config.Config, client *protocol.Client, logger *log.Logger) *
 	return &Runner{
 		Config:       cfg,
 		Client:       client,
-		Executor:     commands.NewLocalExecutor(capabilities, cfg.AgentVersion),
+		Executor:     executor,
 		StateTracker: state.NewTracker(state.StateStarting),
 		Logger:       logger,
 	}
@@ -72,7 +72,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("protocol client is required")
 	}
 	if r.Executor == nil {
-		r.Executor = commands.NewLocalExecutor(inventory.RuntimeCapabilities(), r.Config.AgentVersion)
+		r.Executor = newExecutor(r.Config)
 	}
 	if r.StateTracker == nil {
 		r.StateTracker = state.NewTracker(state.StateStarting)
@@ -155,6 +155,10 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		if r.Config.UninstallCommandTimeout > 0 {
 			commandTimeout = r.Config.UninstallCommandTimeout
 		}
+	case protocol.CommandUpdateAgent:
+		if r.Config.SelfUpdateCommandTimeout > 0 {
+			commandTimeout = r.Config.SelfUpdateCommandTimeout
+		}
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
@@ -168,6 +172,20 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		r.logf("command %s detail: summary=%q details=%v", command.CommandID, result.Summary, result.Details)
 	}
 	return nil
+}
+
+func newExecutor(cfg config.Config) *commands.LocalExecutor {
+	return commands.NewPolicyAwareExecutor(
+		cfg.AgentVersion,
+		cfg.SelfUpdateCapabilityEnabled(),
+		commands.UpdateAgentStagerOptions{
+			AllowedHosts:        cfg.SelfUpdateAllowedHosts,
+			SignerThumbprints:   cfg.SelfUpdateSignerThumbprints,
+			AllowLabOnlySigning: cfg.SelfUpdateAllowLabOnlySigning,
+			MaxRedirects:        cfg.SelfUpdateMaxRedirects,
+			HardMaxBytes:        cfg.SelfUpdateHardMaxBytes,
+		},
+	)
 }
 
 func (r *Runner) RunLoop(ctx context.Context) error {
