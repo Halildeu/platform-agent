@@ -118,6 +118,10 @@ func configureSelfUpdateActivationHook(runner *app.Runner, cfg config.Config, lo
 		if stagingRoot == "" {
 			return fmt.Errorf("self-update staging root is empty")
 		}
+		helperExecutable, code, reason := selfupdate.PrepareActivationHelper(ctx, executable, stagingRoot, stage.ActivationPlanID, maxBytes)
+		if code != "" {
+			return fmt.Errorf("prepare self-update activation helper failed code=%s reason=%s", code, reason)
+		}
 		args := []string{
 			"self-update", "activate",
 			"--staging-root", stagingRoot,
@@ -129,7 +133,7 @@ func configureSelfUpdateActivationHook(runner *app.Runner, cfg config.Config, lo
 		if logger != nil {
 			logger.Printf("launching self-update activation helper activationPlanId=%s", stage.ActivationPlanID)
 		}
-		return startActivationHelperProcess(ctx, executable, args)
+		return startActivationHelperProcess(ctx, helperExecutable, args)
 	}
 }
 

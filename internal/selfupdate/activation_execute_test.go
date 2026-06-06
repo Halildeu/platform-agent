@@ -30,8 +30,12 @@ func TestActivatePreparedUpdateSwapsBinaryAndStartsService(t *testing.T) {
 	if highWater.version != plan.TargetVersion {
 		t.Fatalf("high-water version=%q", highWater.version)
 	}
-	if _, code, reason := LoadActivationOutcome(root, stagingID); code != "" || reason != "" {
+	persisted, code, reason := LoadActivationOutcome(root, stagingID)
+	if code != "" || reason != "" {
 		t.Fatalf("LoadActivationOutcome: code=%q reason=%q", code, reason)
+	}
+	if !persisted.EvidencePersisted {
+		t.Fatalf("persisted outcome should record evidencePersisted=true: %+v", persisted)
 	}
 }
 
