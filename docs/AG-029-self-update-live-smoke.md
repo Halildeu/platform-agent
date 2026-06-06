@@ -24,6 +24,7 @@ entry points:
 ```text
 endpoint-agent self-update preflight --staging-id <id>
 endpoint-agent self-update activate   --staging-id <id>
+endpoint-agent self-update status     --staging-id <id>
 ```
 
 The full backend-issued live chain still requires the backend command-create
@@ -174,13 +175,15 @@ The activation helper also persists a local-only path-free evidence file in the
 staging directory:
 
 ```powershell
-$OutcomePath = Join-Path $env:ProgramData "EndpointAgent\updates\$StagingId\activation-outcome.json"
-Copy-Item $OutcomePath "$EvidenceRoot\06b-activation-outcome.json"
+& $Agent self-update status --staging-id $StagingId |
+  Tee-Object -FilePath "$EvidenceRoot\06b-activation-outcome.json"
 ```
 
 `06b-activation-outcome.json` must carry the same bounded `status` family as
 `06-activation.json` and must not contain `C:\`, `Program Files`, or
-`ProgramData`. This file is support evidence only; it does not replace the
+`ProgramData`. The status command reads the local activation outcome by opaque
+staging id so the operator does not need to copy a `ProgramData` path into the
+evidence bundle. This file is support evidence only; it does not replace the
 post-activation service + backend heartbeat acceptance gates.
 
 ### 4.6 Post-activation proof
@@ -223,8 +226,8 @@ $StagingId = "<opaque-staging-id>"
   Tee-Object -FilePath "$EvidenceRoot\source-slice-preflight.json"
 & $Agent self-update activate --staging-id $StagingId --timeout 2m |
   Tee-Object -FilePath "$EvidenceRoot\source-slice-activation.json"
-$OutcomePath = Join-Path $env:ProgramData "EndpointAgent\updates\$StagingId\activation-outcome.json"
-Copy-Item $OutcomePath "$EvidenceRoot\source-slice-activation-outcome.json"
+& $Agent self-update status --staging-id $StagingId |
+  Tee-Object -FilePath "$EvidenceRoot\source-slice-activation-outcome.json"
 ```
 
 This mode must be reported as source-slice evidence only. Do not use it to

@@ -71,6 +71,62 @@ func TestRunSelfUpdateActivateRejectsInvalidStagingInput(t *testing.T) {
 	}
 }
 
+func TestRunSelfUpdateStatusReturnsPersistedPathFreeOutcome(t *testing.T) {
+	root := t.TempDir()
+	currentPath := filepath.Join(root, "current-agent.exe")
+	if err := os.WriteFile(currentPath, []byte("old-agent"), 0o600); err != nil {
+		t.Fatalf("write current binary: %v", err)
+	}
+	paths := writeActivationPlanForMainTest(t, root, "cmd-status-1", currentPath, []byte("new-agent"))
+	if code, reason := selfupdate.WriteActivationOutcome(paths, selfupdate.ActivationOutcome{
+		Status:           selfupdate.ActivationActivated,
+		ActivationPlanID: paths.StagingID,
+		TargetVersion:    "1.1.0",
+		NewSha256:        strings.Repeat("a", 64),
+		BackupSha256:     strings.Repeat("b", 64),
+		Reason:           `activated from C:\ProgramData\EndpointAgent\updates\cmd-status-1`,
+	}); code != "" {
+		t.Fatalf("WriteActivationOutcome: code=%q reason=%q", code, reason)
+	}
+
+	outcome, ok := runSelfUpdateStatus(selfUpdateStatusOptions{
+		StagingRoot: root,
+		StagingID:   paths.StagingID,
+	})
+
+	if !ok {
+		t.Fatalf("status should load persisted outcome: %+v", outcome)
+	}
+	if outcome.Status != selfupdate.ActivationActivated || outcome.ActivationPlanID != paths.StagingID {
+		t.Fatalf("unexpected status outcome: %+v", outcome)
+	}
+	raw, err := json.Marshal(outcome)
+	if err != nil {
+		t.Fatalf("marshal status outcome: %v", err)
+	}
+	if strings.Contains(string(raw), root) || strings.Contains(string(raw), currentPath) || strings.Contains(string(raw), "ProgramData") {
+		t.Fatalf("status outcome leaked local path: %s", raw)
+	}
+}
+
+func TestRunSelfUpdateStatusFailsWhenOutcomeMissing(t *testing.T) {
+	root := t.TempDir()
+	outcome, ok := runSelfUpdateStatus(selfUpdateStatusOptions{
+		StagingRoot: root,
+		StagingID:   "cmd-status-missing",
+	})
+
+	if ok {
+		t.Fatalf("missing outcome should fail")
+	}
+	if outcome.Status != selfupdate.ActivationFailed || outcome.ActivationPlanID != "cmd-status-missing" {
+		t.Fatalf("unexpected missing outcome: %+v", outcome)
+	}
+	if strings.Contains(outcome.Reason, root) || strings.Contains(outcome.Reason, string(os.PathSeparator)) {
+		t.Fatalf("reason should remain bounded and path-free: %q", outcome.Reason)
+	}
+}
+
 func TestRunSelfUpdatePreflightReturnsPathFreeReady(t *testing.T) {
 	root := t.TempDir()
 	currentPath := filepath.Join(root, "current-agent.exe")

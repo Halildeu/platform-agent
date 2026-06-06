@@ -277,7 +277,7 @@ Minimum acceptance evidence:
 1. backend-issued UPDATE_AGENT result reports STAGED_ACTIVATION_READY
 2. endpoint-agent self-update preflight returns path-free READY
 3. endpoint-agent self-update activate returns path-free ACTIVATED
-4. local activation-outcome.json is persisted and path-free
+4. endpoint-agent self-update status returns the persisted path-free activation outcome
 5. EndpointAgent service is running after activation
 6. next backend heartbeat reports AgentVersion == targetVersion
 7. audit/result rows correlate to the original command id and actor

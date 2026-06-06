@@ -439,6 +439,11 @@ type selfUpdatePreflightOptions struct {
 	MaxBytes    int64
 }
 
+type selfUpdateStatusOptions struct {
+	StagingRoot string
+	StagingID   string
+}
+
 type selfUpdatePreflightOutcome struct {
 	Status                 string                 `json:"status"`
 	ErrorCode              selfupdate.ErrorCode   `json:"errorCode,omitempty"`
@@ -502,6 +507,24 @@ func handleSelfUpdateCommand(args []string, cfg config.Config) {
 		if outcome.Status != "READY" {
 			os.Exit(1)
 		}
+	case "status":
+		flags := flag.NewFlagSet("self-update status", flag.ExitOnError)
+		opts := selfUpdateStatusOptions{
+			StagingRoot: cfg.SelfUpdateStagingRoot,
+		}
+		flags.StringVar(&opts.StagingRoot, "staging-root", opts.StagingRoot, "self-update staging root")
+		flags.StringVar(&opts.StagingID, "staging-id", "", "self-update staging identifier / command id")
+		if err := flags.Parse(args[1:]); err != nil {
+			log.Fatalf("self-update status parse failed: %v", err)
+		}
+
+		outcome, ok := runSelfUpdateStatus(opts)
+		if err := json.NewEncoder(os.Stdout).Encode(outcome); err != nil {
+			log.Fatalf("self-update status encode failed: %v", err)
+		}
+		if !ok {
+			os.Exit(1)
+		}
 	default:
 		printSelfUpdateUsage()
 		os.Exit(2)
@@ -509,7 +532,7 @@ func handleSelfUpdateCommand(args []string, cfg config.Config) {
 }
 
 func printSelfUpdateUsage() {
-	fmt.Fprintln(os.Stderr, "usage: endpoint-agent self-update <preflight|activate> --staging-id id [--staging-root path] [--max-bytes n]")
+	fmt.Fprintln(os.Stderr, "usage: endpoint-agent self-update <preflight|activate|status> --staging-id id [--staging-root path] [--max-bytes n]")
 }
 
 func runSelfUpdatePreflight(opts selfUpdatePreflightOptions) selfUpdatePreflightOutcome {
@@ -543,6 +566,18 @@ func runSelfUpdateActivate(ctx context.Context, opts selfUpdateActivateOptions, 
 		outcome.Reason = "activation applied; outcome persistence failed: " + string(code) + " " + reason
 	}
 	return outcome
+}
+
+func runSelfUpdateStatus(opts selfUpdateStatusOptions) (selfupdate.ActivationOutcome, bool) {
+	paths, code, reason := selfupdate.BuildStagingPaths(strings.TrimSpace(opts.StagingRoot), strings.TrimSpace(opts.StagingID))
+	if code != "" {
+		return selfupdate.ActivationOutcome{Status: selfupdate.ActivationFailed, Reason: reason}, false
+	}
+	outcome, code, reason := selfupdate.LoadActivationOutcome(paths)
+	if code != "" {
+		return selfupdate.ActivationOutcome{Status: selfupdate.ActivationFailed, ActivationPlanID: paths.StagingID, Reason: reason}, false
+	}
+	return outcome, true
 }
 
 type windowsServiceActivationController struct{}

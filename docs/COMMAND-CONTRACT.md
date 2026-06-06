@@ -2164,6 +2164,7 @@ commands:
 ```powershell
 endpoint-agent self-update preflight --staging-id <stagingId>
 endpoint-agent self-update activate --staging-id <stagingId> --timeout 2m
+endpoint-agent self-update status --staging-id <stagingId>
 ```
 
 Activation output uses `activationStatus`, not `stageStatus`:
@@ -2182,9 +2183,11 @@ Activation output uses `activationStatus`, not `stageStatus`:
 The CLI also persists the same path-free activation evidence as a local-only
 `activation-outcome.json` file in the protected staging directory. That file is
 for smoke/debug durability after service restart; it is not a backend wire
-payload and it must not contain filesystem paths. Backend acceptance still
-comes from the post-activation service proof and heartbeat/update-state
-evidence.
+payload and it must not contain filesystem paths. The `status` subcommand reads
+that file by opaque staging id and prints the same bounded activation outcome
+without requiring an operator to expose the local staging path in evidence
+collection. Backend acceptance still comes from the post-activation service
+proof and heartbeat/update-state evidence.
 
 Allowed activation statuses:
 

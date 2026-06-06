@@ -68,3 +68,54 @@ func TestWriteActivationOutcomeRejectsUnknownStatus(t *testing.T) {
 		t.Fatalf("activation outcome should not be written: %v", err)
 	}
 }
+
+func TestLoadActivationOutcomeReturnsSanitizedPathFreeEvidence(t *testing.T) {
+	withNoopStagedFileHardener(t)
+	root := t.TempDir()
+	paths, code, reason := BuildStagingPaths(root, "req-load-outcome")
+	if code != "" {
+		t.Fatalf("BuildStagingPaths: code=%q reason=%q", code, reason)
+	}
+	if err := os.MkdirAll(paths.Directory, 0o700); err != nil {
+		t.Fatalf("mkdir staging dir: %v", err)
+	}
+	if code, reason := WriteActivationOutcome(paths, ActivationOutcome{
+		Status:           ActivationActivated,
+		ActivationPlanID: paths.StagingID,
+		TargetVersion:    "1.2.3",
+		NewSha256:        strings.Repeat("a", 64),
+		BackupSha256:     strings.Repeat("b", 64),
+		Reason:           `activated from C:\ProgramData\EndpointAgent\updates\req-load-outcome`,
+	}); code != "" {
+		t.Fatalf("WriteActivationOutcome: code=%q reason=%q", code, reason)
+	}
+	outcome, code, reason := LoadActivationOutcome(paths)
+	if code != "" {
+		t.Fatalf("LoadActivationOutcome: code=%q reason=%q", code, reason)
+	}
+	if outcome.Status != ActivationActivated || outcome.ActivationPlanID != paths.StagingID {
+		t.Fatalf("outcome mismatch: %+v", outcome)
+	}
+	if strings.Contains(outcome.Reason, `C:\`) || strings.Contains(outcome.Reason, "ProgramData") {
+		t.Fatalf("loaded reason leaked local path: %q", outcome.Reason)
+	}
+}
+
+func TestLoadActivationOutcomeRejectsIdentityMismatch(t *testing.T) {
+	withNoopStagedFileHardener(t)
+	root := t.TempDir()
+	paths, code, reason := BuildStagingPaths(root, "req-load-mismatch")
+	if code != "" {
+		t.Fatalf("BuildStagingPaths: code=%q reason=%q", code, reason)
+	}
+	if err := os.MkdirAll(paths.Directory, 0o700); err != nil {
+		t.Fatalf("mkdir staging dir: %v", err)
+	}
+	if err := os.WriteFile(activationOutcomePath(paths), []byte(`{"status":"ACTIVATED","activationPlanId":"other"}`), 0o600); err != nil {
+		t.Fatalf("write mismatched outcome: %v", err)
+	}
+	_, code, _ = LoadActivationOutcome(paths)
+	if code != ErrActivationPlanWrite {
+		t.Fatalf("code=%q, want %q", code, ErrActivationPlanWrite)
+	}
+}

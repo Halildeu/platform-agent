@@ -58,6 +58,32 @@ func WriteActivationOutcome(paths StagingPaths, outcome ActivationOutcome) (Erro
 	return "", ""
 }
 
+// LoadActivationOutcome reads the local activation evidence file written by
+// WriteActivationOutcome. The returned outcome is sanitized again before it is
+// shown by CLI helpers, so a manually-edited file cannot leak path-like reason
+// text into smoke evidence.
+func LoadActivationOutcome(paths StagingPaths) (ActivationOutcome, ErrorCode, string) {
+	if code, reason := validateStagingPaths(paths); code != "" {
+		return ActivationOutcome{}, code, reason
+	}
+	raw, err := os.ReadFile(activationOutcomePath(paths))
+	if err != nil {
+		return ActivationOutcome{}, ErrStagingIO, "read activation outcome failed"
+	}
+	var outcome ActivationOutcome
+	if err := json.Unmarshal(raw, &outcome); err != nil {
+		return ActivationOutcome{}, ErrActivationPlanWrite, "decode activation outcome failed"
+	}
+	outcome = sanitizedActivationOutcome(outcome)
+	if !IsKnownActivationStatus(outcome.Status) {
+		return ActivationOutcome{}, ErrActivationPlanWrite, "activation outcome status is invalid"
+	}
+	if outcome.ActivationPlanID != "" && outcome.ActivationPlanID != paths.StagingID {
+		return ActivationOutcome{}, ErrActivationPlanWrite, "activation outcome identity mismatch"
+	}
+	return outcome, "", ""
+}
+
 func sanitizedActivationOutcome(outcome ActivationOutcome) ActivationOutcome {
 	outcome.Reason = sanitizeReason(outcome.Reason)
 	return outcome
