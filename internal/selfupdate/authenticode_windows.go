@@ -8,21 +8,19 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
-	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
 // authenticode_windows.go — AG-029 PR1b Windows Authenticode runtime
-// collaborator. WinVerifyTrust remains the authority for signature and
-// revocation decisions. Signer-certificate extraction uses Windows'
-// Get-AuthenticodeSignature cmdlet with a fixed script and argv path, avoiding
-// the unsafe WinTrust state-data pointer cast that go vet rejects.
+// collaborator. The verifier extracts bounded signature evidence; the trust
+// tier policy decides whether that evidence is acceptable. This split matters
+// for LAB_ONLY_EVIDENCE: a parseable self-signed lab signature is evidence with
+// ChainValid=false, while unsigned/tampered artifacts still fail closed.
 
 // WindowsAuthenticodeVerifier verifies a staged Windows binary and extracts the
 // signer facts consumed by the self-update policy. It is staging-only: it never
@@ -37,15 +35,30 @@ func (WindowsAuthenticodeVerifier) Verify(ctx context.Context, path string) (Aut
 	if strings.TrimSpace(path) == "" {
 		return AuthenticodeEvidence{}, errors.New("authenticode: path is empty")
 	}
-	cert, err := winVerifyPrimarySigner(ctx, path)
+	sig, err := queryAuthenticodeSignature(ctx, path)
 	if err != nil {
 		return AuthenticodeEvidence{}, err
+	}
+	chainValid, err := classifyAuthenticodeStatus(sig.Status, sig.StatusMessage)
+	if err != nil {
+		return AuthenticodeEvidence{}, err
+	}
+	if strings.TrimSpace(sig.CertRaw) == "" {
+		return AuthenticodeEvidence{}, errors.New("authenticode: signer certificate missing")
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sig.CertRaw))
+	if err != nil {
+		return AuthenticodeEvidence{}, fmt.Errorf("authenticode: signer certificate decode: %w", err)
+	}
+	cert, err := x509.ParseCertificate(raw)
+	if err != nil {
+		return AuthenticodeEvidence{}, fmt.Errorf("authenticode: parse primary signer certificate: %w", err)
 	}
 
 	now := time.Now()
 	sum := sha256.Sum256(cert.Raw)
 	return AuthenticodeEvidence{
-		ChainValid:        true,
+		ChainValid:        chainValid,
 		HasCodeSigningEKU: hasCodeSigningEKU(cert),
 		SignerThumbprint:  strings.ToUpper(hex.EncodeToString(sum[:])),
 		// Timestamp/countersignature extraction lands in a later hardening
@@ -57,79 +70,85 @@ func (WindowsAuthenticodeVerifier) Verify(ctx context.Context, path string) (Aut
 	}, nil
 }
 
-func winVerifyPrimarySigner(ctx context.Context, path string) (*x509.Certificate, error) {
-	if err := winVerifyTrust(path); err != nil {
-		return nil, err
-	}
-	return authenticodeSignerCertificate(ctx, path)
+type authenticodeSignatureFacts struct {
+	Status        string `json:"status"`
+	StatusMessage string `json:"statusMessage"`
+	CertRaw       string `json:"certRaw"`
 }
 
-func winVerifyTrust(path string) error {
-	utf16Path, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return fmt.Errorf("authenticode: utf16 path: %w", err)
-	}
-	fileInfo := &windows.WinTrustFileInfo{
-		Size:     uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})),
-		FilePath: utf16Path,
-	}
-	data := &windows.WinTrustData{
-		Size:                            uint32(unsafe.Sizeof(windows.WinTrustData{})),
-		UIChoice:                        windows.WTD_UI_NONE,
-		RevocationChecks:                windows.WTD_REVOKE_WHOLECHAIN,
-		UnionChoice:                     windows.WTD_CHOICE_FILE,
-		StateAction:                     windows.WTD_STATEACTION_VERIFY,
-		FileOrCatalogOrBlobOrSgnrOrCert: unsafe.Pointer(fileInfo),
-		ProvFlags: windows.WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT |
-			windows.WTD_DISABLE_MD2_MD4,
-	}
-	verifyErr := windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
-	data.StateAction = windows.WTD_STATEACTION_CLOSE
-	closeErr := windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
-	if verifyErr != nil {
-		return fmt.Errorf("authenticode: WinVerifyTrust: %w", verifyErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("authenticode: WinVerifyTrust close: %w", closeErr)
-	}
-	return nil
-}
-
-func authenticodeSignerCertificate(ctx context.Context, path string) (*x509.Certificate, error) {
+func queryAuthenticodeSignature(ctx context.Context, path string) (authenticodeSignatureFacts, error) {
 	psCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	const script = `$ErrorActionPreference = 'Stop'
-$sig = Get-AuthenticodeSignature -LiteralPath $args[0]
+$path = $env:ENDPOINT_AGENT_AUTHENTICODE_TARGET_PATH
+if ([string]::IsNullOrWhiteSpace($path)) { throw 'authenticode: target path missing' }
+$sig = Get-AuthenticodeSignature -LiteralPath $path
 if ($null -eq $sig) { throw 'authenticode: signature missing' }
-if ($sig.Status -ne 'Valid') { throw ('authenticode: signature status ' + [string]$sig.Status) }
 $cert = $sig.SignerCertificate
-if ($null -eq $cert) { throw 'authenticode: signer certificate missing' }
-[Convert]::ToBase64String($cert.RawData)`
+$certRaw = $null
+if ($null -ne $cert) { $certRaw = [Convert]::ToBase64String($cert.RawData) }
+[pscustomobject]@{
+  status = [string]$sig.Status
+  statusMessage = [string]$sig.StatusMessage
+  certRaw = $certRaw
+} | ConvertTo-Json -Compress`
 
 	cmd := exec.CommandContext(psCtx, "powershell.exe",
 		"-NoProfile",
 		"-NonInteractive",
 		"-ExecutionPolicy", "Bypass",
 		"-Command", script,
-		path,
 	)
+	cmd.Env = append(cmd.Environ(), "ENDPOINT_AGENT_AUTHENTICODE_TARGET_PATH="+path)
 	out, err := cmd.CombinedOutput()
 	if psCtx.Err() != nil {
-		return nil, fmt.Errorf("authenticode: signer certificate query timeout: %w", psCtx.Err())
+		return authenticodeSignatureFacts{}, fmt.Errorf("authenticode: signature query timeout: %w", psCtx.Err())
 	}
 	if err != nil {
-		return nil, fmt.Errorf("authenticode: signer certificate query: %w: %s", err, strings.TrimSpace(string(out)))
+		return authenticodeSignatureFacts{}, fmt.Errorf("authenticode: signature query: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(out)))
-	if err != nil {
-		return nil, fmt.Errorf("authenticode: signer certificate decode: %w", err)
+	var facts authenticodeSignatureFacts
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &facts); err != nil {
+		return authenticodeSignatureFacts{}, fmt.Errorf("authenticode: signature query decode: %w", err)
 	}
-	cert, err := x509.ParseCertificate(raw)
-	if err != nil {
-		return nil, fmt.Errorf("authenticode: parse primary signer certificate: %w", err)
+	return facts, nil
+}
+
+func classifyAuthenticodeStatus(status, message string) (bool, error) {
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	switch normalized {
+	case "valid":
+		return true, nil
+	case "notsigned", "hashmismatch":
+		return false, fmt.Errorf("authenticode: signature status %s", status)
+	case "nottrusted", "unknownerror":
+		if authenticodeMessageIsChainOnly(message) {
+			return false, nil
+		}
+		return false, fmt.Errorf("authenticode: signature status %s: %s", status, strings.TrimSpace(message))
+	default:
+		return false, fmt.Errorf("authenticode: unsupported signature status %s: %s", status, strings.TrimSpace(message))
 	}
-	return cert, nil
+}
+
+func authenticodeMessageIsChainOnly(message string) bool {
+	m := strings.ToLower(message)
+	chainTerms := []string{
+		"not trusted",
+		"untrusted",
+		"root certificate",
+		"certificate chain",
+		"terminated in a root",
+		"revocation",
+		"offline",
+	}
+	for _, term := range chainTerms {
+		if strings.Contains(m, term) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasCodeSigningEKU(cert *x509.Certificate) bool {

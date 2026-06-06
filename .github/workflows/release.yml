@@ -171,12 +171,14 @@ jobs:
           GOARCH: amd64
           TAG: ${{ needs.classify-release.outputs.tag }}
         run: |
+          bash scripts/build/windows-versioninfo.sh "$env:TAG" cmd/endpoint-agent/endpoint_agent_version
           $LDFLAGS = "-s -w -X platform-agent/internal/config.BuildVersion=$env:TAG"
           go build -trimpath -ldflags "$LDFLAGS" `
               -o dist/endpoint-agent.exe ./cmd/endpoint-agent
           if (-not (Test-Path dist/endpoint-agent.exe)) {
             throw "build did not produce dist/endpoint-agent.exe"
           }
+          Remove-Item -LiteralPath "cmd/endpoint-agent/endpoint_agent_version_windows_amd64.syso" -ErrorAction SilentlyContinue
 
       - name: Sign with ephemeral lab cert + post-sign hash
         id: sign-and-hash
