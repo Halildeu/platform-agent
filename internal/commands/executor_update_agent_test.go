@@ -24,6 +24,62 @@ func TestConfigureSelfUpdateAdvertisesUpdateAgentOnWindowsOnly(t *testing.T) {
 	}
 }
 
+func TestSelfUpdateCapabilityAdvertisableRequiresParseableAgentVersion(t *testing.T) {
+	cfg := testSelfUpdateConfig()
+	cases := []struct {
+		name         string
+		agentVersion string
+		want         bool
+	}{
+		{
+			name:         "release version",
+			agentVersion: "1.2.3",
+			want:         true,
+		},
+		{
+			name:         "v-prefix release version",
+			agentVersion: "v1.2.3",
+			want:         true,
+		},
+		{
+			name:         "dev prerelease version",
+			agentVersion: "0.1.0-dev",
+			want:         true,
+		},
+		{
+			name:         "unparseable dev label",
+			agentVersion: "dev",
+			want:         false,
+		},
+		{
+			name:         "unparseable sha label",
+			agentVersion: "ag029fix-71ac0f2",
+			want:         false,
+		},
+		{
+			name:         "blank version",
+			agentVersion: "",
+			want:         false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := selfUpdateCapabilityAdvertisable(cfg, tc.agentVersion, "windows")
+			if got != tc.want {
+				t.Fatalf("advertisable=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSelfUpdateCapabilityAdvertisableRequiresWindows(t *testing.T) {
+	cfg := testSelfUpdateConfig()
+	if selfUpdateCapabilityAdvertisable(cfg, "1.2.3", "linux") {
+		t.Fatal("self-update capability must not advertise outside Windows")
+	}
+}
+
 func TestLocalExecutorUpdateAgentRequiresReason(t *testing.T) {
 	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandUpdateAgent}, "1.0.0")
 	command := updateAgentTestCommand()

@@ -66,7 +66,8 @@ func NewLocalExecutor(capabilities []protocol.CommandType, agentVersion string) 
 
 func (e *LocalExecutor) ConfigureSelfUpdate(cfg SelfUpdateConfig) {
 	e.SelfUpdate = cfg
-	if cfg.Ready() && !hasCapability(e.Capabilities, protocol.CommandUpdateAgent) {
+	if selfUpdateCapabilityAdvertisable(cfg, e.AgentVersion, runtime.GOOS) &&
+		!hasCapability(e.Capabilities, protocol.CommandUpdateAgent) {
 		e.Capabilities = append(e.Capabilities, protocol.CommandUpdateAgent)
 	}
 }
@@ -298,13 +299,25 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 }
 
 func (cfg SelfUpdateConfig) Ready() bool {
+	return cfg.readyForRuntime(runtime.GOOS)
+}
+
+func (cfg SelfUpdateConfig) readyForRuntime(goos string) bool {
 	return cfg.Enabled &&
-		runtime.GOOS == "windows" &&
+		strings.EqualFold(goos, "windows") &&
 		strings.TrimSpace(cfg.StagingRoot) != "" &&
 		strings.TrimSpace(cfg.CurrentBinaryPath) != "" &&
 		strings.TrimSpace(cfg.ServiceName) != "" &&
 		len(cfg.AllowedHosts) > 0 &&
 		len(cfg.SignerThumbprints) > 0
+}
+
+func selfUpdateCapabilityAdvertisable(cfg SelfUpdateConfig, agentVersion, goos string) bool {
+	if !cfg.readyForRuntime(goos) {
+		return false
+	}
+	_, err := selfupdate.ParseVersion(agentVersion)
+	return err == nil
 }
 
 func (e *LocalExecutor) stageSelfUpdate(ctx context.Context, command protocol.AgentCommand) selfupdate.StageResult {
