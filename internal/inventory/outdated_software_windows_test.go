@@ -6,9 +6,40 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestOutdatedSoftwareArgsAreReadOnlyAndWinGet128Compatible(t *testing.T) {
+	args := outdatedSoftwareArgs()
+	joined := " " + strings.Join(args, " ") + " "
+	for _, forbidden := range []string{
+		" --include-returning-apps ",
+		" --all ",
+		" install ",
+		" uninstall ",
+		" source add ",
+		" source remove ",
+		" source reset ",
+		" source update ",
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("outdated software probe args contain forbidden token %q: %v", forbidden, args)
+		}
+	}
+	for _, required := range []string{
+		" upgrade ",
+		" --source ",
+		" winget ",
+		" --accept-source-agreements ",
+		" --disable-interactivity ",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("outdated software probe args missing required token %q: %v", required, args)
+		}
+	}
+}
 
 func TestProbeOutdatedSoftwareWinGetNotFound(t *testing.T) {
 	orig := runOutdatedSoftwareProbe

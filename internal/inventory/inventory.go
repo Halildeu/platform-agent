@@ -323,7 +323,7 @@ type CollectOptions struct {
 
 	// IncludeOutdatedSoftware gates the AG-036 outdated-software probe.
 	// When true, CollectWithOptions invokes ProbeOutdatedSoftware
-	// (winget --include-returning-apps on Windows; a Supported=false
+	// (winget upgrade list-only on Windows; a Supported=false
 	// stub on every other platform) and attaches the result to
 	// Snapshot.OutdatedSoftware. When false (the default), the probe
 	// is not invoked and the wire payload omits the field.
@@ -333,7 +333,7 @@ type CollectOptions struct {
 	// scan is being evaluated. Heartbeat / auto-enroll /
 	// lightweight inventory never opt in.
 	//
-	// HARD BOUNDARY: read-only. `winget upgrade --include-returning-apps`
+	// HARD BOUNDARY: read-only. `winget upgrade`
 	// never mutates any package state. Per-package wire fields are
 	// packageId + installedVersion + availableVersion (the two version
 	// strings are required for upgrade-eligibility detection and are
@@ -724,7 +724,7 @@ func RuntimeCapabilities() []protocol.CommandType {
 			// to mirror INSTALL_SOFTWARE — non-Windows executor stub
 			// would return FAILED_UNSUPPORTED_PLATFORM. Codex
 			// 019e8de2 iter-1 absorb: advertise only what is actually
-            // dispatchable on this build (no forward-matrix).
+			// dispatchable on this build (no forward-matrix).
 			protocol.CommandUninstallSoftware,
 		)
 	}

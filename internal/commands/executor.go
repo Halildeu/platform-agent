@@ -116,8 +116,8 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// so the AG-025H lightweight contract stays cheap. Backend
 			// opts in via COLLECT_INVENTORY's includeOutdatedSoftware
 			// payload bit for upgrade eligibility scanning.
-			// HARD BOUNDARY: read-only `winget upgrade
-			// --include-returning-apps`; never mutates package state.
+			// HARD BOUNDARY: read-only `winget upgrade`
+			// listing; never mutates package state.
 			IncludeOutdatedSoftware: boolPayload(command.Payload, "includeOutdatedSoftware"),
 			// AG-038 — opt-in agent self-diagnostics probe. Defaults to
 			// false so the AG-025H lightweight contract stays cheap.
