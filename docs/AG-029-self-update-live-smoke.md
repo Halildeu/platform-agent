@@ -207,6 +207,41 @@ Expected backend command payload shape after catalog resolution:
 The agent is still the authority for hash, signer, URL policy, tier policy,
 and version policy. Backend claims are evidence, not trust authority.
 
+### 4.3A Backend trust-field fail-closed preflight
+
+Before issuing the real update command, prove that the deployed BE-032
+dedicated dispatch endpoint rejects caller-supplied trust material. This is a
+required negative preflight for the live smoke, not an optional security note.
+
+Send a deliberately invalid request to
+`POST /api/v1/admin/endpoint-devices/{deviceId}/agent-updates` that includes
+catalog-controlled fields in the dispatch body:
+
+```json
+{
+  "releaseId": "endpoint-agent-1.2.3",
+  "idempotencyKey": "ag029-negative-trust-fields-001",
+  "reason": "AG-029 negative trust-field preflight",
+  "binaryUrl": "https://attacker.example.invalid/endpoint-agent.exe",
+  "claimedSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "claimedSignerThumbprint": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+  "signingTier": "TRUSTED"
+}
+```
+
+Expected result:
+
+```text
+HTTP 400
+```
+
+Reject the smoke if this request returns `200`, `201`, creates an
+`UPDATE_AGENT` command, or reaches service dispatch. The BE-032 source guard
+for this condition is the
+`createAgentUpdateRejectsCallerSuppliedTrustFields` controller regression test;
+the live environment still has to prove the deployed endpoint is carrying the
+same guard before the positive self-update command is allowed.
+
 ### 4.4 Wait for staged result
 
 Poll the backend command result until it reports:
