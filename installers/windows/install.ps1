@@ -241,9 +241,57 @@ function Set-AgentServiceHardening {
 # Windows SCM reads this on every service spawn and overlays it on the
 # inherited machine env block, side-stepping the SCM env block cache that
 # caused the 3-hour SRB-AIDENETIMPC live-rollout debug session
-# (Codex 019e7314). Tokens stored here are temporary (cleared by
+# (Codex 019e7314). Because this REG_MULTI_SZ becomes the effective service
+# process environment on some Windows builds, keep the minimal non-secret OS
+# variables needed by child processes, DNS and Windows APIs (Path/SystemRoot/
+# windir/ProgramData/TEMP/TMP). Tokens stored here are temporary (cleared by
 # Clear-ServiceEnvironmentToken after AG-026D's "hmac credential
 # confirmed" sentinel proves the credential persisted to DPAPI).
+function Add-ServiceEnvironmentBaseVariables {
+    param([hashtable]$Values)
+
+    $path = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if (-not [string]::IsNullOrWhiteSpace($path) -and -not $Values.ContainsKey("Path")) {
+        $Values["Path"] = $path
+    }
+
+    $systemRoot = [Environment]::GetEnvironmentVariable("SystemRoot", "Machine")
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = $env:SystemRoot
+    }
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = "C:\Windows"
+    }
+    if (-not $Values.ContainsKey("SystemRoot")) {
+        $Values["SystemRoot"] = $systemRoot
+    }
+    if (-not $Values.ContainsKey("windir")) {
+        $Values["windir"] = $systemRoot
+    }
+
+    $programData = [Environment]::GetEnvironmentVariable("ProgramData", "Machine")
+    if ([string]::IsNullOrWhiteSpace($programData)) {
+        $programData = $env:ProgramData
+    }
+    if ([string]::IsNullOrWhiteSpace($programData)) {
+        $programData = "C:\ProgramData"
+    }
+    if (-not $Values.ContainsKey("ProgramData")) {
+        $Values["ProgramData"] = $programData
+    }
+
+    $temp = [Environment]::GetEnvironmentVariable("TEMP", "Machine")
+    if ([string]::IsNullOrWhiteSpace($temp)) {
+        $temp = Join-Path $systemRoot "Temp"
+    }
+    if (-not $Values.ContainsKey("TEMP")) {
+        $Values["TEMP"] = $temp
+    }
+    if (-not $Values.ContainsKey("TMP")) {
+        $Values["TMP"] = $temp
+    }
+}
+
 function Set-ServiceEnvironmentRegkey {
     param(
         [string]$Name,
@@ -253,9 +301,16 @@ function Set-ServiceEnvironmentRegkey {
     if (-not (Test-Path -LiteralPath $servicePath)) {
         throw "Service registry key not found: $servicePath"
     }
-    $entries = @()
+    $merged = @{}
     foreach ($key in $Values.Keys) {
-        $v = $Values[$key]
+        $merged[$key] = $Values[$key]
+    }
+    if ($merged.Count -gt 0) {
+        Add-ServiceEnvironmentBaseVariables -Values $merged
+    }
+    $entries = @()
+    foreach ($key in $merged.Keys) {
+        $v = $merged[$key]
         if (-not [string]::IsNullOrWhiteSpace($v)) {
             $entries += "$key=$v"
         }
