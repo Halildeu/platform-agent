@@ -273,6 +273,9 @@ func TestLocalExecutorUpdateAgentNilStagerFailsClosed(t *testing.T) {
 }
 
 func TestNewPolicyAwareExecutorDoesNotAdvertiseUpdateAgentWithoutRuntimeCollaborators(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows default runtime collaborators are wired by AG-029 PR1b")
+	}
 	executor := NewPolicyAwareExecutor("0.1.0-dev", true, UpdateAgentStagerOptions{
 		AllowedHosts:      []string{"github.com"},
 		SignerThumbprints: []string{"AABBCC"},

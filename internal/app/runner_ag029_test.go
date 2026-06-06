@@ -1,6 +1,7 @@
 package app
 
 import (
+	"runtime"
 	"testing"
 
 	"platform-agent/internal/config"
@@ -30,6 +31,16 @@ func TestNewRunner_UpdateAgentCapabilityWaitsForRuntimeCollaborators(t *testing.
 	cfg.SelfUpdateSignerThumbprints = []string{"AABBCC"}
 
 	runner := NewRunner(cfg, nil, nil)
+
+	if runtime.GOOS == "windows" {
+		if !hasRunnerCapability(runner, protocol.CommandUpdateAgent) {
+			t.Fatal("Windows policy-ready agent should advertise UPDATE_AGENT once default runtime collaborators are wired")
+		}
+		if runner.Executor.UpdateAgentStager == nil {
+			t.Fatal("Windows policy-ready agent should wire an update stager")
+		}
+		return
+	}
 
 	if hasRunnerCapability(runner, protocol.CommandUpdateAgent) {
 		t.Fatal("local policy alone must not advertise UPDATE_AGENT until runtime verifier/staging collaborators are wired")

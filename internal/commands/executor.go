@@ -49,10 +49,13 @@ type UpdateAgentStagerOptions struct {
 	Verifier            selfupdate.AuthenticodeVerifier
 	VersionReader       selfupdate.PEVersionReader
 	Downloader          selfupdate.BinaryDownloader
+	HighWater           selfupdate.HighWaterStore
 	Staging             selfupdate.StagingStore
+	TempDir             string
 }
 
 func NewPolicyAwareExecutor(agentVersion string, selfUpdateLocalPolicyReady bool, updateOpts UpdateAgentStagerOptions) *LocalExecutor {
+	updateOpts = withDefaultUpdateAgentRuntime(updateOpts)
 	selfUpdateEnabled := selfUpdateLocalPolicyReady && updateOpts.RuntimeReady()
 	executor := NewLocalExecutor(inventory.RuntimeCapabilitiesWithOptions(inventory.RuntimeCapabilityOptions{
 		EnableUpdateAgent: selfUpdateEnabled,
@@ -82,6 +85,7 @@ func NewUpdateAgentStager(opts UpdateAgentStagerOptions) *selfupdate.Stager {
 		Verifier:      opts.Verifier,
 		VersionReader: opts.VersionReader,
 		Downloader:    opts.Downloader,
+		HighWater:     opts.HighWater,
 		Staging:       opts.Staging,
 		Allowlist: selfupdate.SignerAllowlist{
 			Thumbprints: opts.SignerThumbprints,
@@ -94,6 +98,7 @@ func NewUpdateAgentStager(opts UpdateAgentStagerOptions) *selfupdate.Stager {
 			MaxRedirects: opts.MaxRedirects,
 		},
 		HardMaxBytes: opts.HardMaxBytes,
+		TempDir:      opts.TempDir,
 	}
 }
 

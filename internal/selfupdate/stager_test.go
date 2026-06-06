@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -78,6 +79,16 @@ func (f *fakeStaging) Commit(_ context.Context, tempPath, stagingID string) (str
 		return "C:/ProgramData/agent/staged-x.bin", nil
 	}
 	return f.path, nil
+}
+
+type fakePreparingStaging struct {
+	fakeStaging
+	preparedDir string
+	prepErr     error
+}
+
+func (f *fakePreparingStaging) PrepareTempDir(_ context.Context) (string, error) {
+	return f.preparedDir, f.prepErr
 }
 
 // ---- harness ---------------------------------------------------------------
@@ -187,6 +198,25 @@ func TestStage_ExpectedHashGate(t *testing.T) {
 			t.Fatalf("matching expected hash should pass, got %q/%q", r.StageStatus, r.ErrorCode)
 		}
 	})
+}
+
+func TestStage_UsesPreparedTempDirWhenStagingStoreProvidesOne(t *testing.T) {
+	s, _, _ := newHappyStager(t)
+	prepared := t.TempDir()
+	staging := &fakePreparingStaging{preparedDir: prepared}
+	s.Staging = staging
+	s.TempDir = ""
+
+	r := s.Stage(context.Background(), happyPayload(), "1.0.0")
+	if r.StageStatus != StageReady {
+		t.Fatalf("want ready, got %q/%q", r.StageStatus, r.ErrorCode)
+	}
+	if staging.gotTemp == "" {
+		t.Fatal("staging did not receive temp path")
+	}
+	if !strings.HasPrefix(staging.gotTemp, prepared) {
+		t.Fatalf("temp path %q is not under prepared dir %q", staging.gotTemp, prepared)
+	}
 }
 
 // ---- gate-by-gate refusals -------------------------------------------------
