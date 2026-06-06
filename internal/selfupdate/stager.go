@@ -95,6 +95,7 @@ type Stager struct {
 	Downloader    BinaryDownloader
 	HighWater     HighWaterStore
 	Staging       StagingStore
+	PlanWriter    ActivationPlanWriter
 
 	// Allowlist is the LOCAL signer trust anchor — the ONLY "may I run this"
 	// authority (backend claims are never consulted).
@@ -125,6 +126,12 @@ type Stager struct {
 	// Empty in v1: the signature + signer-allowlist + version-bind are the
 	// authority, and the backend's claimedSha256 is audit-only (must-fix #1).
 	ExpectedHash string
+
+	// CurrentBinaryPath / ServiceName are local-only activation handoff inputs.
+	// They are persisted into ActivationPlan after the backend-safe StageResult
+	// evidence is available; they are never copied into StageResult.
+	CurrentBinaryPath string
+	ServiceName       string
 }
 
 // errStubVerifier is returned by the non-windows / unconfigured verifier.
@@ -248,7 +255,7 @@ func (s *Stager) Stage(ctx context.Context, payload UpdateAgentPayload, currentV
 	}
 	_ = stagedPath // local-only; intentionally NOT placed on the wire.
 
-	return StageResult{
+	ready := StageResult{
 		StageStatus:            StageReady,
 		StagingID:              stagingID,
 		ActivationPlanID:       stagingID,
@@ -259,6 +266,17 @@ func (s *Stager) Stage(ctx context.Context, payload UpdateAgentPayload, currentV
 		SigningTier:            payload.SigningTier,
 		Reason:                 "verified and staged; awaiting activation",
 	}
+	if s.PlanWriter != nil {
+		plan, code, reason := BuildActivationPlan(stagedPath, s.CurrentBinaryPath, s.ServiceName, ready)
+		if code != "" {
+			return Failed(code, reason)
+		}
+		if err := s.PlanWriter.WriteActivationPlan(ctx, plan); err != nil {
+			code, reason := activationPlanFailure(err)
+			return Failed(code, reason)
+		}
+	}
+	return ready
 }
 
 // readMaxSeen reads the activated-version high-water mark, treating a nil store

@@ -97,6 +97,12 @@ func (fakeUpdateStaging) Commit(context.Context, string, string) (string, error)
 	return "local-only", nil
 }
 
+type fakeActivationPlanWriter struct{}
+
+func (fakeActivationPlanWriter) WriteActivationPlan(context.Context, selfupdate.ActivationPlan) error {
+	return nil
+}
+
 // snapshotFromDetails extracts the inventory.Snapshot the executor
 // embedded in CommandResult.Details["inventory"]. The executor stores
 // the struct value (not the pointer); we type-assert so the AG-025H
@@ -301,6 +307,9 @@ func TestNewPolicyAwareExecutorCanWireUpdateAgentWhenRuntimeReady(t *testing.T) 
 		VersionReader:     fakeUpdateVersionReader{},
 		Downloader:        fakeUpdateDownloader{},
 		Staging:           fakeUpdateStaging{},
+		PlanWriter:        fakeActivationPlanWriter{},
+		CurrentBinaryPath: "/agent/current",
+		ServiceName:       "EndpointAgent",
 	})
 
 	if runtime.GOOS == "windows" && !hasExecutorCapability(executor, protocol.CommandUpdateAgent) {

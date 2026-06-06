@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -91,6 +92,16 @@ func (f *fakePreparingStaging) PrepareTempDir(_ context.Context) (string, error)
 	return f.preparedDir, f.prepErr
 }
 
+type capturePlanWriter struct {
+	plan ActivationPlan
+	err  error
+}
+
+func (c *capturePlanWriter) WriteActivationPlan(_ context.Context, plan ActivationPlan) error {
+	c.plan = plan
+	return c.err
+}
+
 // ---- harness ---------------------------------------------------------------
 
 const goodThumb = "AABBCCDDEEFF00112233445566778899AABBCCDD"
@@ -160,6 +171,24 @@ func TestStage_HappyPath(t *testing.T) {
 	}
 	if r.OldVersion != "1.0.0" || r.TargetVersion != "2.0.0" {
 		t.Errorf("version echo = %q -> %q", r.OldVersion, r.TargetVersion)
+	}
+}
+
+func TestStage_WritesActivationPlanWhenConfigured(t *testing.T) {
+	s, _, st := newHappyStager(t)
+	root := t.TempDir()
+	st.path = filepath.Join(root, "staged-"+fixedStagingID+".bin")
+	writer := &capturePlanWriter{}
+	s.PlanWriter = writer
+	s.CurrentBinaryPath = filepath.Join(root, "current.exe")
+	s.ServiceName = "EndpointAgent"
+
+	r := s.Stage(context.Background(), happyPayload(), "1.0.0")
+	if r.StageStatus != StageReady {
+		t.Fatalf("want ready, got %q/%q reason=%q", r.StageStatus, r.ErrorCode, r.Reason)
+	}
+	if writer.plan.ActivationPlanID != fixedStagingID || writer.plan.CurrentBinaryPath != s.CurrentBinaryPath {
+		t.Fatalf("activation plan not written correctly: %+v", writer.plan)
 	}
 }
 
