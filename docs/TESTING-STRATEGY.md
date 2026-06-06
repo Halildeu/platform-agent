@@ -277,10 +277,11 @@ Minimum acceptance evidence:
 1. backend-issued UPDATE_AGENT result reports STAGED_ACTIVATION_READY
 2. endpoint-agent self-update preflight returns path-free READY
 3. endpoint-agent self-update activate returns path-free ACTIVATED
-4. EndpointAgent service is running after activation
-5. next backend heartbeat reports AgentVersion == targetVersion
-6. audit/result rows correlate to the original command id and actor
-7. tampered staged binary preflight fails closed with HASH_MISMATCH
+4. local activation-outcome.json is persisted and path-free
+5. EndpointAgent service is running after activation
+6. next backend heartbeat reports AgentVersion == targetVersion
+7. audit/result rows correlate to the original command id and actor
+8. tampered staged binary preflight fails closed with HASH_MISMATCH
 ```
 
 If backend command-create PR4 is not available yet, only the source-slice

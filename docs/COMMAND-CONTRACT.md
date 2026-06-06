@@ -2179,6 +2179,13 @@ Activation output uses `activationStatus`, not `stageStatus`:
 }
 ```
 
+The CLI also persists the same path-free activation evidence as a local-only
+`activation-outcome.json` file in the protected staging directory. That file is
+for smoke/debug durability after service restart; it is not a backend wire
+payload and it must not contain filesystem paths. Backend acceptance still
+comes from the post-activation service proof and heartbeat/update-state
+evidence.
+
 Allowed activation statuses:
 
 ```text

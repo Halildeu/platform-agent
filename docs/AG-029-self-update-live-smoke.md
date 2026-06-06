@@ -60,6 +60,7 @@ New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
 | Staging result | backend command result `details.update` | `stageStatus=STAGED_ACTIVATION_READY`; includes opaque `stagingId` + `activationPlanId`; no filesystem path |
 | Preflight | `self-update preflight` JSON | `status=READY`, `currentBinaryPresent=true`, `stagedBinaryVerified=true`; no filesystem path |
 | Activation | `self-update activate` JSON | `status=ACTIVATED` or a reviewed rollback status; no filesystem path |
+| Durable activation evidence | local `activation-outcome.json` | Same bounded activation status persisted in staging dir; no filesystem path |
 | Post-activation service | service state + process | service running after activation |
 | Backend acceptance | heartbeat or update-state | `AgentVersion == targetVersion` after activation |
 | Audit | command/audit rows | request, staging result, activation/update-state and actor evidence correlated |
@@ -169,6 +170,19 @@ Accept only `status=ACTIVATED` for the primary green path. If the outcome is
 `ROLLED_BACK`, attach the JSON and service logs; treat it as rollback evidence,
 not as a successful update.
 
+The activation helper also persists a local-only path-free evidence file in the
+staging directory:
+
+```powershell
+$OutcomePath = Join-Path $env:ProgramData "EndpointAgent\updates\$StagingId\activation-outcome.json"
+Copy-Item $OutcomePath "$EvidenceRoot\06b-activation-outcome.json"
+```
+
+`06b-activation-outcome.json` must carry the same bounded `status` family as
+`06-activation.json` and must not contain `C:\`, `Program Files`, or
+`ProgramData`. This file is support evidence only; it does not replace the
+post-activation service + backend heartbeat acceptance gates.
+
 ### 4.6 Post-activation proof
 
 ```powershell
@@ -209,6 +223,8 @@ $StagingId = "<opaque-staging-id>"
   Tee-Object -FilePath "$EvidenceRoot\source-slice-preflight.json"
 & $Agent self-update activate --staging-id $StagingId --timeout 2m |
   Tee-Object -FilePath "$EvidenceRoot\source-slice-activation.json"
+$OutcomePath = Join-Path $env:ProgramData "EndpointAgent\updates\$StagingId\activation-outcome.json"
+Copy-Item $OutcomePath "$EvidenceRoot\source-slice-activation-outcome.json"
 ```
 
 This mode must be reported as source-slice evidence only. Do not use it to
@@ -264,7 +280,7 @@ open a source follow-up; do not publish the raw artifact.
 Allowed:
 
 - "AG-029 staging source path is verified."
-- "AG-029 preflight/activation helper produced path-free evidence."
+- "AG-029 preflight/activation helper produced path-free stdout and persisted outcome evidence."
 - "AG-029 full backend-issued live smoke passed on device `<hostname>`."
 
 Not allowed unless all gates above are present:
