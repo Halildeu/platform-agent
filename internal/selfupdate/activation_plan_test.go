@@ -121,6 +121,50 @@ func TestLoadActivationPlanAcceptsPowerShellUTF8BOM(t *testing.T) {
 	}
 }
 
+func TestPrepareActivationHelperCopiesDistinctExecutable(t *testing.T) {
+	root := t.TempDir()
+	stagingID := "0123456789abcdef0123456789abcdef"
+	executablePath := filepath.Join(root, "endpoint-agent.exe")
+	payload := []byte("current helper binary")
+	if err := os.WriteFile(executablePath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	helperPath, code, reason := PrepareActivationHelper(context.Background(), executablePath, root, stagingID, 1024)
+	if code != "" || reason != "" {
+		skipIfActivationPlanHardenUnavailable(t, activationPlanError{code: code, reason: reason})
+		t.Fatalf("PrepareActivationHelper: code=%q reason=%q", code, reason)
+	}
+	if sameCleanPath(helperPath, executablePath) {
+		t.Fatalf("helper path overlaps executable: %s", helperPath)
+	}
+	if filepath.Base(helperPath) != "activation-helper-"+stagingID+".exe" {
+		t.Fatalf("helper path=%q", helperPath)
+	}
+	got, err := os.ReadFile(helperPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("helper payload=%q", got)
+	}
+}
+
+func TestPrepareActivationHelperRejectsExistingTarget(t *testing.T) {
+	root := t.TempDir()
+	stagingID := "0123456789abcdef0123456789abcdef"
+	executablePath := filepath.Join(root, "endpoint-agent.exe")
+	if err := os.WriteFile(executablePath, []byte("current"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	existing := activationHelperNameFor(root, stagingID)
+	if err := os.WriteFile(existing, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, code, _ := PrepareActivationHelper(context.Background(), executablePath, root, stagingID, 1024); code != ErrStagingIO {
+		t.Fatalf("code=%q, want STAGING_IO_FAILED", code)
+	}
+}
+
 func readyStageForPlan(stagingID, sha string) StageResult {
 	return StageResult{
 		StageStatus:            StageReady,
@@ -145,7 +189,7 @@ func writeActivationPlanOrSkip(t *testing.T, plan ActivationPlan) {
 
 func skipIfActivationPlanHardenUnavailable(t *testing.T, err error) {
 	t.Helper()
-	if runtime.GOOS == "windows" && strings.Contains(err.Error(), "harden activation") {
+	if runtime.GOOS == "windows" && (strings.Contains(err.Error(), "harden activation") || strings.Contains(err.Error(), "harden binary")) {
 		t.Skipf("Windows activation plan hardening requires elevated/SYSTEM context: %v", err)
 	}
 }

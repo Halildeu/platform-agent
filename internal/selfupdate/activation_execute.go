@@ -79,14 +79,15 @@ func ActivatePreparedUpdate(ctx context.Context, root, stagingID string, maxByte
 		ServiceRunningVerified: true,
 		Reason:                 "activation applied",
 	}
-	if err := WriteActivationOutcome(ctx, root, stagingID, out); err != nil {
+	persistedOut := out
+	persistedOut.EvidencePersisted = true
+	if err := WriteActivationOutcome(ctx, root, stagingID, persistedOut); err != nil {
 		out.Status = ActivationFailed
 		out.ServiceRunningVerified = true
 		out.Reason = "activation applied but evidence persistence failed"
 		return out
 	}
-	out.EvidencePersisted = true
-	return out
+	return persistedOut
 }
 
 func WriteActivationOutcome(ctx context.Context, root, stagingID string, outcome ActivationOutcome) error {
@@ -167,11 +168,27 @@ func copyBinaryWithExpectedHash(sourcePath, targetPath, expectedSha string, maxB
 	if int64(len(raw)) > maxBytes && maxBytes > 0 {
 		return HashResult{Bytes: int64(len(raw))}, ErrDownloadTooLarge, "binary exceeded maxBytes"
 	}
-	if err := os.WriteFile(targetPath, raw, 0o600); err != nil {
+	dst, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return HashResult{}, ErrStagingIO, "write binary temp failed"
 	}
+	cleanup := func() { _ = os.Remove(targetPath) }
+	if _, err := dst.Write(raw); err != nil {
+		_ = dst.Close()
+		cleanup()
+		return HashResult{}, ErrStagingIO, "write binary temp failed"
+	}
+	if err := dst.Sync(); err != nil {
+		_ = dst.Close()
+		cleanup()
+		return HashResult{}, ErrStagingIO, "fsync binary temp failed"
+	}
+	if err := dst.Close(); err != nil {
+		cleanup()
+		return HashResult{}, ErrStagingIO, "close binary temp failed"
+	}
 	if err := hardenActivationArtifact(targetPath); err != nil {
-		_ = os.Remove(targetPath)
+		cleanup()
 		return HashResult{}, ErrStagingIO, "harden binary temp failed"
 	}
 	return sourceHash, "", ""

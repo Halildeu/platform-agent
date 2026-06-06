@@ -65,6 +65,37 @@ func activationBackupNameFor(root, stagingID string) string {
 	return filepath.Join(root, "rollback-"+stagingID+".bin")
 }
 
+func activationHelperNameFor(root, stagingID string) string {
+	return filepath.Join(root, "activation-helper-"+stagingID+".exe")
+}
+
+// PrepareActivationHelper copies the currently running agent binary into the
+// hardened staging root so the helper process does not lock the service binary
+// it is about to replace on Windows.
+func PrepareActivationHelper(ctx context.Context, executablePath, root, stagingID string, maxBytes int64) (string, ErrorCode, string) {
+	if err := ctx.Err(); err != nil {
+		return "", ErrStagingIO, "activation helper preparation canceled"
+	}
+	executablePath = strings.TrimSpace(executablePath)
+	root = strings.TrimSpace(root)
+	if executablePath == "" || root == "" || !validStagingID(stagingID) {
+		return "", ErrActivationPlanWrite, "activation helper inputs are invalid"
+	}
+	helperPath := activationHelperNameFor(filepath.Clean(root), stagingID)
+	if sameCleanPath(executablePath, helperPath) {
+		return "", ErrActivationPlanWrite, "activation helper path overlaps executable"
+	}
+	if _, err := os.Lstat(helperPath); err == nil {
+		return "", ErrStagingIO, "activation helper target already exists"
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", ErrStagingIO, "activation helper target check failed"
+	}
+	if _, code, reason := copyBinaryWithExpectedHash(executablePath, helperPath, "", maxBytes); code != "" {
+		return "", code, "activation helper copy failed: " + reason
+	}
+	return helperPath, "", ""
+}
+
 // BuildActivationPlan converts a successful StageResult into the local helper
 // contract. It rejects non-ready staging outcomes and mismatched identifiers.
 func BuildActivationPlan(stagedPath, currentBinaryPath, serviceName string, ready StageResult) (ActivationPlan, ErrorCode, string) {
