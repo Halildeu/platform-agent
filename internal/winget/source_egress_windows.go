@@ -22,7 +22,7 @@ import (
 func DetectSourceEgress(now time.Time) SourceEgressReadiness {
 	_ = now
 	return RunSourceEgressPreflight(SourceEgressOptions{
-		Locator: defaultLocator,
+		Locator: LocateExecutable,
 		Execute: defaultExecutor,
 		Timeout: DefaultSourceEgressTimeout * time.Second,
 		Now:     time.Now,

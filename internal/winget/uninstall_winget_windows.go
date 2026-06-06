@@ -22,7 +22,7 @@ import (
 // Phase 1b follow-up gate already rejects at propose/approve).
 func UninstallWinGet(ctx context.Context, req UninstallRequest) UninstallResult {
 	opts := UninstallOptions{
-		Locator:         defaultLocator,
+		Locator:         LocateExecutable,
 		Probe:           windowsUninstallProbe,
 		UninstallRunner: windowsUninstallRunner,
 		Timeout:         DefaultUninstallTimeout,
