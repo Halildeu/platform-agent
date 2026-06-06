@@ -73,20 +73,18 @@ func TestRunSelfUpdateActivateRejectsInvalidStagingInput(t *testing.T) {
 
 func TestRunSelfUpdateStatusReturnsPersistedPathFreeOutcome(t *testing.T) {
 	root := t.TempDir()
-	currentPath := filepath.Join(root, "current-agent.exe")
-	if err := os.WriteFile(currentPath, []byte("old-agent"), 0o600); err != nil {
-		t.Fatalf("write current binary: %v", err)
+	paths, code, reason := selfupdate.BuildStagingPaths(root, "cmd-status-1")
+	if code != "" {
+		t.Fatalf("BuildStagingPaths: code=%q reason=%q", code, reason)
 	}
-	paths := writeActivationPlanForMainTest(t, root, "cmd-status-1", currentPath, []byte("new-agent"))
-	if code, reason := selfupdate.WriteActivationOutcome(paths, selfupdate.ActivationOutcome{
-		Status:           selfupdate.ActivationActivated,
-		ActivationPlanID: paths.StagingID,
-		TargetVersion:    "1.1.0",
-		NewSha256:        strings.Repeat("a", 64),
-		BackupSha256:     strings.Repeat("b", 64),
-		Reason:           `activated from C:\ProgramData\EndpointAgent\updates\cmd-status-1`,
-	}); code != "" {
-		t.Fatalf("WriteActivationOutcome: code=%q reason=%q", code, reason)
+	if err := os.MkdirAll(paths.Directory, 0o700); err != nil {
+		t.Fatalf("mkdir staging dir: %v", err)
+	}
+	rawOutcome := `{"status":"ACTIVATED","activationPlanId":"cmd-status-1","targetVersion":"1.1.0","newSha256":"` +
+		strings.Repeat("a", 64) + `","backupSha256":"` + strings.Repeat("b", 64) +
+		`","reason":"activated from C:\\ProgramData\\EndpointAgent\\updates\\cmd-status-1"}`
+	if err := os.WriteFile(filepath.Join(paths.Directory, "activation-outcome.json"), []byte(rawOutcome), 0o600); err != nil {
+		t.Fatalf("write activation outcome: %v", err)
 	}
 
 	outcome, ok := runSelfUpdateStatus(selfUpdateStatusOptions{
@@ -104,7 +102,7 @@ func TestRunSelfUpdateStatusReturnsPersistedPathFreeOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal status outcome: %v", err)
 	}
-	if strings.Contains(string(raw), root) || strings.Contains(string(raw), currentPath) || strings.Contains(string(raw), "ProgramData") {
+	if strings.Contains(string(raw), root) || strings.Contains(string(raw), "ProgramData") {
 		t.Fatalf("status outcome leaked local path: %s", raw)
 	}
 }
