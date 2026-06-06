@@ -76,8 +76,8 @@ New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
 | Staging result | backend command result `details.update` | `stageStatus=STAGED_ACTIVATION_READY`; includes opaque `stagingId` + `activationPlanId`; no filesystem path |
 | Preflight | `self-update preflight` JSON | `status=READY`, `currentBinaryPresent=true`, `stagedBinaryVerified=true`; no filesystem path |
 | Helper launch | runner log or helper-start outcome | Optional `ACTIVATION_HELPER_STARTED`; support evidence only, not green acceptance |
-| Activation | `self-update activate` JSON | `status=ACTIVATED` or a reviewed rollback status; no filesystem path |
-| Durable activation evidence | local `activation-outcome.json` | Same bounded activation status persisted in staging dir; no filesystem path |
+| Activation | `self-update activate` JSON | `status=ACTIVATED`, `serviceRunningVerified=true`, or a reviewed rollback status; no filesystem path |
+| Durable activation evidence | local `activation-outcome.json` | Same bounded activation status and `serviceRunningVerified` value persisted in staging dir; no filesystem path |
 | Post-activation service | service state + process | service running after activation |
 | Backend acceptance | heartbeat or update-state | `AgentVersion == targetVersion` after activation |
 | Audit | command/audit rows | request, staging result, activation/update-state and actor evidence correlated |
@@ -183,9 +183,9 @@ or a service-safe helper process, not from inside the running service process.
   Tee-Object -FilePath "$EvidenceRoot\06-activation.json"
 ```
 
-Accept only `status=ACTIVATED` for the primary green path. If the outcome is
-`ROLLED_BACK`, attach the JSON and service logs; treat it as rollback evidence,
-not as a successful update.
+Accept only `status=ACTIVATED` and `serviceRunningVerified=true` for the
+primary green path. If the outcome is `ROLLED_BACK`, attach the JSON and
+service logs; treat it as rollback evidence, not as a successful update.
 
 The activation helper also persists a local-only path-free evidence file in the
 staging directory:
@@ -195,12 +195,13 @@ staging directory:
   Tee-Object -FilePath "$EvidenceRoot\06b-activation-outcome.json"
 ```
 
-`06b-activation-outcome.json` must carry the same bounded `status` family as
-`06-activation.json` and must not contain `C:\`, `Program Files`, or
-`ProgramData`. The status command reads the local activation outcome by opaque
-staging id so the operator does not need to copy a `ProgramData` path into the
-evidence bundle. This file is support evidence only; it does not replace the
-post-activation service + backend heartbeat acceptance gates.
+`06b-activation-outcome.json` must carry the same bounded `status` family and
+`serviceRunningVerified` value as `06-activation.json` and must not contain
+`C:\`, `Program Files`, or `ProgramData`. The status command reads the local
+activation outcome by opaque staging id so the operator does not need to copy a
+`ProgramData` path into the evidence bundle. This file is support evidence
+only; it does not replace the post-activation service + backend heartbeat
+acceptance gates.
 
 ### 4.6 Post-activation proof
 

@@ -21,12 +21,13 @@ type ActivationServiceController interface {
 // uses ActivationStatus rather than StageStatus because this happens after the
 // staging command result has already been posted.
 type ActivationOutcome struct {
-	Status           ActivationStatus `json:"status"`
-	ActivationPlanID string           `json:"activationPlanId,omitempty"`
-	TargetVersion    string           `json:"targetVersion,omitempty"`
-	NewSha256        string           `json:"newSha256,omitempty"`
-	BackupSha256     string           `json:"backupSha256,omitempty"`
-	Reason           string           `json:"reason,omitempty"`
+	Status                 ActivationStatus `json:"status"`
+	ActivationPlanID       string           `json:"activationPlanId,omitempty"`
+	TargetVersion          string           `json:"targetVersion,omitempty"`
+	NewSha256              string           `json:"newSha256,omitempty"`
+	BackupSha256           string           `json:"backupSha256,omitempty"`
+	ServiceRunningVerified bool             `json:"serviceRunningVerified,omitempty"`
+	Reason                 string           `json:"reason,omitempty"`
 }
 
 // ActivatePreparedUpdate performs the service-safe activation sequence for an
@@ -57,12 +58,13 @@ func ActivatePreparedUpdate(ctx context.Context, paths StagingPaths, maxBytes in
 		return rollbackAfterActivationFailure(ctx, service, rollbackPlan, rollbackReady, "start service failed", maxBytes)
 	}
 	return ActivationOutcome{
-		Status:           ActivationActivated,
-		ActivationPlanID: rollbackPlan.ActivationPlanID,
-		TargetVersion:    rollbackPlan.TargetVersion,
-		NewSha256:        newHash.ActualSha256,
-		BackupSha256:     rollbackReady.BackupSha256,
-		Reason:           "activation applied",
+		Status:                 ActivationActivated,
+		ActivationPlanID:       rollbackPlan.ActivationPlanID,
+		TargetVersion:          rollbackPlan.TargetVersion,
+		NewSha256:              newHash.ActualSha256,
+		BackupSha256:           rollbackReady.BackupSha256,
+		ServiceRunningVerified: true,
+		Reason:                 "activation applied",
 	}
 }
 
@@ -74,11 +76,12 @@ func rollbackAfterActivationFailure(ctx context.Context, service ActivationServi
 		return activationFailed(plan.ActivationPlanID, plan.TargetVersion, readiness.BackupSha256, "rollback start failed")
 	}
 	return ActivationOutcome{
-		Status:           ActivationRolledBack,
-		ActivationPlanID: plan.ActivationPlanID,
-		TargetVersion:    plan.TargetVersion,
-		BackupSha256:     readiness.BackupSha256,
-		Reason:           sanitizeReason(reason + "; rollback restored"),
+		Status:                 ActivationRolledBack,
+		ActivationPlanID:       plan.ActivationPlanID,
+		TargetVersion:          plan.TargetVersion,
+		BackupSha256:           readiness.BackupSha256,
+		ServiceRunningVerified: true,
+		Reason:                 sanitizeReason(reason + "; rollback restored"),
 	}
 }
 

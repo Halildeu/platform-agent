@@ -25,7 +25,7 @@ func TestActivatePreparedUpdateSwapsBinaryAndStartsService(t *testing.T) {
 	svc := &fakeActivationService{}
 	outcome := ActivatePreparedUpdate(context.Background(), paths, 1024, svc)
 
-	if outcome.Status != ActivationActivated || outcome.ActivationPlanID != plan.ActivationPlanID || outcome.NewSha256 != plan.ActualSha256 {
+	if outcome.Status != ActivationActivated || outcome.ActivationPlanID != plan.ActivationPlanID || outcome.NewSha256 != plan.ActualSha256 || !outcome.ServiceRunningVerified {
 		t.Fatalf("outcome=%+v", outcome)
 	}
 	if got := readFileString(t, plan.CurrentBinaryPath); got != string(stagedPayload) {
@@ -57,7 +57,7 @@ func TestActivatePreparedUpdateRollsBackWhenStartFails(t *testing.T) {
 	svc := &fakeActivationService{failFirstStart: true}
 	outcome := ActivatePreparedUpdate(context.Background(), paths, 1024, svc)
 
-	if outcome.Status != ActivationRolledBack || outcome.ActivationPlanID != plan.ActivationPlanID {
+	if outcome.Status != ActivationRolledBack || outcome.ActivationPlanID != plan.ActivationPlanID || !outcome.ServiceRunningVerified {
 		t.Fatalf("outcome=%+v", outcome)
 	}
 	if got := readFileString(t, plan.CurrentBinaryPath); got != string(currentPayload) {
