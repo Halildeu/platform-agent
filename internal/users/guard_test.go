@@ -18,6 +18,19 @@ func TestGuardReservedUsername_DeniesReservedAndSID(t *testing.T) {
 	}
 }
 
+func TestGuardProtectedRID(t *testing.T) {
+	for _, rid := range []uint32{500, 501, 502, 503, 504} {
+		if err := GuardProtectedRID(rid); err == nil {
+			t.Errorf("GuardProtectedRID(%d) = nil; want refusal (reserved built-in RID)", rid)
+		}
+	}
+	for _, rid := range []uint32{499, 505, 512, 1000, 1001, 1234, 0} {
+		if err := GuardProtectedRID(rid); err != nil {
+			t.Errorf("GuardProtectedRID(%d) = %v; want nil (normal RID)", rid, err)
+		}
+	}
+}
+
 func TestGuardReservedUsername_AllowsNormalAccounts(t *testing.T) {
 	allowed := []string{
 		"alice", "bob.smith", "svc-backup", "operator1", "jdoe",

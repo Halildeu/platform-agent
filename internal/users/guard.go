@@ -16,12 +16,16 @@ import (
 // password of) e.g. the built-in Administrator can strand the endpoint without
 // any administrative access.
 //
-// SCOPE (v1): name-based denylist + SID-literal rejection — purely syntactic,
-// fully testable on every platform. The RID-based guard ({500..504}, to catch a
-// *renamed* built-in) and the last-enabled-administrator lockout guard require
-// Windows SAM lookups (NetUserGetInfo level 3 + NetUserGetLocalGroups); they are
-// tracked as a documented follow-up rather than stubbed here, so this file never
-// pretends to enforce a check it does not actually run (Codex 019ea1a2).
+// ENFORCED HERE: name-based denylist + SID-literal rejection
+// (GuardReservedUsername) AND the RID-based guard ({500..504},
+// GuardProtectedRID, called from the Windows MutateLocal once the account SID is
+// resolved) — together they refuse the well-known built-ins both by name and by
+// stable identifier, so a renamed/localized built-in is still caught.
+//
+// REMAINING FOLLOW-UP: the last-enabled-administrator lockout guard (needs
+// Administrators-group enumeration via NetLocalGroupGetMembers + per-member
+// enabled-state cross-reference) is a separate slice, not stubbed here, so
+// nothing pretends to enforce a check it does not actually run (Codex 019ea1a2).
 
 // reservedLocalUsernames are well-known Windows local / service account names
 // that destructive remote commands must never target. Compared case-insensitively
@@ -59,6 +63,30 @@ func GuardReservedUsername(username string) error {
 	}
 	if _, reserved := reservedLocalUsernames[candidate]; reserved {
 		return fmt.Errorf("username %q is a reserved built-in account and cannot be targeted by a remote command", username)
+	}
+	return nil
+}
+
+// reservedAccountRIDs are the relative identifiers of well-known Windows local
+// accounts: built-in Administrator (500), Guest (501), krbtgt (502),
+// DefaultAccount (503), WDAGUtilityAccount (504). The RID is stable across a
+// rename and across locale, so this guard catches a *renamed* or localized
+// built-in that the name denylist (GuardReservedUsername) cannot.
+var reservedAccountRIDs = map[uint32]struct{}{
+	500: {},
+	501: {},
+	502: {},
+	503: {},
+	504: {},
+}
+
+// GuardProtectedRID returns a non-nil error when the resolved account RID is a
+// reserved well-known identifier. The RID is the last sub-authority of the
+// account's SID. Callers MUST treat a non-nil result as a hard refusal
+// (fail-closed) and report the command as FAILED.
+func GuardProtectedRID(rid uint32) error {
+	if _, reserved := reservedAccountRIDs[rid]; reserved {
+		return fmt.Errorf("account RID %d is a reserved built-in identifier and cannot be targeted by a remote command", rid)
 	}
 	return nil
 }

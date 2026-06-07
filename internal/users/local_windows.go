@@ -101,6 +101,19 @@ func MutateLocal(req LocalUserMutationRequest) (LocalUserMutationResult, error) 
 		return LocalUserMutationResult{}, err
 	}
 
+	// RID guard (#84): resolve the account SID and refuse reserved well-known
+	// RIDs ({500..504}) for every action, before any SAM write. This catches a
+	// *renamed* or localized built-in (e.g. a renamed Administrator) that the
+	// name denylist in GuardReservedUsername cannot. Fail closed if the SID
+	// cannot be resolved.
+	rid, err := localUserRID(username)
+	if err != nil {
+		return LocalUserMutationResult{}, fmt.Errorf("resolve account RID for %q: %w", username, err)
+	}
+	if err := GuardProtectedRID(rid); err != nil {
+		return LocalUserMutationResult{}, err
+	}
+
 	switch req.Action {
 	case ActionLockUserLogin:
 		return setLocalUserDisabled(username, true)
@@ -114,6 +127,21 @@ func MutateLocal(req LocalUserMutationRequest) (LocalUserMutationResult, error) 
 	default:
 		return LocalUserMutationResult{}, fmt.Errorf("unsupported local user action %q", req.Action)
 	}
+}
+
+// localUserRID resolves the account SID for username and returns its relative
+// identifier (the last sub-authority). The RID guard uses it to refuse reserved
+// built-in identifiers ({500..504}) even when the account has been renamed.
+func localUserRID(username string) (uint32, error) {
+	sid, _, _, err := windows.LookupSID("", username)
+	if err != nil {
+		return 0, fmt.Errorf("LookupSID failed for %q: %w", username, err)
+	}
+	count := sid.SubAuthorityCount()
+	if count == 0 {
+		return 0, fmt.Errorf("SID for %q has no sub-authorities", username)
+	}
+	return sid.SubAuthority(uint32(count) - 1), nil
 }
 
 func normalizeLocalUsername(raw string) (string, error) {
