@@ -40,6 +40,11 @@ var updateAgentStageFn = func(ctx context.Context, stager *selfupdate.Stager, pa
 	return stager.Stage(ctx, payload, currentVersion)
 }
 
+// mutateLocalUserFn is the AG-042 seam for Windows local-user destructive
+// actions. Production uses NetUser* APIs via internal/users; tests override it
+// without touching the host account database.
+var mutateLocalUserFn = users.MutateLocal
+
 type UpdateAgentStagerOptions struct {
 	AllowedHosts        []string
 	SignerThumbprints   []string
@@ -301,6 +306,26 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "User home paths resolved"
 		result.Details = map[string]interface{}{"paths": paths}
+	case protocol.CommandLockUserLogin, protocol.CommandUnlockUserLogin, protocol.CommandChangeLocalPassword:
+		req, payloadErr := unmarshalLocalUserMutation(command.Type, command.Payload)
+		if payloadErr != nil {
+			result.Status = protocol.CommandStatusFailed
+			result.Summary = payloadErr.Error()
+			break
+		}
+		mutation, err := mutateLocalUserFn(req)
+		if err != nil {
+			if errors.Is(err, users.ErrLocalUserMutationUnsupported) {
+				result.Status = protocol.CommandStatusUnsupported
+			} else {
+				result.Status = protocol.CommandStatusFailed
+			}
+			result.Summary = err.Error()
+			break
+		}
+		result.Status = protocol.CommandStatusSucceeded
+		result.Summary = fmt.Sprintf("%s applied", command.Type)
+		result.Details = map[string]interface{}{"localUser": mutation}
 	case protocol.CommandInstallSoftware:
 		// AG-027 (Faz 22.5) — install execution adapter.
 		//
@@ -392,6 +417,79 @@ func unmarshalInstallRequest(payload map[string]interface{}) (winget.InstallRequ
 		return winget.InstallRequest{}, errors.New("INSTALL_SOFTWARE payload missing argsPolicyPreset")
 	}
 	return req, nil
+}
+
+func unmarshalLocalUserMutation(commandType protocol.CommandType, payload map[string]interface{}) (users.LocalUserMutationRequest, error) {
+	if payload == nil {
+		return users.LocalUserMutationRequest{}, fmt.Errorf("%s payload is empty", commandType)
+	}
+	username, err := trimmedStringPayload(payload, "username")
+	if err != nil {
+		return users.LocalUserMutationRequest{}, fmt.Errorf("%s payload %w", commandType, err)
+	}
+	req := users.LocalUserMutationRequest{Username: username}
+	switch commandType {
+	case protocol.CommandLockUserLogin:
+		req.Action = users.ActionLockUserLogin
+		if hasAnyPayloadKey(payload, "password", "newPassword", "secret", "credential") {
+			return users.LocalUserMutationRequest{}, errors.New("LOCK_USER_LOGIN payload must not contain secret material")
+		}
+	case protocol.CommandUnlockUserLogin:
+		req.Action = users.ActionUnlockUserLogin
+		if hasAnyPayloadKey(payload, "password", "newPassword", "secret", "credential") {
+			return users.LocalUserMutationRequest{}, errors.New("UNLOCK_USER_LOGIN payload must not contain secret material")
+		}
+	case protocol.CommandChangeLocalPassword:
+		req.Action = users.ActionChangeLocalPassword
+		newPassword, err := rawSecretStringPayload(payload, "newPassword")
+		if err != nil {
+			return users.LocalUserMutationRequest{}, fmt.Errorf("CHANGE_LOCAL_PASSWORD payload %w", err)
+		}
+		req.NewPassword = newPassword
+	default:
+		return users.LocalUserMutationRequest{}, fmt.Errorf("unsupported local user mutation type %s", commandType)
+	}
+	return req, nil
+}
+
+func trimmedStringPayload(payload map[string]interface{}, key string) (string, error) {
+	raw, ok := payload[key]
+	if !ok {
+		return "", fmt.Errorf("missing %s", key)
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", key)
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%s is required", key)
+	}
+	return value, nil
+}
+
+func rawSecretStringPayload(payload map[string]interface{}, key string) (string, error) {
+	raw, ok := payload[key]
+	if !ok {
+		return "", fmt.Errorf("missing %s", key)
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", key)
+	}
+	if strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("%s is required", key)
+	}
+	return value, nil
+}
+
+func hasAnyPayloadKey(payload map[string]interface{}, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := payload[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // mapInstallStatusToCommandStatus converts the AG-027 fine-grained

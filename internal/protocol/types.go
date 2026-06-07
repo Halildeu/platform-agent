@@ -17,6 +17,9 @@ const (
 	CommandListLocalUsers         CommandType = "LIST_LOCAL_USERS"
 	CommandGetLoggedInUser        CommandType = "GET_LOGGED_IN_USER"
 	CommandGetUserHomePaths       CommandType = "GET_USER_HOME_PATHS"
+	CommandLockUserLogin          CommandType = "LOCK_USER_LOGIN"
+	CommandUnlockUserLogin        CommandType = "UNLOCK_USER_LOGIN"
+	CommandChangeLocalPassword    CommandType = "CHANGE_LOCAL_PASSWORD"
 	CommandDisableLocalUser       CommandType = "DISABLE_LOCAL_USER"
 	CommandEnableLocalUser        CommandType = "ENABLE_LOCAL_USER"
 	CommandResetLocalUserPassword CommandType = "RESET_LOCAL_USER_PASSWORD"
@@ -193,7 +196,7 @@ func (r CommandResult) ToWire() CommandResultWire {
 
 func (t CommandType) RequiresReason() bool {
 	switch t {
-	case CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent:
+	case CommandLockUserLogin, CommandUnlockUserLogin, CommandChangeLocalPassword, CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent:
 		return true
 	default:
 		return false
@@ -202,7 +205,7 @@ func (t CommandType) RequiresReason() bool {
 
 func (t CommandType) IsSensitive() bool {
 	switch t {
-	case CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent:
+	case CommandLockUserLogin, CommandUnlockUserLogin, CommandChangeLocalPassword, CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent:
 		return true
 	default:
 		return false
@@ -211,7 +214,7 @@ func (t CommandType) IsSensitive() bool {
 
 func (t CommandType) IsRepeatSafe() bool {
 	switch t {
-	case CommandCollectInventory, CommandListLocalUsers, CommandGetLoggedInUser, CommandGetUserHomePaths, CommandDisableLocalUser, CommandEnableLocalUser, CommandListAllowedDirectory:
+	case CommandCollectInventory, CommandListLocalUsers, CommandGetLoggedInUser, CommandGetUserHomePaths, CommandLockUserLogin, CommandUnlockUserLogin, CommandDisableLocalUser, CommandEnableLocalUser, CommandListAllowedDirectory:
 		return true
 	default:
 		return false

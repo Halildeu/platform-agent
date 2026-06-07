@@ -711,10 +711,18 @@ func RuntimeCapabilitiesWithOptions(opts RuntimeCapabilityOptions) []protocol.Co
 		protocol.CommandGetUserHomePaths,
 	}
 	if runtime.GOOS == "windows" {
-		// DisableLocalUser/EnableLocalUser intentionally omitted: adapter not implemented in executor.
-		// Re-add when internal/users gains a Windows local-user disable/enable adapter.
 		capabilities = append(capabilities,
 			protocol.CommandListLocalUsers,
+			// AG-042 — backend-aligned destructive local-user command
+			// names. The executor uses Windows NetUser* APIs and the
+			// backend dual-control gate decides whether these are
+			// admin-creatable. Old DISABLE/ENABLE/RESET names remain
+			// unadvertised because backend canonical CommandType uses
+			// LOCK_USER_LOGIN / UNLOCK_USER_LOGIN /
+			// CHANGE_LOCAL_PASSWORD.
+			protocol.CommandLockUserLogin,
+			protocol.CommandUnlockUserLogin,
+			protocol.CommandChangeLocalPassword,
 			// AG-027 (Faz 22.5): Windows-only install execution
 			// adapter. Non-Windows agents return
 			// FAILED_UNSUPPORTED_PLATFORM via the executor stub;

@@ -2,14 +2,17 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
 	"platform-agent/internal/selfupdate"
+	"platform-agent/internal/users"
 	"platform-agent/internal/winget"
 )
 
@@ -52,6 +55,13 @@ func updateAgentStageSeam(t *testing.T, stub func(ctx context.Context, stager *s
 	prev := updateAgentStageFn
 	updateAgentStageFn = stub
 	t.Cleanup(func() { updateAgentStageFn = prev })
+}
+
+func mutateLocalUserSeam(t *testing.T, stub func(users.LocalUserMutationRequest) (users.LocalUserMutationResult, error)) {
+	t.Helper()
+	prev := mutateLocalUserFn
+	mutateLocalUserFn = stub
+	t.Cleanup(func() { mutateLocalUserFn = prev })
 }
 
 func updateAgentTestPayload() map[string]interface{} {
@@ -155,6 +165,146 @@ func TestLocalExecutorUnsupportedCommandReturnsUnsupported(t *testing.T) {
 
 	if result.Status != protocol.CommandStatusUnsupported {
 		t.Fatalf("status = %s, want %s", result.Status, protocol.CommandStatusUnsupported)
+	}
+}
+
+func TestLocalExecutorLockUserLoginCallsLocalMutationAdapter(t *testing.T) {
+	mutateLocalUserSeam(t, func(req users.LocalUserMutationRequest) (users.LocalUserMutationResult, error) {
+		if req.Action != users.ActionLockUserLogin {
+			t.Fatalf("action = %q, want %q", req.Action, users.ActionLockUserLogin)
+		}
+		if req.Username != "pilot-local" {
+			t.Fatalf("username = %q", req.Username)
+		}
+		if req.NewPassword != "" {
+			t.Fatal("LOCK_USER_LOGIN must not pass password material to the adapter")
+		}
+		disabled := true
+		return users.LocalUserMutationResult{
+			Username: "pilot-local",
+			Action:   string(users.ActionLockUserLogin),
+			Disabled: &disabled,
+		}, nil
+	})
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandLockUserLogin}, "test")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-lock",
+		ClaimID:        "claim-lock",
+		AttemptNumber:  1,
+		Type:           protocol.CommandLockUserLogin,
+		Reason:         "dual-control approved local recovery drill",
+		Payload:        map[string]interface{}{"username": "pilot-local"},
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusSucceeded {
+		t.Fatalf("status = %s, want SUCCEEDED; summary=%q", result.Status, result.Summary)
+	}
+	localUser, ok := result.Details["localUser"].(users.LocalUserMutationResult)
+	if !ok {
+		t.Fatalf("localUser detail type = %T", result.Details["localUser"])
+	}
+	if localUser.Username != "pilot-local" || localUser.Disabled == nil || !*localUser.Disabled {
+		t.Fatalf("unexpected localUser detail: %+v", localUser)
+	}
+}
+
+func TestLocalExecutorUnlockUserLoginCallsLocalMutationAdapter(t *testing.T) {
+	mutateLocalUserSeam(t, func(req users.LocalUserMutationRequest) (users.LocalUserMutationResult, error) {
+		if req.Action != users.ActionUnlockUserLogin {
+			t.Fatalf("action = %q, want %q", req.Action, users.ActionUnlockUserLogin)
+		}
+		if req.Username != "pilot-local" {
+			t.Fatalf("username = %q", req.Username)
+		}
+		disabled := false
+		lockedOut := false
+		return users.LocalUserMutationResult{
+			Username:  "pilot-local",
+			Action:    string(users.ActionUnlockUserLogin),
+			Disabled:  &disabled,
+			LockedOut: &lockedOut,
+		}, nil
+	})
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandUnlockUserLogin}, "test")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-unlock",
+		ClaimID:        "claim-unlock",
+		AttemptNumber:  1,
+		Type:           protocol.CommandUnlockUserLogin,
+		Reason:         "dual-control approved recovery restore",
+		Payload:        map[string]interface{}{"username": "pilot-local"},
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusSucceeded {
+		t.Fatalf("status = %s, want SUCCEEDED; summary=%q", result.Status, result.Summary)
+	}
+}
+
+func TestLocalExecutorChangeLocalPasswordRequiresSecretMaterial(t *testing.T) {
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandChangeLocalPassword}, "test")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-password",
+		ClaimID:        "claim-password",
+		AttemptNumber:  1,
+		Type:           protocol.CommandChangeLocalPassword,
+		Reason:         "dual-control approved recovery password rotation",
+		Payload:        map[string]interface{}{"username": "pilot-local"},
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusFailed {
+		t.Fatalf("status = %s, want FAILED", result.Status)
+	}
+	if result.Summary != "CHANGE_LOCAL_PASSWORD payload missing newPassword" {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+}
+
+func TestLocalExecutorChangeLocalPasswordDoesNotReturnSecretMaterial(t *testing.T) {
+	const secret = "Temp-Passphrase-12345!"
+	mutateLocalUserSeam(t, func(req users.LocalUserMutationRequest) (users.LocalUserMutationResult, error) {
+		if req.Action != users.ActionChangeLocalPassword {
+			t.Fatalf("action = %q, want %q", req.Action, users.ActionChangeLocalPassword)
+		}
+		if req.NewPassword != secret {
+			t.Fatalf("adapter did not receive the exact secret bytes")
+		}
+		return users.LocalUserMutationResult{
+			Username:        req.Username,
+			Action:          string(users.ActionChangeLocalPassword),
+			PasswordChanged: true,
+		}, nil
+	})
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandChangeLocalPassword}, "test")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-password",
+		ClaimID:        "claim-password",
+		AttemptNumber:  1,
+		Type:           protocol.CommandChangeLocalPassword,
+		Reason:         "dual-control approved recovery password rotation",
+		Payload:        map[string]interface{}{"username": "pilot-local", "newPassword": secret},
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusSucceeded {
+		t.Fatalf("status = %s, want SUCCEEDED; summary=%q", result.Status, result.Summary)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) {
+		t.Fatalf("command result leaked password secret: %s", encoded)
 	}
 }
 

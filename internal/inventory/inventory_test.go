@@ -323,6 +323,30 @@ func TestRuntimeCapabilitiesInstallSoftwareAdvertisedOnWindowsOnly(t *testing.T)
 	}
 }
 
+func TestRuntimeCapabilitiesLocalUserActionsAdvertisedOnWindowsOnly(t *testing.T) {
+	caps := RuntimeCapabilities()
+	required := []protocol.CommandType{
+		protocol.CommandLockUserLogin,
+		protocol.CommandUnlockUserLogin,
+		protocol.CommandChangeLocalPassword,
+	}
+	for _, target := range required {
+		found := false
+		for _, c := range caps {
+			if c == target {
+				found = true
+				break
+			}
+		}
+		if runtime.GOOS == "windows" && !found {
+			t.Fatalf("AG-042: expected %s in RuntimeCapabilities() on Windows; got %v", target, caps)
+		}
+		if runtime.GOOS != "windows" && found {
+			t.Fatalf("AG-042: %s must NOT be advertised on non-Windows; got %v", target, caps)
+		}
+	}
+}
+
 func TestRuntimeCapabilitiesUpdateAgentRequiresWindowsAndOptIn(t *testing.T) {
 	defaultCaps := RuntimeCapabilities()
 	for _, c := range defaultCaps {
