@@ -194,10 +194,13 @@ func (s *Stager) Stage(ctx context.Context, payload UpdateAgentPayload, currentV
 		return Failed(ErrStagingIO, "could not create temp download file")
 	}
 	tmpPath := tmp.Name()
+	tmpClosed := false
 	// Best-effort cleanup of the temp artifact on every exit (a successful
 	// Commit moves the bytes out first, so removing the temp name is safe).
 	defer func() {
-		_ = tmp.Close()
+		if !tmpClosed {
+			_ = tmp.Close()
+		}
 		_ = os.Remove(tmpPath)
 	}()
 
@@ -209,6 +212,10 @@ func (s *Stager) Stage(ctx context.Context, payload UpdateAgentPayload, currentV
 	if err := tmp.Sync(); err != nil {
 		return Failed(ErrStagingIO, "could not flush temp download file")
 	}
+	if err := tmp.Close(); err != nil {
+		return Failed(ErrStagingIO, "could not close temp download file")
+	}
+	tmpClosed = true
 	actualSha := hex.EncodeToString(h.Sum(nil))
 
 	// --- must-fix #1: the recomputed hash is EVIDENCE. It is compared ONLY to
