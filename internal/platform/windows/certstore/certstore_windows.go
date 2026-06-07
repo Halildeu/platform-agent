@@ -22,7 +22,19 @@ import (
 // CRYPT_E_NOT_FOUND signals end-of-enumeration from
 // CertEnumCertificatesInStore. The constant lives in wincrypt.h; we
 // inline the value to avoid pulling in another header-binding package.
-const cryptENotFound = 0x80092004
+const (
+	cryptENotFound = 0x80092004
+
+	// CERT_KEY_PROV_INFO_PROP_ID and CERT_NCRYPT_KEY_HANDLE_PROP_ID are
+	// private-key association hints on a CertContext. Querying these before
+	// CryptAcquireCertificatePrivateKey keeps broad dry-runs from invoking
+	// native key acquisition on certs that cannot possibly satisfy the mTLS
+	// auto-enroll contract.
+	certKeyProvInfoPropID     = 2
+	certNCryptKeyHandlePropID = 78
+)
+
+var procCertGetCertificateContextProperty = windows.NewLazySystemDLL("crypt32.dll").NewProc("CertGetCertificateContextProperty")
 
 // LoadEligibleCert enumerates LocalMachine\My, applies the agent
 // CertFilter (Codex F1 absorb — `SelectLatest` was previously
@@ -236,6 +248,9 @@ func isCryptENotFound(err error) bool {
 // call only needs the *windows.CertContext — so we open a throwaway
 // store just to expose the method.
 func acquireSigner(ctx *windows.CertContext) (*certtostore.Key, error) {
+	if !hasPrivateKeyBinding(ctx) {
+		return nil, errors.New("certificate has no private-key binding")
+	}
 	store, err := certtostore.OpenWinCertStore("Microsoft Platform Crypto Provider", "", nil, nil, false)
 	if err != nil {
 		return nil, fmt.Errorf("open helper cert store: %w", err)
@@ -246,4 +261,23 @@ func acquireSigner(ctx *windows.CertContext) (*certtostore.Key, error) {
 		return nil, err
 	}
 	return key, nil
+}
+
+func hasPrivateKeyBinding(ctx *windows.CertContext) bool {
+	if ctx == nil {
+		return false
+	}
+	return certContextPropertyPresent(ctx, certKeyProvInfoPropID) ||
+		certContextPropertyPresent(ctx, certNCryptKeyHandlePropID)
+}
+
+func certContextPropertyPresent(ctx *windows.CertContext, propID uint32) bool {
+	var size uint32
+	r, _, _ := procCertGetCertificateContextProperty.Call(
+		uintptr(unsafe.Pointer(ctx)),
+		uintptr(propID),
+		0,
+		uintptr(unsafe.Pointer(&size)),
+	)
+	return r != 0 && size > 0
 }
