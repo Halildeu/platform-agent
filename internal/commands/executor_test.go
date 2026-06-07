@@ -211,30 +211,47 @@ func TestLocalExecutorLockUserLoginCallsLocalMutationAdapter(t *testing.T) {
 	}
 }
 
-func TestLocalExecutorLockUserLoginRefusesReservedAccount(t *testing.T) {
-	called := false
-	mutateLocalUserSeam(t, func(users.LocalUserMutationRequest) (users.LocalUserMutationResult, error) {
-		called = true
-		return users.LocalUserMutationResult{}, nil
-	})
-	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandLockUserLogin}, "test")
-	command := protocol.AgentCommand{
-		CommandID:      "cmd-lock-admin",
-		ClaimID:        "claim-lock-admin",
-		AttemptNumber:  1,
-		Type:           protocol.CommandLockUserLogin,
-		Reason:         "attempt to lock the built-in administrator",
-		Payload:        map[string]interface{}{"username": "Administrator"},
-		ClaimExpiresAt: time.Now().Add(time.Minute),
+func TestLocalExecutorRefusesReservedAccountForAllActions(t *testing.T) {
+	// The reserved-account guard sits in the shared unmarshalLocalUserMutation
+	// path, so it must fail closed for every destructive action — including
+	// CHANGE_LOCAL_PASSWORD, where it must refuse BEFORE the secret is handed to
+	// the mutation adapter.
+	cases := []struct {
+		name    string
+		cmdType protocol.CommandType
+		payload map[string]interface{}
+	}{
+		{"lock", protocol.CommandLockUserLogin, map[string]interface{}{"username": "Administrator"}},
+		{"unlock", protocol.CommandUnlockUserLogin, map[string]interface{}{"username": "administrator"}},
+		{"change-password", protocol.CommandChangeLocalPassword, map[string]interface{}{"username": "Guest", "newPassword": "S3cretValue!"}},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			mutateLocalUserSeam(t, func(users.LocalUserMutationRequest) (users.LocalUserMutationResult, error) {
+				called = true
+				return users.LocalUserMutationResult{}, nil
+			})
+			executor := NewLocalExecutor([]protocol.CommandType{tc.cmdType}, "test")
+			command := protocol.AgentCommand{
+				CommandID:      "cmd-" + tc.name,
+				ClaimID:        "claim-" + tc.name,
+				AttemptNumber:  1,
+				Type:           tc.cmdType,
+				Reason:         "attempt to target a reserved built-in account",
+				Payload:        tc.payload,
+				ClaimExpiresAt: time.Now().Add(time.Minute),
+			}
 
-	result := executor.Execute(context.Background(), command)
+			result := executor.Execute(context.Background(), command)
 
-	if result.Status != protocol.CommandStatusFailed {
-		t.Fatalf("status = %s, want FAILED (reserved-account guard)", result.Status)
-	}
-	if called {
-		t.Fatal("mutation adapter must not be invoked for a reserved built-in account")
+			if result.Status != protocol.CommandStatusFailed {
+				t.Fatalf("status = %s, want FAILED (reserved-account guard)", result.Status)
+			}
+			if called {
+				t.Fatal("mutation adapter must not be invoked for a reserved built-in account")
+			}
+		})
 	}
 }
 
