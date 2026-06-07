@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -69,16 +70,21 @@ func TestConfigHash_Stable(t *testing.T) {
 	}
 }
 
-func TestConfigHash_Length(t *testing.T) {
+// TestConfigHash_Format pins the cross-repo contract: the backend
+// DiagnosticsPayloadPolicy requires `^[0-9a-f]{64}$` (full SHA-256) or
+// "unknown" and 400s the entire COLLECT_INVENTORY result otherwise
+// (Halildeu/platform-agent#82). A prior `[:16]` truncation broke this.
+func TestConfigHash_Format(t *testing.T) {
 	cases := [][2]string{
 		{"1.0.0", "https://api.example.com"},
 		{"2.0.0-dev", "https://backend.internal:8443"},
 		{"0.1.0-beta", "https://192.168.1.1:8080/api"},
 	}
+	hexRe := regexp.MustCompile(`^[0-9a-f]{64}$`)
 	for _, c := range cases {
 		h := configHash(c[0], c[1])
-		if len(h) != 16 {
-			t.Errorf("configHash(%q, %q) len = %d; want 16", c[0], c[1], len(h))
+		if !hexRe.MatchString(h) {
+			t.Errorf("configHash(%q, %q) = %q; want 64-char lowercase hex (backend CONFIG_HASH_RE)", c[0], c[1], h)
 		}
 	}
 }

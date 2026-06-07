@@ -166,12 +166,17 @@ func diagnosticsElapsedMs(start time.Time, now func() time.Time) int {
 	return int(now().Sub(start) / time.Millisecond)
 }
 
-// configHash computes a short SHA-256 hex of the agent version and API URL.
+// configHash computes the SHA-256 hex of the agent version and API URL.
 // No PII, credentials, or paths appear in the hash — only static config.
+//
+// The result is the FULL 64-char lowercase hex digest, NOT truncated: the
+// backend DiagnosticsPayloadPolicy requires `^[0-9a-f]{64}$` (or "unknown")
+// and 400s the ENTIRE COLLECT_INVENTORY result if configHash is shorter (a
+// prior `[:16]` truncation drifted from that contract — Halildeu/platform-agent#82).
 func configHash(agentVersion, apiURL string) string {
 	input := agentVersion + "|" + apiURL
 	sum := sha256.Sum256([]byte(input))
-	return hex.EncodeToString(sum[:])[:16]
+	return hex.EncodeToString(sum[:])
 }
 
 // backendHostParts holds the three distinct values the reachability probe
