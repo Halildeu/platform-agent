@@ -128,12 +128,14 @@ func isLocalGroupSID(sid, machineSid *windows.SID) bool {
 //   - domain user -> skipped (the guard counts LOCAL admins);
 //   - local group / built-in alias -> recursed (cycle-guarded);
 //   - domain / non-local group -> skipped;
-//   - an unresolvable member SID (orphaned/deleted account) -> skipped (it cannot
-//     be an enabled effective admin).
+//   - a genuinely orphaned/deleted member SID (ERROR_NONE_MAPPED) -> skipped (it
+//     cannot be an enabled effective admin), but ANY OTHER LookupAccount failure
+//     on a local / built-in SID is fail-closed (an unexpandable group could hide
+//     a nested admin); a non-local/domain SID with a non-orphan error is skipped.
 //
-// Fail-closed: enumeration errors, copy failures, or hitting a safety bound
-// return an error so the caller refuses the command rather than acting on a
-// partial admin set.
+// Fail-closed: enumeration errors, copy failures, a non-orphan failure on a
+// local/built-in member, or hitting a safety bound return an error so the caller
+// refuses the command rather than acting on a partial admin set.
 func adminLocalUserSIDStrings() (map[string]struct{}, error) {
 	machineSid, err := resolveMachineDomainSid()
 	if err != nil {
