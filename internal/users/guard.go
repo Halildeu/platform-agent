@@ -16,16 +16,18 @@ import (
 // password of) e.g. the built-in Administrator can strand the endpoint without
 // any administrative access.
 //
-// ENFORCED HERE: name-based denylist + SID-literal rejection
-// (GuardReservedUsername) AND the RID-based guard ({500..504},
-// GuardProtectedRID, called from the Windows MutateLocal once the account SID is
-// resolved) — together they refuse the well-known built-ins both by name and by
-// stable identifier, so a renamed/localized built-in is still caught.
+// THREE GUARDS, all enforced:
+//   1. name denylist + SID-literal rejection (GuardReservedUsername, here);
+//   2. the RID guard ({500..504}, GuardProtectedRID here, fed by the Windows
+//      MutateLocal once the account SID is resolved) — catches a renamed/localized
+//      built-in the name list would miss;
+//   3. the last-enabled-administrator lockout guard — its decision is the pure
+//      evaluateLockoutGuard below, fed by the Windows-only gathering in
+//      lockout_windows.go (Administrators membership + enabled cross-reference).
 //
-// REMAINING FOLLOW-UP: the last-enabled-administrator lockout guard (needs
-// Administrators-group enumeration via NetLocalGroupGetMembers + per-member
-// enabled-state cross-reference) is a separate slice, not stubbed here, so
-// nothing pretends to enforce a check it does not actually run (Codex 019ea1a2).
+// Live Windows acceptance (prlctl) is the remaining verification for the Windows
+// gathering; an indirect-membership / current-interactive-user refinement is a
+// possible future hardening (Codex 019ea1a2).
 
 // reservedLocalUsernames are well-known Windows local / service account names
 // that destructive remote commands must never target. Compared case-insensitively
@@ -96,8 +98,10 @@ func GuardProtectedRID(rid uint32) error {
 // enumeration) and consumed by the pure decision function evaluateLockoutGuard,
 // which keeps the *decision* fully testable on every platform.
 type LockoutFacts struct {
-	// TargetIsLocalAdmin: the target account is a (direct or indirect) member of
-	// the built-in Administrators alias.
+	// TargetIsLocalAdmin: the target account is a DIRECT member of the built-in
+	// Administrators alias (v1 scope — the Windows gathering enumerates the alias
+	// membership directly; nested-group / indirect membership is a possible
+	// future refinement via NetUserGetLocalGroups(LG_INCLUDE_INDIRECT)).
 	TargetIsLocalAdmin bool
 	// TargetEnabled: the target account is currently enabled (not disabled).
 	TargetEnabled bool

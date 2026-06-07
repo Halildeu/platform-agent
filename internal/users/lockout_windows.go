@@ -94,7 +94,11 @@ func administratorsMemberSIDStrings() (map[string]struct{}, error) {
 			return nil, fmt.Errorf("NetLocalGroupGetMembers failed: %w", status)
 		}
 	}
-	return set, nil
+	// Pagination safety bound hit while the API still reported more data: refuse
+	// to treat a PARTIAL membership set as authoritative. A missing target SID
+	// would otherwise compute TargetIsLocalAdmin=false and falsely ALLOW the lock,
+	// so this must fail closed (Codex 019ea1a2 P1).
+	return nil, fmt.Errorf("NetLocalGroupGetMembers exceeded the %d-page safety bound; refusing to use a partial membership set", lockoutMaxPages)
 }
 
 // gatherLockoutFacts collects the local-SAM state the lockout decision needs.
