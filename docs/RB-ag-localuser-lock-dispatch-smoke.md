@@ -45,7 +45,7 @@ SAM-write risk, while still exercising the full dispatch glue + dual-control.
    printf 'header = "Authorization: Bearer %s"\n' "$J_APPROVER" > /tmp/kc_approver.cfg && chmod 600 /tmp/kc_approver.cfg
    ```
 2. **Propose** (proposer): `POST /api/v1/endpoint-admin/endpoint-devices/{deviceId}/commands`
-   body `{"commandType":"LOCK_USER_LOGIN","reason":"RID-guard dispatch smoke","idempotencyKey":"lock-smoke-1","payload":{"username":"Administrator"}}`.
+   body `{"type":"LOCK_USER_LOGIN","reason":"RID-guard dispatch smoke","idempotencyKey":"lock-smoke-1","payload":{"username":"Administrator"}}`.
 3. **Approve** (approver ≠ proposer): `POST /api/v1/endpoint-admin/endpoint-commands/{commandId}/approval`.
 4. **Agent** (guarded binary) polls `/commands/next`, executes, the RID guard refuses,
    posts a `FAILED` result.
@@ -57,6 +57,27 @@ SAM-write risk, while still exercising the full dispatch glue + dual-control.
 
 This single negative smoke proves dual-control (approver ≠ issuer), the LOCK-specific
 dispatch glue, and `FAILED` propagation — with no real SAM-write risk.
+
+## Operator-safe helper
+
+The curl sequence above can be run through the redaction-guarded helper:
+
+```bash
+scripts/test/ag92-lock-dispatch-smoke.sh \
+  --device-id "$DEVICE_ID" \
+  --proposer-config /tmp/kc_proposer.cfg \
+  --approver-config /tmp/kc_approver.cfg \
+  --parallels-vm "Windows 11"
+```
+
+The helper:
+- uses `curl -K` only; raw JWTs are never passed as argv/env values;
+- requires auth config files that are not group/other-readable;
+- submits the canonical `type=LOCK_USER_LOGIN` payload;
+- approves with the second admin config;
+- polls until terminal status and expects `FAILED` with RID/reserved-account refusal text;
+- optionally captures `net user Administrator` before/after through Parallels and fails if it changed;
+- writes redacted evidence under `tmp/ag92-lock-dispatch-*` and scans it for token-like leaks.
 
 ## Cross-AI
 Plan + closure framing: Codex (OpenAI) thread `019ea1a2`. Implementer: Claude (Anthropic).
