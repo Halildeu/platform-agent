@@ -339,13 +339,19 @@ result_text="$(
     [
       .summary?,
       .detail?,
+      .lastError?,
       .errorMessage?,
       .failureReason?,
       .result?.summary?,
       .result?.detail?,
       .result?.errorMessage?,
       .result?.failureReason?,
-      (.resultPayload? | tostring)
+      .result?.payload?.summary?,
+      .result?.payload?.detail?,
+      .result?.payload?.errorMessage?,
+      .result?.payload?.failureReason?,
+      (.resultPayload? | tostring),
+      (.result?.payload? | tostring)
     ] | map(select(. != null and . != "")) | join("\n")
   ' "$poll_body"
 )"
