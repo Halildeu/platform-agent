@@ -109,11 +109,11 @@ fi
 # === Step 2: PowerShell pre-check (non-admin OK) ===
 log "Step 2: PowerShell pre-check — hostname / domain / PartOfDomain / UserName / backend reachability"
 cat >"$EVIDENCE_DIR/precheck.ps1" <<'PSEOF'
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 $cs = Get-CimInstance Win32_ComputerSystem
 [PSCustomObject]@{
   Hostname     = $env:COMPUTERNAME
-  UserName     = "$env:USERDOMAIN\$env:USERNAME"
+  UserName     = $env:USERDOMAIN + '\' + $env:USERNAME
   Domain       = $cs.Domain
   PartOfDomain = $cs.PartOfDomain
   Workgroup    = $cs.Workgroup
@@ -122,22 +122,34 @@ $cs = Get-CimInstance Win32_ComputerSystem
 } | ConvertTo-Json -Depth 4
 
 Write-Host "---backend-reachability---"
-$result = Test-NetConnection -ComputerName testai.acik.com -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue
+$client = New-Object System.Net.Sockets.TcpClient
+$async = $client.BeginConnect('testai.acik.com', 443, $null, $null)
+$reachable = $async.AsyncWaitHandle.WaitOne(3000, $false)
+if ($reachable) {
+  try {
+    $client.EndConnect($async)
+  } catch {
+    $reachable = $false
+  }
+}
+$client.Close()
 [PSCustomObject]@{
-  Target    = "testai.acik.com:443"
-  Reachable = $result
+  Target    = 'testai.acik.com:443'
+  Reachable = [bool]$reachable
 } | ConvertTo-Json -Depth 4
 PSEOF
 
 # Note: prlctl exec runs as the configured Parallels guest user. For pre-check we use
 # default user (no admin required). Credentials must be pre-configured out-of-band;
 # this script NEVER passes --user with --password, NEVER logs domain admin credentials.
-prlctl exec "$VM_NAME" --without-shell "powershell -NoProfile -ExecutionPolicy Bypass -Command -" <"$EVIDENCE_DIR/precheck.ps1" 2>&1 | redact >"$PRECHECK"
+precheck_ps=$(cat "$EVIDENCE_DIR/precheck.ps1")
+prlctl exec "$VM_NAME" powershell -NoProfile -ExecutionPolicy Bypass -Command "$precheck_ps" 2>&1 | redact >"$PRECHECK"
+unset precheck_ps
 log "  pre-check captured: $PRECHECK"
 cat "$PRECHECK" | head -40 | tee -a "$LOG"
 
 # Extract classification (PartOfDomain) for boundary asserts
-domain_class=$(grep -E '"PartOfDomain"' "$PRECHECK" | head -1 | awk -F': ' '{print $2}' | tr -d ',' | tr -d ' ' || echo "unknown")
+domain_class=$(grep -E '"PartOfDomain"' "$PRECHECK" | head -1 | awk -F': ' '{print $2}' | tr -d ', \r' || echo "unknown")
 log "  domain classification: PartOfDomain=$domain_class"
 if [ "$domain_class" = "true" ]; then
   log "  NOTE: VM is domain-joined — evidence doc must capture domain class explicitly; this script does not auto-pivot to acik.local pilot acceptance scope."
@@ -154,16 +166,22 @@ if [ -x "$classify_helper" ]; then
   classify_evidence_dir="${EVIDENCE_DIR}/classify"
   mkdir -p "$classify_evidence_dir"
   set +e
-  EVIDENCE_DIR="$classify_evidence_dir" \
-  RUN_ID="$RUN_ID" \
-  PARALLELS_VM_NAME="$VM_NAME" \
-  PARALLELS_OWNERSHIP="${PARALLELS_OWNERSHIP:-corporate}" \
+  env -i \
+    PATH="$PATH" \
+    HOME="$HOME" \
+    RUN_ID="$RUN_ID" \
+    EVIDENCE_DIR="$classify_evidence_dir" \
+    PARALLELS_VM_NAME="$VM_NAME" \
+    PARALLELS_OWNERSHIP="${PARALLELS_OWNERSHIP:-corporate}" \
     bash "$classify_helper" >>"$LOG" 2>&1
   classify_rc=$?
   set -e
   log "  classification helper exit: $classify_rc (0=PASS, 1=fail, 2=scope_redirect to 22.2.B)"
   if [ -f "$classify_evidence_dir/classification.json" ]; then
     log "  classification evidence: $classify_evidence_dir/classification.json"
+  fi
+  if [ "$classify_rc" -ne 0 ]; then
+    fail "classification helper failed or redirected (rc=$classify_rc; see $classify_evidence_dir) — Parallels W11 CI rehearsal must not false-green"
   fi
 else
   log "Step 2.5: classification helper not found (executable expected at $classify_helper); skipping — re-run after platform-agent PR merge"
@@ -194,16 +212,19 @@ readonly GUEST_REPO_PATH="${PARALLELS_GUEST_REPO_PATH:-\\\\Mac\\Home\\Documents\
 readonly GUEST_LIVE_PS1="${GUEST_REPO_PATH}\\scripts\\test\\windows-live.ps1"
 log "  guest repo path: $GUEST_REPO_PATH"
 log "  guest windows-live.ps1: $GUEST_LIVE_PS1"
-log "  invoking windows-live.ps1 via prlctl exec (admin via Start-Process -Verb RunAs)"
+log "  invoking windows-live.ps1 via prlctl exec"
 
-# windows-live.ps1 requires Administrator; rely on Parallels guest tools auto-elevate or
-# pre-configured local admin session. Use -PassThru + explicit exit propagation so a
-# child PowerShell failure causes this step to fail (no false-green CI).
-PS_CMD="\$ErrorActionPreference='Stop'; \$proc = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${GUEST_LIVE_PS1}' -Verb RunAs -Wait -PassThru; if (-not \$proc) { exit 1 }; exit \$proc.ExitCode"
-
-if prlctl exec "$VM_NAME" --without-shell "powershell -NoProfile -ExecutionPolicy Bypass -Command \"${PS_CMD}\"" 2>&1 | redact >"$SMOKE_OUT"; then
+# windows-live.ps1 requires Administrator. In the Parallels CI harness, prlctl
+# exec normally runs through Parallels Tools with sufficient rights; if that is
+# not true, the script's Assert-Administrator check fails loudly with captured
+# output. Do NOT spawn a detached/elevated child process here: Start-Process
+# -Verb RunAs can return a false green while leaving windows-live.txt empty.
+if prlctl exec "$VM_NAME" powershell -NoProfile -ExecutionPolicy Bypass -File "$GUEST_LIVE_PS1" 2>&1 | redact >"$SMOKE_OUT"; then
   log "  smoke output: $SMOKE_OUT ($(wc -l <"$SMOKE_OUT") lines)"
   tail -40 "$SMOKE_OUT" | tee -a "$LOG"
+  if [ "$(wc -l <"$SMOKE_OUT")" -eq 0 ]; then
+    fail "windows-live.ps1 produced empty output — treating as false-green risk"
+  fi
   log "  windows-live.ps1: PASS"
 else
   rc=$?

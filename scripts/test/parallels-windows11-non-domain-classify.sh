@@ -100,6 +100,17 @@ fail() {
   return 1
 }
 
+extract_json_object() {
+  # Parallels/PowerShell can prepend CLIXML progress records before JSON on
+  # first-run shells. Keep only the first JSON object/array so jq never parses
+  # host progress noise as evidence.
+  awk '
+    /^[[:space:]]*[\{\[]/ { capture=1 }
+    capture { print }
+    capture && /^[[:space:]]*[\}\]][[:space:]]*$/ { exit }
+  '
+}
+
 # Whitespace-safe extractor for "  FieldName : Value" lines from dsregcmd /status output
 # (Codex 019e5b4e BLOCKER 1 fix: previous `^FieldName` regex missed leading-whitespace lines).
 # (Codex 019e5b4e iter-2 BLOCKER fix: grep no-match must not crash `set -euo pipefail`;
@@ -168,27 +179,39 @@ log "Step 1: Win32_ComputerSystem (domain/workgroup state)"
 
 # UPN/SID hashing performed in PowerShell before output, to avoid plaintext personal data even
 # in transit through the redact filter. UPN hash uses SHA256 truncated to first 16 hex chars.
-cs_raw=$(prlctl exec "$VM_NAME" powershell -NoProfile -Command "
-\$cs = Get-CimInstance Win32_ComputerSystem;
-\$upnRaw = if (\$env:USERDNSDOMAIN) { \"\$env:USERNAME@\$env:USERDNSDOMAIN\" } else { \$env:USERNAME };
-\$upnHash = if (\$upnRaw) { (Get-FileHash -Algorithm SHA256 -InputStream ([System.IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes(\$upnRaw)))).Hash.Substring(0,16).ToLower() } else { '(none)' };
+cs_ps=$(cat <<'PSEOF'
+$ProgressPreference = 'SilentlyContinue'
+$cs = Get-CimInstance Win32_ComputerSystem
+$upnRaw = if ($env:USERDNSDOMAIN) { $env:USERNAME + '@' + $env:USERDNSDOMAIN } else { $env:USERNAME }
+$upnHash = if ($upnRaw) { (Get-FileHash -Algorithm SHA256 -InputStream ([System.IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($upnRaw)))).Hash.Substring(0,16).ToLower() } else { '(none)' }
 [PSCustomObject]@{
-  Hostname        = \$env:COMPUTERNAME
-  Domain          = \$cs.Domain
-  PartOfDomain    = \$cs.PartOfDomain
-  Workgroup       = \$cs.Workgroup
-  UserNameMachine = \$env:USERDOMAIN
-  UserUPNHash     = \"sha256:\$upnHash\"
+  Hostname        = $env:COMPUTERNAME
+  Domain          = $cs.Domain
+  PartOfDomain    = $cs.PartOfDomain
+  Workgroup       = $cs.Workgroup
+  UserNameMachine = $env:USERDOMAIN
+  UserUPNHash     = 'sha256:' + $upnHash
   OSCaption       = (Get-CimInstance Win32_OperatingSystem).Caption
   OSVersion       = (Get-CimInstance Win32_OperatingSystem).Version
   OSBuild         = (Get-CimInstance Win32_OperatingSystem).BuildNumber
 } | ConvertTo-Json
-" 2>&1 | redact)
+PSEOF
+)
+set +e
+cs_raw=$(prlctl exec "$VM_NAME" powershell -NoProfile -ExecutionPolicy Bypass -Command "$cs_ps" 2>&1 | redact)
+cs_rc=$?
+set -e
+unset cs_ps
+[ "$cs_rc" -eq 0 ] || { fail "Win32_ComputerSystem PowerShell probe failed (rc=$cs_rc)"; printf '%s\n' "$cs_raw" | head -20 >&2; exit 1; }
+
+cs_json=$(printf '%s\n' "$cs_raw" | extract_json_object)
+[ -n "$cs_json" ] || { fail "Win32_ComputerSystem JSON parse produced empty output"; exit 1; }
+printf '%s' "$cs_json" | jq -e . >/dev/null 2>&1 || { fail "Win32_ComputerSystem JSON parse failed after CLIXML stripping"; exit 1; }
 
 # Parse Win32 fields safely via jq (fixture VM hostname allowed; BYOD masks below)
-part_of_domain=$(printf '%s' "$cs_raw" | jq -r '.PartOfDomain // "unknown"' 2>/dev/null || echo "unknown")
-hostname_raw=$(printf '%s' "$cs_raw" | jq -r '.Hostname // ""' 2>/dev/null || echo "")
-workgroup_raw=$(printf '%s' "$cs_raw" | jq -r '.Workgroup // ""' 2>/dev/null || echo "")
+part_of_domain=$(printf '%s' "$cs_json" | jq -r 'if has("PartOfDomain") then (.PartOfDomain|tostring) else "unknown" end' 2>/dev/null || echo "unknown")
+hostname_raw=$(printf '%s' "$cs_json" | jq -r '.Hostname // ""' 2>/dev/null || echo "")
+workgroup_raw=$(printf '%s' "$cs_json" | jq -r '.Workgroup // ""' 2>/dev/null || echo "")
 
 # Hostname masking for BYOD (Codex 019e5b4e Q3 follow-up: A2 BYOD personal-device hostname risk)
 if [ "$OWNERSHIP" = "byod" ]; then
@@ -203,9 +226,9 @@ log "  Workgroup=$workgroup_raw"
 
 # Re-write cs_raw to sanitize hostname if BYOD (for evidence output)
 if [ "$OWNERSHIP" = "byod" ]; then
-  cs_sanitized=$(printf '%s' "$cs_raw" | jq --arg h "$hostname_output" '.Hostname = $h' 2>/dev/null || echo "$cs_raw")
+  cs_sanitized=$(printf '%s' "$cs_json" | jq --arg h "$hostname_output" '.Hostname = $h' 2>/dev/null || echo "$cs_json")
 else
-  cs_sanitized="$cs_raw"
+  cs_sanitized="$cs_json"
 fi
 
 # === Step 2: dsregcmd /status (AzureAdJoined + WorkplaceJoined + DomainJoined) ===
@@ -248,31 +271,42 @@ log "Step 3: MDM/Intune enrollment state probe"
 
 # Set +e so MDM probe fail (common on workgroup) doesn't kill script
 set +e
-mdm_raw=$(prlctl exec "$VM_NAME" powershell -NoProfile -Command "
+mdm_ps=$(cat <<'PSEOF'
+$ProgressPreference = 'SilentlyContinue'
 try {
-  \$mdm = Get-CimInstance -Namespace root/cimv2/mdm/dmmap -ClassName MDM_DevDetail_Ext01 -ErrorAction Stop;
+  $mdm = Get-CimInstance -Namespace root/cimv2/mdm/dmmap -ClassName MDM_DevDetail_Ext01 -ErrorAction Stop
   [PSCustomObject]@{
-    DeviceClientId = \$mdm.DeviceClientId
-    OEMVersion     = \$mdm.OEMVersion
-    Enrolled       = \$true
+    DeviceClientId = $mdm.DeviceClientId
+    OEMVersion     = $mdm.OEMVersion
+    Enrolled       = $true
   } | ConvertTo-Json
 } catch {
-  '{\"Enrolled\":false, \"Reason\":\"MDM_DevDetail_Ext01 not available (workgroup veya non-enrolled)\"}'
+  [PSCustomObject]@{
+    Enrolled = $false
+    Reason   = 'MDM_DevDetail_Ext01 not available (workgroup veya non-enrolled)'
+  } | ConvertTo-Json
 }
-" 2>&1)
+PSEOF
+)
+mdm_raw=$(prlctl exec "$VM_NAME" powershell -NoProfile -ExecutionPolicy Bypass -Command "$mdm_ps" 2>&1 | redact)
 mdm_rc=$?
+unset mdm_ps
 set -e
 
+mdm_json=$(printf '%s\n' "$mdm_raw" | extract_json_object)
+[ -n "$mdm_json" ] || { fail "MDM probe JSON parse produced empty output"; exit 1; }
+printf '%s' "$mdm_json" | jq -e . >/dev/null 2>&1 || { fail "MDM probe JSON parse failed after CLIXML stripping"; exit 1; }
+
 # Parse MDM fields (NOT logging raw output) + sanitize DeviceClientId before output
-mdm_enrolled=$(printf '%s' "$mdm_raw" | jq -r '.Enrolled // false' 2>/dev/null || echo "false")
-mdm_device_client_id_raw=$(printf '%s' "$mdm_raw" | jq -r '.DeviceClientId // ""' 2>/dev/null || echo "")
-mdm_oem_version=$(printf '%s' "$mdm_raw" | jq -r '.OEMVersion // ""' 2>/dev/null || echo "")
-mdm_reason=$(printf '%s' "$mdm_raw" | jq -r '.Reason // ""' 2>/dev/null || echo "")
+mdm_enrolled=$(printf '%s' "$mdm_json" | jq -r '.Enrolled // false' 2>/dev/null || echo "false")
+mdm_device_client_id_raw=$(printf '%s' "$mdm_json" | jq -r '.DeviceClientId // ""' 2>/dev/null || echo "")
+mdm_oem_version=$(printf '%s' "$mdm_json" | jq -r '.OEMVersion // ""' 2>/dev/null || echo "")
+mdm_reason=$(printf '%s' "$mdm_json" | jq -r '.Reason // ""' 2>/dev/null || echo "")
 
 mdm_device_client_id_hash=$(hash_id "$mdm_device_client_id_raw")
 
 # Drop raw from memory
-unset mdm_raw mdm_device_client_id_raw
+unset mdm_raw mdm_json mdm_device_client_id_raw
 
 log "  MDM enrolled=$mdm_enrolled (rc=$mdm_rc)"
 log "  MDM DeviceClientIdHash=$mdm_device_client_id_hash"
