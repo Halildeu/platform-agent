@@ -257,7 +257,8 @@ run_vm_powershell() {
   fi
 
   local encoded
-  encoded="$(ps_encoded_arg "$script")"
+  encoded="$(ps_encoded_arg "\$ProgressPreference = 'SilentlyContinue'
+$script")"
   prlctl exec "$parallels_vm" powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand "$encoded" 2>&1 \
     | redact >"$out"
 }
@@ -280,7 +281,7 @@ if (Get-LocalUser -Name \$user -ErrorAction SilentlyContinue) {
 \$rng.GetBytes(\$bytes)
 \$plain = -join (\$bytes | ForEach-Object { \$chars[[int]\$_ % \$chars.Length] })
 \$secure = ConvertTo-SecureString -String \$plain -AsPlainText -Force
-New-LocalUser -Name \$user -Password \$secure -Description 'EndpointAgent AG-042 local password smoke account' | Out-Null
+New-LocalUser -Name \$user -Password \$secure -Description 'AG-042 password smoke' | Out-Null
 [pscustomobject]@{Username=\$user; Created=\$true; PasswordMaterial='REDACTED'} | ConvertTo-Json -Compress
 " "$out"
 }
