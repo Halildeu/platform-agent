@@ -113,6 +113,14 @@ EDR/antivirus izni
 
 Canli AD/GPO deployment bu test stratejisinin sonraki fazidir.
 
+AG-029 signed self-update kabul kaniti tek cihazlik smoke ile genellenmez.
+Local Parallels Windows 11 executable lab olarak kullanilir; diger cihazlar
+toplu kosulacagi zaman cihaz-cihaz checklist uzerinden kanitlanir:
+
+```text
+docs/AG-029-multi-device-acceptance-checklist.md
+```
+
 -------------------------------------------------------------------------------
 ## 6. Software + WinGet Diagnose Smoke (AG-025 / AG-026)
 -------------------------------------------------------------------------------
