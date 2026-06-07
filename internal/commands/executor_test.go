@@ -211,6 +211,33 @@ func TestLocalExecutorLockUserLoginCallsLocalMutationAdapter(t *testing.T) {
 	}
 }
 
+func TestLocalExecutorLockUserLoginRefusesReservedAccount(t *testing.T) {
+	called := false
+	mutateLocalUserSeam(t, func(users.LocalUserMutationRequest) (users.LocalUserMutationResult, error) {
+		called = true
+		return users.LocalUserMutationResult{}, nil
+	})
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandLockUserLogin}, "test")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-lock-admin",
+		ClaimID:        "claim-lock-admin",
+		AttemptNumber:  1,
+		Type:           protocol.CommandLockUserLogin,
+		Reason:         "attempt to lock the built-in administrator",
+		Payload:        map[string]interface{}{"username": "Administrator"},
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusFailed {
+		t.Fatalf("status = %s, want FAILED (reserved-account guard)", result.Status)
+	}
+	if called {
+		t.Fatal("mutation adapter must not be invoked for a reserved built-in account")
+	}
+}
+
 func TestLocalExecutorUnlockUserLoginCallsLocalMutationAdapter(t *testing.T) {
 	mutateLocalUserSeam(t, func(req users.LocalUserMutationRequest) (users.LocalUserMutationResult, error) {
 		if req.Action != users.ActionUnlockUserLogin {
