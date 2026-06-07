@@ -3,6 +3,7 @@
 package users
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"syscall"
@@ -167,10 +168,24 @@ func adminLocalUserSIDStrings() (map[string]struct{}, error) {
 		}
 		for _, m := range members {
 			ms := m.String()
+			if ms == "" {
+				return fmt.Errorf("convert a member SID of %q to string", groupName)
+			}
 			name, _, use, lookupErr := m.LookupAccount("")
 			if lookupErr != nil {
-				// Orphaned / unresolvable member SID = a deleted account; it
-				// cannot be an enabled effective admin, so skipping is safe.
+				// A genuinely orphaned/deleted member SID (ERROR_NONE_MAPPED)
+				// cannot be an enabled effective admin, so skipping is safe. But a
+				// TRANSIENT / LSA / access failure on a LOCAL or built-in group SID
+				// must NOT be silently skipped: failing to expand that group could
+				// drop a nested-only admin and false-allow a last-admin lock — the
+				// same incomplete-set class as the pagination cap (Codex 019ea1a2 P1).
+				if errors.Is(lookupErr, windows.ERROR_NONE_MAPPED) {
+					continue
+				}
+				if strings.HasPrefix(ms, "S-1-5-32-") || localUnderMachineDomain(m, machineSid) {
+					return fmt.Errorf("resolve local/builtin Administrators member SID %s in %q: %w", ms, groupName, lookupErr)
+				}
+				// A non-local / domain SID cannot widen the LOCAL-user admin set.
 				continue
 			}
 			switch use {
