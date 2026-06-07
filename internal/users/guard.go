@@ -62,3 +62,27 @@ func GuardReservedUsername(username string) error {
 	}
 	return nil
 }
+
+// reservedAccountRIDs are the relative identifiers of well-known Windows local
+// accounts: built-in Administrator (500), Guest (501), krbtgt (502),
+// DefaultAccount (503), WDAGUtilityAccount (504). The RID is stable across a
+// rename and across locale, so this guard catches a *renamed* or localized
+// built-in that the name denylist (GuardReservedUsername) cannot.
+var reservedAccountRIDs = map[uint32]struct{}{
+	500: {},
+	501: {},
+	502: {},
+	503: {},
+	504: {},
+}
+
+// GuardProtectedRID returns a non-nil error when the resolved account RID is a
+// reserved well-known identifier. The RID is the last sub-authority of the
+// account's SID. Callers MUST treat a non-nil result as a hard refusal
+// (fail-closed) and report the command as FAILED.
+func GuardProtectedRID(rid uint32) error {
+	if _, reserved := reservedAccountRIDs[rid]; reserved {
+		return fmt.Errorf("account RID %d is a reserved built-in identifier and cannot be targeted by a remote command", rid)
+	}
+	return nil
+}
