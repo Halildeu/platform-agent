@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"platform-agent/internal/autoenroll"
 	"platform-agent/internal/config"
 )
 
@@ -14,7 +15,7 @@ type stubRegistry struct {
 	stringMap map[string]string
 }
 
-func (s stubRegistry) ReadInt(_, _ string, def int) int        { return def }
+func (s stubRegistry) ReadInt(_, _ string, def int) int { return def }
 func (s stubRegistry) ReadString(key, value, def string) string {
 	if v, ok := s.stringMap[key+"|"+value]; ok {
 		return v
@@ -117,5 +118,26 @@ func TestResolveMode_FlagOffNoRegistry(t *testing.T) {
 	// fallback is HMAC mode.
 	if got := resolveMode(false, false); got != modeHMAC {
 		t.Fatalf("default should be HMAC: got %q", got)
+	}
+}
+
+func TestValidateAutoEnrollCertFilter_RejectsBroadDefault(t *testing.T) {
+	err := validateAutoEnrollCertFilter(autoenroll.CertFilter{})
+	if err == nil {
+		t.Fatal("expected broad auto-enroll cert filter to fail closed")
+	}
+}
+
+func TestValidateAutoEnrollCertFilter_AcceptsSubjectSuffix(t *testing.T) {
+	err := validateAutoEnrollCertFilter(autoenroll.CertFilter{SubjectSuffix: ".acik.local"})
+	if err != nil {
+		t.Fatalf("subject suffix should be accepted: %v", err)
+	}
+}
+
+func TestValidateAutoEnrollCertFilter_AcceptsSANURIPrefix(t *testing.T) {
+	err := validateAutoEnrollCertFilter(autoenroll.CertFilter{SANURIPrefix: "adcomputer:"})
+	if err != nil {
+		t.Fatalf("SAN URI prefix should be accepted: %v", err)
 	}
 }

@@ -270,6 +270,9 @@ func newAutoEnrollRunner(cfg config.Config, apiURLOverride string, logger *log.L
 	}
 	aeCfg.CertFilter.SubjectSuffix = cfg.AutoEnrollCertSubjectSuffix
 	aeCfg.CertFilter.SANURIPrefix = cfg.AutoEnrollCertSANURIPrefix
+	if err := validateAutoEnrollCertFilter(aeCfg.CertFilter); err != nil {
+		return nil, err
+	}
 
 	certProvider := certstore.New()
 	configStore := dpapi.New(cfg.AutoEnrollConfigPath, nil)
@@ -291,6 +294,9 @@ func runAutoEnrollDryRun(cfg config.Config, apiURLOverride string, logger *log.L
 	aeCfg.APIURL = resolveAutoEnrollAPIURL(cfg, apiURLOverride, registryReader, aeCfg.APIURL)
 	aeCfg.CertFilter.SubjectSuffix = cfg.AutoEnrollCertSubjectSuffix
 	aeCfg.CertFilter.SANURIPrefix = cfg.AutoEnrollCertSANURIPrefix
+	if err := validateAutoEnrollCertFilter(aeCfg.CertFilter); err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -330,6 +336,13 @@ func runAutoEnrollDryRun(cfg config.Config, apiURLOverride string, logger *log.L
 			persisted.DeviceID, persisted.CertThumbprintSHA256, persisted.TokenExpiresAt.Format(time.RFC3339))
 	}
 	logger.Printf("dry-run OK — no HTTP call made")
+	return nil
+}
+
+func validateAutoEnrollCertFilter(filter autoenroll.CertFilter) error {
+	if strings.TrimSpace(filter.SubjectSuffix) == "" && strings.TrimSpace(filter.SANURIPrefix) == "" {
+		return fmt.Errorf("auto-enroll cert filter requires ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX or ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX")
+	}
 	return nil
 }
 
