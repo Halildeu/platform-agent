@@ -29,11 +29,11 @@ func TestValidateRequiresReasonForSensitiveCommands(t *testing.T) {
 		CommandID:      "cmd-1",
 		ClaimID:        "claim-1",
 		AttemptNumber:  1,
-		Type:           protocol.CommandDisableLocalUser,
+		Type:           protocol.CommandLockUserLogin,
 		ClaimExpiresAt: time.Now().Add(time.Minute),
 	}
 
-	err := Validate(command, []protocol.CommandType{protocol.CommandDisableLocalUser}, time.Now())
+	err := Validate(command, []protocol.CommandType{protocol.CommandLockUserLogin}, time.Now())
 	if !errors.Is(err, ErrMissingReason) {
 		t.Fatalf("err = %v, want ErrMissingReason", err)
 	}
