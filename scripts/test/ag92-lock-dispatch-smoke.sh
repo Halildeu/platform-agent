@@ -403,13 +403,13 @@ jq -n \
 
 {
   printf "# AG-092 LOCK_USER_LOGIN Dispatch Smoke\n\n"
-  printf "- Device: \`%s\`\n" "$device_id"
-  printf "- Command: \`%s\`\n" "$command_id"
-  printf "- Target user: \`%s\`\n" "$target_username"
-  printf "- Terminal status: \`%s\`\n" "$terminal_status"
-  printf "- Idempotency key: \`%s\`\n" "$idempotency_key"
-  printf "- VM before/after check: \`%s\`\n" "$([ -n "$parallels_vm" ] && echo "enabled:$parallels_vm" || echo "not-run")"
-  printf "- Evidence dir: \`%s\`\n\n" "$evidence_dir"
+  printf -- "- Device: \`%s\`\n" "$device_id"
+  printf -- "- Command: \`%s\`\n" "$command_id"
+  printf -- "- Target user: \`%s\`\n" "$target_username"
+  printf -- "- Terminal status: \`%s\`\n" "$terminal_status"
+  printf -- "- Idempotency key: \`%s\`\n" "$idempotency_key"
+  printf -- "- VM before/after check: \`%s\`\n" "$([ -n "$parallels_vm" ] && echo "enabled:$parallels_vm" || echo "not-run")"
+  printf -- "- Evidence dir: \`%s\`\n\n" "$evidence_dir"
   printf "No raw JWTs are stored in this evidence directory. Config-file contents are never printed.\n"
 } >"$report_md"
 
