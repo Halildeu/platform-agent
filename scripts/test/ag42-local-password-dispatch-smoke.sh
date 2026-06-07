@@ -147,7 +147,8 @@ redact() {
     -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]+/\1<REDACTED>/g' \
     -e 's/(Authorization:[[:space:]]*)[^[:space:]]+/\1<REDACTED>/g' \
     -e 's/(eyJ[A-Za-z0-9_-]{8,})\.[A-Za-z0-9._-]+/\1.<REDACTED>/g' \
-    -e 's/("?[A-Za-z0-9_-]*(password|token|secret|authorization)[A-Za-z0-9_-]*"?[[:space:]]*[:=][[:space:]]*"?)[^",[:space:]}]+("?)/\1<REDACTED>\3/gi'
+    -e 's/("?[A-Za-z0-9_-]*(password|token|secret|authorization)[A-Za-z0-9_-]*"?[[:space:]]*[:=][[:space:]]*"?)[^",[:space:]}]+("?)/\1<REDACTED>\3/gi' \
+    -e 's/:[[:space:]]*<REDACTED>([]},])/: "<REDACTED>"\1/g'
 }
 
 require_cmd() {
