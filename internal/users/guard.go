@@ -90,3 +90,41 @@ func GuardProtectedRID(rid uint32) error {
 	}
 	return nil
 }
+
+// LockoutFacts is the minimal local-SAM state the last-administrator lockout
+// guard needs. It is gathered by the Windows adapter (the security-sensitive
+// enumeration) and consumed by the pure decision function evaluateLockoutGuard,
+// which keeps the *decision* fully testable on every platform.
+type LockoutFacts struct {
+	// TargetIsLocalAdmin: the target account is a (direct or indirect) member of
+	// the built-in Administrators alias.
+	TargetIsLocalAdmin bool
+	// TargetEnabled: the target account is currently enabled (not disabled).
+	TargetEnabled bool
+	// OtherEnabledLocalAdmins: count of OTHER enabled local-user members of the
+	// Administrators alias (the target itself is excluded).
+	OtherEnabledLocalAdmins int
+}
+
+// evaluateLockoutGuard refuses a LOCK_USER_LOGIN that would disable the last
+// enabled local administrator — which would strand the endpoint with no
+// administrative access. It is a no-op for:
+//   - any action other than LOCK_USER_LOGIN (unlock / change-password),
+//   - a target that is not a local administrator,
+//   - a target that is already disabled,
+//   - any case where at least one other enabled local admin remains.
+//
+// Callers MUST gather LockoutFacts fail-closed (treat a gather error as a hard
+// refusal) — this function only encodes the decision, not the gathering.
+func evaluateLockoutGuard(action LocalUserMutationAction, f LockoutFacts) error {
+	if action != ActionLockUserLogin {
+		return nil
+	}
+	if !f.TargetEnabled || !f.TargetIsLocalAdmin {
+		return nil
+	}
+	if f.OtherEnabledLocalAdmins <= 0 {
+		return fmt.Errorf("refusing to disable the last enabled local administrator (no other enabled local admin would remain)")
+	}
+	return nil
+}

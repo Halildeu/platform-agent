@@ -116,6 +116,12 @@ func MutateLocal(req LocalUserMutationRequest) (LocalUserMutationResult, error) 
 
 	switch req.Action {
 	case ActionLockUserLogin:
+		// Lockout guard (#84 part 2): refuse to disable the last enabled local
+		// administrator, which would strand the endpoint with no admin access.
+		// Fail closed on any gathering error.
+		if err := checkLockoutGuard(username); err != nil {
+			return LocalUserMutationResult{}, err
+		}
 		return setLocalUserDisabled(username, true)
 	case ActionUnlockUserLogin:
 		return setLocalUserDisabled(username, false)
