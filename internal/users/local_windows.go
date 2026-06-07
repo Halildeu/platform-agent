@@ -101,16 +101,18 @@ func MutateLocal(req LocalUserMutationRequest) (LocalUserMutationResult, error) 
 		return LocalUserMutationResult{}, err
 	}
 
-	// RID guard (#84): resolve the account SID and refuse reserved well-known
-	// RIDs ({500..504}) for every action, before any SAM write. This catches a
-	// *renamed* or localized built-in (e.g. a renamed Administrator) that the
-	// name denylist in GuardReservedUsername cannot. Fail closed if the SID
-	// cannot be resolved.
-	rid, err := localUserRID(username)
+	// Identity resolution (#84): resolve the account SID ONCE, proving it is a
+	// local SAM user (local-scope proof, residual #3) and yielding the RID. The
+	// same identity feeds the RID guard and the lockout guard so they cannot
+	// diverge. Fail closed if the SID cannot be resolved or is not a local user.
+	identity, err := resolveLocalUserIdentity(username)
 	if err != nil {
-		return LocalUserMutationResult{}, fmt.Errorf("resolve account RID for %q: %w", username, err)
+		return LocalUserMutationResult{}, fmt.Errorf("resolve local account for %q: %w", username, err)
 	}
-	if err := GuardProtectedRID(rid); err != nil {
+	// RID guard: refuse reserved well-known RIDs ({500..504}) for every action,
+	// before any SAM write — catches a *renamed* or localized built-in (e.g. a
+	// renamed Administrator) that the name denylist in GuardReservedUsername cannot.
+	if err := GuardProtectedRID(identity.rid); err != nil {
 		return LocalUserMutationResult{}, err
 	}
 
@@ -118,8 +120,9 @@ func MutateLocal(req LocalUserMutationRequest) (LocalUserMutationResult, error) 
 	case ActionLockUserLogin:
 		// Lockout guard (#84 part 2): refuse to disable the last enabled local
 		// administrator, which would strand the endpoint with no admin access.
-		// Fail closed on any gathering error.
-		if err := checkLockoutGuard(username); err != nil {
+		// Fail closed on any gathering error. The proven-local SID is threaded
+		// through so the guard reasons over the same identity.
+		if err := checkLockoutGuard(username, identity.sid); err != nil {
 			return LocalUserMutationResult{}, err
 		}
 		return setLocalUserDisabled(username, true)
@@ -135,19 +138,18 @@ func MutateLocal(req LocalUserMutationRequest) (LocalUserMutationResult, error) 
 	}
 }
 
-// localUserRID resolves the account SID for username and returns its relative
-// identifier (the last sub-authority). The RID guard uses it to refuse reserved
-// built-in identifiers ({500..504}) even when the account has been renamed.
+// localUserRID resolves username to a proven-local SAM account SID and returns
+// its relative identifier (the last sub-authority). The RID guard uses it to
+// refuse reserved built-in identifiers ({500..504}) even when the account has
+// been renamed. Routing through localAccountSID also enforces the local-scope
+// proof (#84 residual #3): a bare name that resolves to a domain principal, or a
+// non-user SID, is refused before any RID is read.
 func localUserRID(username string) (uint32, error) {
-	sid, _, _, err := windows.LookupSID("", username)
+	id, err := resolveLocalUserIdentity(username)
 	if err != nil {
-		return 0, fmt.Errorf("LookupSID failed for %q: %w", username, err)
+		return 0, err
 	}
-	count := sid.SubAuthorityCount()
-	if count == 0 {
-		return 0, fmt.Errorf("SID for %q has no sub-authorities", username)
-	}
-	return sid.SubAuthority(uint32(count) - 1), nil
+	return id.rid, nil
 }
 
 func normalizeLocalUsername(raw string) (string, error) {

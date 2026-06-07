@@ -16,18 +16,29 @@ import (
 // password of) e.g. the built-in Administrator can strand the endpoint without
 // any administrative access.
 //
-// THREE GUARDS, all enforced:
+// FIVE GUARDS, all enforced:
 //   1. name denylist + SID-literal rejection (GuardReservedUsername, here);
 //   2. the RID guard ({500..504}, GuardProtectedRID here, fed by the Windows
 //      MutateLocal once the account SID is resolved) — catches a renamed/localized
 //      built-in the name list would miss;
-//   3. the last-enabled-administrator lockout guard — its decision is the pure
-//      evaluateLockoutGuard below, fed by the Windows-only gathering in
-//      lockout_windows.go (Administrators membership + enabled cross-reference).
+//   3. the local-scope proof (localAccountSID in identity_windows.go): the target
+//      must be a SidTypeUser account whose SID sits directly under the machine
+//      account-domain SID, so a bare name on a domain-joined host cannot make the
+//      guards reason over a domain principal (#84 residual #3);
+//   4. nested-group Administrators membership (adminLocalUserSIDStrings in
+//      lockout_windows.go): the Administrators alias is recursively flattened to
+//      the set of effective LOCAL-USER members, so a target that is an admin only
+//      through a nested local group is still detected (#84 residual #2 — live
+//      testing proved NetUserGetLocalGroups(LG_INCLUDE_INDIRECT) does NOT surface
+//      local-group nesting on a workgroup host);
+//   5. the last-enabled-administrator lockout guard — its decision is the pure
+//      evaluateLockoutGuard below, fed by that recursive membership set plus the
+//      enabled cross-reference. The same flattened set backs both the target
+//      check and the other-admins count, so they cannot diverge.
 //
-// Live Windows acceptance (prlctl) is the remaining verification for the Windows
-// gathering; an indirect-membership / current-interactive-user refinement is a
-// possible future hardening (Codex 019ea1a2).
+// Guards 2-5 are live-verified on a real Windows SAM, including a nested
+// local-group admin fixture (Codex 019ea1a2). The full backend->agent LOCK
+// dispatch E2E with dual-control is the remaining acceptance for the command path.
 
 // reservedLocalUsernames are well-known Windows local / service account names
 // that destructive remote commands must never target. Compared case-insensitively
@@ -98,10 +109,10 @@ func GuardProtectedRID(rid uint32) error {
 // enumeration) and consumed by the pure decision function evaluateLockoutGuard,
 // which keeps the *decision* fully testable on every platform.
 type LockoutFacts struct {
-	// TargetIsLocalAdmin: the target account is a DIRECT member of the built-in
-	// Administrators alias (v1 scope — the Windows gathering enumerates the alias
-	// membership directly; nested-group / indirect membership is a possible
-	// future refinement via NetUserGetLocalGroups(LG_INCLUDE_INDIRECT)).
+	// TargetIsLocalAdmin: the target account is an effective LOCAL-USER member —
+	// directly OR via a nested local group — of the built-in Administrators alias.
+	// The Windows gathering recursively flattens the alias (adminLocalUserSIDStrings);
+	// a gathering error is fail-closed (over-detection is the safe direction).
 	TargetIsLocalAdmin bool
 	// TargetEnabled: the target account is currently enabled (not disabled).
 	TargetEnabled bool
