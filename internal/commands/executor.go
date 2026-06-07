@@ -431,8 +431,10 @@ func unmarshalLocalUserMutation(commandType protocol.CommandType, payload map[st
 	// literals) regardless of the backend dual-control decision. Locking or
 	// rotating e.g. the built-in Administrator can strand the endpoint with no
 	// administrative access; the agent fails closed here (see
-	// users.GuardReservedUsername). The RID-based renamed-builtin guard and the
-	// last-enabled-admin lockout guard are a documented Windows-side follow-up.
+	// users.GuardReservedUsername). The RID-based renamed-builtin guard
+	// (GuardProtectedRID) runs in the Windows MutateLocal after the SID is
+	// resolved; the last-enabled-admin lockout guard remains a Windows-side
+	// follow-up.
 	if err := users.GuardReservedUsername(username); err != nil {
 		return users.LocalUserMutationRequest{}, fmt.Errorf("%s %w", commandType, err)
 	}

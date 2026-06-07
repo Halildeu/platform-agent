@@ -16,12 +16,16 @@ import (
 // password of) e.g. the built-in Administrator can strand the endpoint without
 // any administrative access.
 //
-// SCOPE (v1): name-based denylist + SID-literal rejection — purely syntactic,
-// fully testable on every platform. The RID-based guard ({500..504}, to catch a
-// *renamed* built-in) and the last-enabled-administrator lockout guard require
-// Windows SAM lookups (NetUserGetInfo level 3 + NetUserGetLocalGroups); they are
-// tracked as a documented follow-up rather than stubbed here, so this file never
-// pretends to enforce a check it does not actually run (Codex 019ea1a2).
+// ENFORCED HERE: name-based denylist + SID-literal rejection
+// (GuardReservedUsername) AND the RID-based guard ({500..504},
+// GuardProtectedRID, called from the Windows MutateLocal once the account SID is
+// resolved) — together they refuse the well-known built-ins both by name and by
+// stable identifier, so a renamed/localized built-in is still caught.
+//
+// REMAINING FOLLOW-UP: the last-enabled-administrator lockout guard (needs
+// Administrators-group enumeration via NetLocalGroupGetMembers + per-member
+// enabled-state cross-reference) is a separate slice, not stubbed here, so
+// nothing pretends to enforce a check it does not actually run (Codex 019ea1a2).
 
 // reservedLocalUsernames are well-known Windows local / service account names
 // that destructive remote commands must never target. Compared case-insensitively
