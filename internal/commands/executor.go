@@ -427,6 +427,15 @@ func unmarshalLocalUserMutation(commandType protocol.CommandType, payload map[st
 	if err != nil {
 		return users.LocalUserMutationRequest{}, fmt.Errorf("%s payload %w", commandType, err)
 	}
+	// Defense-in-depth: refuse reserved built-in / service accounts (and SID
+	// literals) regardless of the backend dual-control decision. Locking or
+	// rotating e.g. the built-in Administrator can strand the endpoint with no
+	// administrative access; the agent fails closed here (see
+	// users.GuardReservedUsername). The RID-based renamed-builtin guard and the
+	// last-enabled-admin lockout guard are a documented Windows-side follow-up.
+	if err := users.GuardReservedUsername(username); err != nil {
+		return users.LocalUserMutationRequest{}, fmt.Errorf("%s %w", commandType, err)
+	}
 	req := users.LocalUserMutationRequest{Username: username}
 	switch commandType {
 	case protocol.CommandLockUserLogin:
