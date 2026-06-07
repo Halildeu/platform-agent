@@ -31,6 +31,39 @@ func TestGuardProtectedRID(t *testing.T) {
 	}
 }
 
+func TestEvaluateLockoutGuard(t *testing.T) {
+	cases := []struct {
+		name    string
+		action  LocalUserMutationAction
+		facts   LockoutFacts
+		wantErr bool
+	}{
+		{"lock last enabled admin → refuse", ActionLockUserLogin,
+			LockoutFacts{TargetIsLocalAdmin: true, TargetEnabled: true, OtherEnabledLocalAdmins: 0}, true},
+		{"lock admin with another enabled admin → allow", ActionLockUserLogin,
+			LockoutFacts{TargetIsLocalAdmin: true, TargetEnabled: true, OtherEnabledLocalAdmins: 1}, false},
+		{"lock non-admin → allow", ActionLockUserLogin,
+			LockoutFacts{TargetIsLocalAdmin: false, TargetEnabled: true, OtherEnabledLocalAdmins: 0}, false},
+		{"lock already-disabled admin → allow", ActionLockUserLogin,
+			LockoutFacts{TargetIsLocalAdmin: true, TargetEnabled: false, OtherEnabledLocalAdmins: 0}, false},
+		{"unlock last admin → allow (only LOCK is guarded)", ActionUnlockUserLogin,
+			LockoutFacts{TargetIsLocalAdmin: true, TargetEnabled: true, OtherEnabledLocalAdmins: 0}, false},
+		{"change-password last admin → allow (only LOCK is guarded)", ActionChangeLocalPassword,
+			LockoutFacts{TargetIsLocalAdmin: true, TargetEnabled: true, OtherEnabledLocalAdmins: 0}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := evaluateLockoutGuard(tc.action, tc.facts)
+			if tc.wantErr && err == nil {
+				t.Errorf("evaluateLockoutGuard(%s, %+v) = nil; want refusal", tc.action, tc.facts)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("evaluateLockoutGuard(%s, %+v) = %v; want nil", tc.action, tc.facts, err)
+			}
+		})
+	}
+}
+
 func TestGuardReservedUsername_AllowsNormalAccounts(t *testing.T) {
 	allowed := []string{
 		"alice", "bob.smith", "svc-backup", "operator1", "jdoe",

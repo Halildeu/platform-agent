@@ -16,16 +16,18 @@ import (
 // password of) e.g. the built-in Administrator can strand the endpoint without
 // any administrative access.
 //
-// ENFORCED HERE: name-based denylist + SID-literal rejection
-// (GuardReservedUsername) AND the RID-based guard ({500..504},
-// GuardProtectedRID, called from the Windows MutateLocal once the account SID is
-// resolved) — together they refuse the well-known built-ins both by name and by
-// stable identifier, so a renamed/localized built-in is still caught.
+// THREE GUARDS, all enforced:
+//   1. name denylist + SID-literal rejection (GuardReservedUsername, here);
+//   2. the RID guard ({500..504}, GuardProtectedRID here, fed by the Windows
+//      MutateLocal once the account SID is resolved) — catches a renamed/localized
+//      built-in the name list would miss;
+//   3. the last-enabled-administrator lockout guard — its decision is the pure
+//      evaluateLockoutGuard below, fed by the Windows-only gathering in
+//      lockout_windows.go (Administrators membership + enabled cross-reference).
 //
-// REMAINING FOLLOW-UP: the last-enabled-administrator lockout guard (needs
-// Administrators-group enumeration via NetLocalGroupGetMembers + per-member
-// enabled-state cross-reference) is a separate slice, not stubbed here, so
-// nothing pretends to enforce a check it does not actually run (Codex 019ea1a2).
+// Live Windows acceptance (prlctl) is the remaining verification for the Windows
+// gathering; an indirect-membership / current-interactive-user refinement is a
+// possible future hardening (Codex 019ea1a2).
 
 // reservedLocalUsernames are well-known Windows local / service account names
 // that destructive remote commands must never target. Compared case-insensitively
@@ -87,6 +89,46 @@ var reservedAccountRIDs = map[uint32]struct{}{
 func GuardProtectedRID(rid uint32) error {
 	if _, reserved := reservedAccountRIDs[rid]; reserved {
 		return fmt.Errorf("account RID %d is a reserved built-in identifier and cannot be targeted by a remote command", rid)
+	}
+	return nil
+}
+
+// LockoutFacts is the minimal local-SAM state the last-administrator lockout
+// guard needs. It is gathered by the Windows adapter (the security-sensitive
+// enumeration) and consumed by the pure decision function evaluateLockoutGuard,
+// which keeps the *decision* fully testable on every platform.
+type LockoutFacts struct {
+	// TargetIsLocalAdmin: the target account is a DIRECT member of the built-in
+	// Administrators alias (v1 scope — the Windows gathering enumerates the alias
+	// membership directly; nested-group / indirect membership is a possible
+	// future refinement via NetUserGetLocalGroups(LG_INCLUDE_INDIRECT)).
+	TargetIsLocalAdmin bool
+	// TargetEnabled: the target account is currently enabled (not disabled).
+	TargetEnabled bool
+	// OtherEnabledLocalAdmins: count of OTHER enabled local-user members of the
+	// Administrators alias (the target itself is excluded).
+	OtherEnabledLocalAdmins int
+}
+
+// evaluateLockoutGuard refuses a LOCK_USER_LOGIN that would disable the last
+// enabled local administrator — which would strand the endpoint with no
+// administrative access. It is a no-op for:
+//   - any action other than LOCK_USER_LOGIN (unlock / change-password),
+//   - a target that is not a local administrator,
+//   - a target that is already disabled,
+//   - any case where at least one other enabled local admin remains.
+//
+// Callers MUST gather LockoutFacts fail-closed (treat a gather error as a hard
+// refusal) — this function only encodes the decision, not the gathering.
+func evaluateLockoutGuard(action LocalUserMutationAction, f LockoutFacts) error {
+	if action != ActionLockUserLogin {
+		return nil
+	}
+	if !f.TargetEnabled || !f.TargetIsLocalAdmin {
+		return nil
+	}
+	if f.OtherEnabledLocalAdmins <= 0 {
+		return fmt.Errorf("refusing to disable the last enabled local administrator (no other enabled local admin would remain)")
 	}
 	return nil
 }
