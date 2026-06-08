@@ -46,7 +46,7 @@ powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap
   -PackageUrl $PackageUrl `
   -ExpectedZipSha256 $ExpectedZipSha256 `
   -AutoEnroll `
-  -AutoEnrollApiUrl "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin" `
+  -AutoEnrollApiUrl "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent" `
   -AutoEnrollCertSANURIPrefix "adcomputer:" `
   -Start `
   -Force

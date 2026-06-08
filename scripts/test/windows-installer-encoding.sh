@@ -39,6 +39,7 @@ required_install_markers = [
 ]
 required_bootstrap_markers = [
     "[switch]$AutoEnroll",
+    'https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent',
     '$installArgs["AutoEnroll"] = $true',
     '$installArgs["AutoEnrollApiUrl"] = $AutoEnrollApiUrl',
     '$installArgs["AutoEnrollCertSANURIPrefix"] = $AutoEnrollCertSANURIPrefix',
