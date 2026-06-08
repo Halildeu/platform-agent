@@ -24,6 +24,11 @@ param(
     [string]$MaintenanceToken = "",
     [string]$MaintenanceTokenHash = "",
     [string]$ServiceSddl = "D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;AU)",
+    [switch]$AutoEnroll,
+    [string]$AutoEnrollApiUrl = "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin",
+    [string]$AutoEnrollCertSubjectSuffix = "",
+    [string]$AutoEnrollCertSANURIPrefix = "adcomputer:",
+    [int]$AutoEnrollJitterSeconds = 0,
     [switch]$Start,
     [switch]$Force,
     [switch]$DisableTamperProtection,
@@ -87,7 +92,10 @@ $configKeys = @(
     "ENDPOINT_AGENT_SECRET",
     "ENDPOINT_AGENT_INSTALL_ID",
     "ENDPOINT_AGENT_LOG_DIR",
-    "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256"
+    "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256",
+    "ENDPOINT_AGENT_AUTO_ENROLL_API_URL",
+    "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX",
+    "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX"
 )
 
 function Write-Step {
@@ -347,6 +355,64 @@ function Remove-ServiceEnvironmentEntry {
     }
 }
 
+function Get-AgentRegistrySnapshot {
+    param([string[]]$Names)
+    $path = "HKLM:\SOFTWARE\EndpointAgent"
+    $snapshot = @{}
+    foreach ($name in $Names) {
+        $entry = @{
+            Exists = $false
+            Value  = $null
+            Kind   = "String"
+        }
+        if (Test-Path -LiteralPath $path) {
+            $key = $null
+            try {
+                $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\EndpointAgent")
+                if ($null -ne $key -and ($key.GetValueNames() -contains $name)) {
+                    $entry.Exists = $true
+                    $entry.Value = $key.GetValue($name)
+                    $entry.Kind = $key.GetValueKind($name).ToString()
+                }
+            } finally {
+                if ($key) { $key.Dispose() }
+            }
+        }
+        $snapshot[$name] = $entry
+    }
+    return $snapshot
+}
+
+function Restore-AgentRegistrySnapshot {
+    param([hashtable]$Snapshot)
+    $path = "HKLM:\SOFTWARE\EndpointAgent"
+    foreach ($name in $Snapshot.Keys) {
+        $entry = $Snapshot[$name]
+        if ($entry.Exists) {
+            New-Item -Path $path -Force | Out-Null
+            New-ItemProperty -Path $path -Name $name -Value $entry.Value -PropertyType $entry.Kind -Force | Out-Null
+        } elseif (Test-Path -LiteralPath $path) {
+            Remove-ItemProperty -Path $path -Name $name -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Set-AgentAutoEnrollRegistry {
+    param(
+        [string]$ApiUrl,
+        [int]$JitterSeconds
+    )
+    $path = "HKLM:\SOFTWARE\EndpointAgent"
+    New-Item -Path $path -Force | Out-Null
+    New-ItemProperty -Path $path -Name "Mode" -Value "auto-enroll" -PropertyType String -Force | Out-Null
+    if (-not [string]::IsNullOrWhiteSpace($ApiUrl)) {
+        New-ItemProperty -Path $path -Name "ApiUrl" -Value $ApiUrl -PropertyType String -Force | Out-Null
+    }
+    if ($JitterSeconds -gt 0) {
+        New-ItemProperty -Path $path -Name "EnrollmentJitterSeconds" -Value $JitterSeconds -PropertyType DWord -Force | Out-Null
+    }
+}
+
 # AG-026C: scan the agent log for the AG-026D "hmac credential
 # confirmed" sentinel that proves: (a) the DPAPI store wrote the
 # credential, (b) the first signed heartbeat returned 2xx with
@@ -433,6 +499,22 @@ function Remove-ServiceBestEffort {
 }
 
 Assert-Administrator
+
+if ($AutoEnroll) {
+    if (-not [string]::IsNullOrWhiteSpace($EnrollmentToken) -or
+        -not [string]::IsNullOrWhiteSpace($AgentId) -or
+        -not [string]::IsNullOrWhiteSpace($AgentSecret) -or
+        -not [string]::IsNullOrWhiteSpace($InstallId)) {
+        throw "-AutoEnroll is mutually exclusive with HMAC enrollment token/id/secret/install-id parameters."
+    }
+    if ([string]::IsNullOrWhiteSpace($AutoEnrollCertSubjectSuffix) -and
+        [string]::IsNullOrWhiteSpace($AutoEnrollCertSANURIPrefix)) {
+        throw "-AutoEnroll requires AutoEnrollCertSubjectSuffix or AutoEnrollCertSANURIPrefix."
+    }
+    if ($AutoEnrollJitterSeconds -lt 0) {
+        throw "-AutoEnrollJitterSeconds must be zero or positive."
+    }
+}
 
 # ----------------------------------------------------------------------
 # Faz 22.1.0 release-foundation - URL download + signature verify
@@ -589,6 +671,8 @@ if ($useUrlDownload) {
 $sourceBinary = Resolve-Path -LiteralPath $BinaryPath -ErrorAction Stop
 $targetBinary = Join-Path $InstallDir "endpoint-agent.exe"
 $originalValues = @{}
+$autoEnrollRegistrySnapshot = $null
+$autoEnrollRegistryTouched = $false
 $copiedBinary = $false
 $installedService = $false
 $resolvedMaintenanceTokenHash = Resolve-MaintenanceTokenHash -Token $MaintenanceToken -Hash $MaintenanceTokenHash
@@ -651,7 +735,7 @@ try {
     Unblock-File -LiteralPath $targetBinary -ErrorAction SilentlyContinue
     $copiedBinary = $true
 
-    # AG-026C: install agent config to the SERVICE-SPECIFIC env regkey
+    # AG-026C / ADR-0029: install agent config to the SERVICE-SPECIFIC env regkey
     # (HKLM\SYSTEM\CurrentControlSet\Services\$ServiceName\Environment)
     # instead of the Machine env. Bypasses the SCM env block caching
     # quirk that delayed SCM from picking up Machine env changes on
@@ -685,14 +769,29 @@ try {
     # narrow exception to the AG-026C "Machine env NEVER" rule.
     Set-MachineEnvIfPresent -OriginalValues $originalValues -Name "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" -Value $resolvedMaintenanceTokenHash
 
-    $serviceEnv = @{
-        "ENDPOINT_AGENT_API_URL" = $ApiUrl
-        "ENDPOINT_AGENT_ENROLLMENT_TOKEN" = $EnrollmentToken
-        "ENDPOINT_AGENT_ID" = $AgentId
-        "ENDPOINT_AGENT_SECRET" = $AgentSecret
-        "ENDPOINT_AGENT_INSTALL_ID" = $InstallId
-        "ENDPOINT_AGENT_LOG_DIR" = $LogDir
-        "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" = $resolvedMaintenanceTokenHash
+    if ($AutoEnroll) {
+        $autoEnrollRegistrySnapshot = Get-AgentRegistrySnapshot -Names @("Mode", "ApiUrl", "EnrollmentJitterSeconds")
+        Write-Step "configuring auto-enroll registry mode"
+        Set-AgentAutoEnrollRegistry -ApiUrl $AutoEnrollApiUrl -JitterSeconds $AutoEnrollJitterSeconds
+        $autoEnrollRegistryTouched = $true
+
+        $serviceEnv = @{
+            "ENDPOINT_AGENT_LOG_DIR" = $LogDir
+            "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" = $resolvedMaintenanceTokenHash
+            "ENDPOINT_AGENT_AUTO_ENROLL_API_URL" = $AutoEnrollApiUrl
+            "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX" = $AutoEnrollCertSubjectSuffix
+            "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX" = $AutoEnrollCertSANURIPrefix
+        }
+    } else {
+        $serviceEnv = @{
+            "ENDPOINT_AGENT_API_URL" = $ApiUrl
+            "ENDPOINT_AGENT_ENROLLMENT_TOKEN" = $EnrollmentToken
+            "ENDPOINT_AGENT_ID" = $AgentId
+            "ENDPOINT_AGENT_SECRET" = $AgentSecret
+            "ENDPOINT_AGENT_INSTALL_ID" = $InstallId
+            "ENDPOINT_AGENT_LOG_DIR" = $LogDir
+            "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" = $resolvedMaintenanceTokenHash
+        }
     }
 
     Write-Step "installing service: $ServiceName"
@@ -749,7 +848,7 @@ try {
     # accepted (not persisted)") is deliberately ignored by the gate
     # - without DPAPI confirmation we leave the token in place so the
     # next service restart can retry the same enroll.
-    if ($Start -and -not [string]::IsNullOrWhiteSpace($EnrollmentToken)) {
+    if ($Start -and -not $AutoEnroll -and -not [string]::IsNullOrWhiteSpace($EnrollmentToken)) {
         Write-Step "waiting for AG-026D credential-confirmed sentinel (up to 60s, log baseline=$logBaselineLength bytes)"
         if (Wait-ForCredentialConfirmed -LogPath $agentLog -TimeoutSeconds 60 -BaselineLength $logBaselineLength) {
             Write-Step "AG-026C: enroll confirmed - removing token from service env regkey"
@@ -775,6 +874,13 @@ try {
             Remove-Item -LiteralPath $targetBinary -Force
         } catch {
             Write-Warning "binary rollback failed: $($_.Exception.Message)"
+        }
+    }
+    if ($autoEnrollRegistryTouched -and $null -ne $autoEnrollRegistrySnapshot) {
+        try {
+            Restore-AgentRegistrySnapshot -Snapshot $autoEnrollRegistrySnapshot
+        } catch {
+            Write-Warning "auto-enroll registry rollback failed: $($_.Exception.Message)"
         }
     }
     Restore-MachineEnv -OriginalValues $originalValues
