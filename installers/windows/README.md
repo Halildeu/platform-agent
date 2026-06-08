@@ -76,6 +76,21 @@ powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap
 yazilmaz. Script ZIP hash'ini ve ZIP icindeki `SHA256SUMS` dosyasini dogrular,
 sonra `install.ps1` akisini calistirir.
 
+Mevcut enrolled cihazda HMAC credential store varsa bu yol upgrade-preserve
+modunda eski credential'i korur. Fresh re-enrollment istiyorsaniz explicit
+olarak `-ResetCredentialStore` verin; aksi halde yeni token verilse bile script
+fail-fast eder ve eski store'un sessizce kullanilmasini onler:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
+  -PackageUrl $PackageUrl `
+  -ExpectedZipSha256 $ExpectedZipSha256 `
+  -ApiUrl "https://testai.acik.com/api/v1/endpoint-agent" `
+  -ResetCredentialStore `
+  -Start `
+  -Force
+```
+
 Windows uzerinde manuel path:
 
 ```powershell
@@ -149,6 +164,21 @@ Mevcut service'i degistirmek icin:
 
 ```powershell
 .\install.ps1 -Force -MaintenanceToken "<one-time-maintenance-token>" -Start
+```
+
+Mevcut enrolled service'i yeni enrollment token ile fresh enroll etmek icin
+`-ResetCredentialStore` zorunludur. Bu flag eski
+`C:\ProgramData\EndpointAgent\config\hmac-credential.dpapi` dosyasini
+`.bak-<timestamp>` olarak yedekler ve yeni token'in gercek enrollment kaynagi
+olmasini saglar:
+
+```powershell
+.\install.ps1 `
+  -ApiUrl "https://testai.acik.com/api/v1/endpoint-agent" `
+  -EnrollmentToken "<token>" `
+  -ResetCredentialStore `
+  -Force `
+  -Start
 ```
 
 Uninstall:

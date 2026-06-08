@@ -32,18 +32,24 @@ install_text = install_source.read_text(encoding="utf-8")
 bootstrap_text = bootstrap_source.read_text(encoding="utf-8")
 required_install_markers = [
     "[switch]$AutoEnroll",
+    "[switch]$ResetCredentialStore",
     'https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent',
     '"Mode" -Value "auto-enroll"',
+    "Assert-HmacEnrollmentTokenStorePolicy",
+    "Backup-HmacCredentialStoreForFreshEnroll",
     "ENDPOINT_AGENT_AUTO_ENROLL_API_URL",
     "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX",
     "-AutoEnroll is mutually exclusive",
+    "-ResetCredentialStore is only valid",
 ]
 required_bootstrap_markers = [
     "[switch]$AutoEnroll",
+    "[switch]$ResetCredentialStore",
     'https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent',
     '$installArgs["AutoEnroll"] = $true',
     '$installArgs["AutoEnrollApiUrl"] = $AutoEnrollApiUrl',
     '$installArgs["AutoEnrollCertSANURIPrefix"] = $AutoEnrollCertSANURIPrefix',
+    '$installArgs["ResetCredentialStore"] = $true',
 ]
 for marker in required_install_markers:
     if marker not in install_text:

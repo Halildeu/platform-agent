@@ -96,6 +96,9 @@ Describe "Wait-ForCredentialConfirmed" {
 Import-InstallHelper -Name "Set-ServiceEnvironmentRegkey"
 Import-InstallHelper -Name "Remove-ServiceEnvironmentEntry"
 Import-InstallHelper -Name "Add-ServiceEnvironmentBaseVariables"
+Import-InstallHelper -Name "Get-HmacCredentialStorePath"
+Import-InstallHelper -Name "Assert-HmacEnrollmentTokenStorePolicy"
+Import-InstallHelper -Name "Backup-HmacCredentialStoreForFreshEnroll"
 
 Describe "Add-ServiceEnvironmentBaseVariables" {
     It "adds the minimal non-secret OS environment needed by service child processes" {
@@ -136,6 +139,62 @@ Describe "Add-ServiceEnvironmentBaseVariables" {
         $values["ProgramData"] | Should Be "D:\ProgramData"
         $values["TEMP"] | Should Be "D:\Temp"
         $values["TMP"] | Should Be "D:\Tmp"
+    }
+}
+
+Describe "HMAC enrollment-token reinstall guard" {
+    BeforeEach {
+        $script:tempDir = Join-Path $env:TEMP "endpoint-agent-hmac-guard-$([guid]::NewGuid())"
+        New-Item -ItemType Directory -Force -Path $script:tempDir | Out-Null
+        $script:storePath = Join-Path $script:tempDir "hmac-credential.dpapi"
+    }
+
+    AfterEach {
+        if (Test-Path -LiteralPath $script:tempDir) {
+            Remove-Item -LiteralPath $script:tempDir -Recurse -Force
+        }
+    }
+
+    It "builds the production credential store path under ProgramData" {
+        Get-HmacCredentialStorePath -ProgramDataRoot "D:\ProgramData" |
+            Should Be "D:\ProgramData\EndpointAgent\config\hmac-credential.dpapi"
+    }
+
+    It "allows first-run enrollment when the credential store is absent" {
+        { Assert-HmacEnrollmentTokenStorePolicy -Token "fresh-token" -ResetRequested $false -CredentialStorePath $script:storePath } |
+            Should Not Throw
+    }
+
+    It "allows upgrade-preserve when no enrollment token is supplied" {
+        Set-Content -LiteralPath $script:storePath -Value "stored" -Encoding ASCII
+        { Assert-HmacEnrollmentTokenStorePolicy -Token "" -ResetRequested $false -CredentialStorePath $script:storePath } |
+            Should Not Throw
+    }
+
+    It "fails fast when a token is supplied over an existing store without reset" {
+        Set-Content -LiteralPath $script:storePath -Value "stored" -Encoding ASCII
+        { Assert-HmacEnrollmentTokenStorePolicy -Token "fresh-token" -ResetRequested $false -CredentialStorePath $script:storePath } |
+            Should Throw "Existing EndpointAgent HMAC credential store found*"
+    }
+
+    It "allows explicit reset intent when a token is supplied over an existing store" {
+        Set-Content -LiteralPath $script:storePath -Value "stored" -Encoding ASCII
+        { Assert-HmacEnrollmentTokenStorePolicy -Token "fresh-token" -ResetRequested $true -CredentialStorePath $script:storePath } |
+            Should Not Throw
+    }
+
+    It "backs up and removes the old store for fresh enrollment" {
+        Set-Content -LiteralPath $script:storePath -Value "stored" -Encoding ASCII
+        $backup = Backup-HmacCredentialStoreForFreshEnroll -CredentialStorePath $script:storePath -Timestamp "20260608T150000Z"
+
+        Test-Path -LiteralPath $script:storePath | Should Be $false
+        Test-Path -LiteralPath $backup | Should Be $true
+        (Get-Content -LiteralPath $backup -Raw).TrimEnd() | Should Be "stored"
+    }
+
+    It "returns an empty path when no store exists to back up" {
+        Backup-HmacCredentialStoreForFreshEnroll -CredentialStorePath $script:storePath -Timestamp "20260608T150000Z" |
+            Should Be ""
     }
 }
 
