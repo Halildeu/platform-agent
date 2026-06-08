@@ -66,7 +66,7 @@ type Config struct {
 	AgentVersion string
 
 	// APIURL is the full canonical base path the Runner dials, e.g.
-	// https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin
+	// https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent
 	// — Codex F4 + iter-4 F1 absorb: full base path, not host only.
 	APIURL string
 
@@ -116,7 +116,7 @@ type Config struct {
 func Defaults() Config {
 	return Config{
 		AgentVersion:             "0.2.0-dev",
-		APIURL:                   "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin",
+		APIURL:                   "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent",
 		CertFilter:               DefaultCertFilter(),
 		HeartbeatInterval:        60 * time.Second,
 		CommandPollInterval:      30 * time.Second,

@@ -20,7 +20,7 @@ import (
 var ErrNoCommand = errors.New("no command available")
 
 // Auto-enroll wire endpoints. Suffix-only; the base URL is the full
-// canonical API base (e.g. https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin)
+// canonical API base (e.g. https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent)
 // — Codex F4 absorb: endpoint constants, not registry/env override.
 const (
 	PathAutoEnroll    = "/endpoint-enrollments/auto"
@@ -39,7 +39,7 @@ type Client struct {
 }
 
 // NewClient constructs a wire client. baseURL must be a full canonical
-// base path (e.g. https://host/api/v1/endpoint-admin) and must NOT carry
+// base path (e.g. https://host/api/v1/endpoint-agent) and must NOT carry
 // a query string or fragment — the suffix constants are joined onto the
 // path via url.JoinPath so query/trailing-slash edge cases stay
 // well-defined (Codex F7 absorb).
