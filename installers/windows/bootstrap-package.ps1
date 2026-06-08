@@ -14,6 +14,11 @@ param(
     [Parameter(Mandatory)] [string]$PackageUrl,
     [Parameter(Mandatory)] [string]$ExpectedZipSha256,
     [string]$ApiUrl = "https://testai.acik.com/api/v1/endpoint-agent",
+    [switch]$AutoEnroll,
+    [string]$AutoEnrollApiUrl = "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin",
+    [string]$AutoEnrollCertSubjectSuffix = "",
+    [string]$AutoEnrollCertSANURIPrefix = "adcomputer:",
+    [int]$AutoEnrollJitterSeconds = 0,
     [string]$WorkDir = (Join-Path $env:TEMP "EndpointEnes"),
     [string]$ZipPath = (Join-Path $env:TEMP "EndpointAgent.zip"),
     [string]$EnrollmentToken = "",
@@ -117,14 +122,24 @@ if (-not (Test-Path -LiteralPath $installScript)) {
     throw "install.ps1 missing after extraction: $installScript"
 }
 
-$token = Get-EnrollmentToken -Token $EnrollmentToken
-if ([string]::IsNullOrWhiteSpace($token)) {
-    throw "Enrollment token is blank."
+if ($AutoEnroll -and -not [string]::IsNullOrWhiteSpace($EnrollmentToken)) {
+    throw "-AutoEnroll is mutually exclusive with -EnrollmentToken."
 }
 
-$installArgs = @{
-    ApiUrl = $ApiUrl
-    EnrollmentToken = $token
+$installArgs = @{}
+if ($AutoEnroll) {
+    $installArgs["AutoEnroll"] = $true
+    $installArgs["AutoEnrollApiUrl"] = $AutoEnrollApiUrl
+    $installArgs["AutoEnrollCertSubjectSuffix"] = $AutoEnrollCertSubjectSuffix
+    $installArgs["AutoEnrollCertSANURIPrefix"] = $AutoEnrollCertSANURIPrefix
+    $installArgs["AutoEnrollJitterSeconds"] = $AutoEnrollJitterSeconds
+} else {
+    $token = Get-EnrollmentToken -Token $EnrollmentToken
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        throw "Enrollment token is blank."
+    }
+    $installArgs["ApiUrl"] = $ApiUrl
+    $installArgs["EnrollmentToken"] = $token
 }
 if ($Start) {
     $installArgs["Start"] = $true
@@ -137,7 +152,9 @@ try {
     Write-Step "running installer"
     & $installScript @installArgs
 } finally {
-    Remove-Variable token -ErrorAction SilentlyContinue
+    if (Get-Variable token -ErrorAction SilentlyContinue) {
+        Remove-Variable token -ErrorAction SilentlyContinue
+    }
     Remove-Variable EnrollmentToken -ErrorAction SilentlyContinue
 }
 

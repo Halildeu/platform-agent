@@ -28,6 +28,28 @@ for source in (bootstrap_source, install_source):
             "Windows PowerShell 5.1 standard-host install path must stay ASCII-only"
         )
 
+install_text = install_source.read_text(encoding="utf-8")
+bootstrap_text = bootstrap_source.read_text(encoding="utf-8")
+required_install_markers = [
+    "[switch]$AutoEnroll",
+    '"Mode" -Value "auto-enroll"',
+    "ENDPOINT_AGENT_AUTO_ENROLL_API_URL",
+    "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX",
+    "-AutoEnroll is mutually exclusive",
+]
+required_bootstrap_markers = [
+    "[switch]$AutoEnroll",
+    '$installArgs["AutoEnroll"] = $true',
+    '$installArgs["AutoEnrollApiUrl"] = $AutoEnrollApiUrl',
+    '$installArgs["AutoEnrollCertSANURIPrefix"] = $AutoEnrollCertSANURIPrefix',
+]
+for marker in required_install_markers:
+    if marker not in install_text:
+        failures.append(f"{install_source}: missing auto-enroll installer marker: {marker}")
+for marker in required_bootstrap_markers:
+    if marker not in bootstrap_text:
+        failures.append(f"{bootstrap_source}: missing auto-enroll bootstrap marker: {marker}")
+
 package_dir = Path("dist/windows/EndpointAgent")
 if package_dir.exists():
     for name in ("bootstrap-package.ps1", "install.ps1", "uninstall.ps1"):

@@ -38,7 +38,30 @@ Yerel binary (release artifact'sız, hand-test/dev) — geri uyumlu:
 .\install.ps1 -BinaryPath .\endpoint-agent.exe -ApiUrl "..." -EnrollmentToken "..." -Start
 ```
 
-Pilot ZIP artifact (testai) ile standart PC kurulumu:
+Pilot ZIP artifact (testai) ile standart PC kurulumu — domain/mTLS auto-enroll:
+
+```powershell
+$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/EndpointAgent.zip"
+$ExpectedZipSha256 = "<zip-sha256>"
+
+iwr -UseBasicParsing `
+  "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/bootstrap-package.ps1" `
+  -OutFile "$env:TEMP\endpoint-agent-bootstrap.ps1"
+
+powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
+  -PackageUrl $PackageUrl `
+  -ExpectedZipSha256 $ExpectedZipSha256 `
+  -AutoEnroll `
+  -AutoEnrollApiUrl "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin" `
+  -AutoEnrollCertSANURIPrefix "adcomputer:" `
+  -Start `
+  -Force
+```
+
+Bu yol token istemez. Makinede AD CS / mTLS client certificate hazir degilse
+servis fail-closed bekler; token'li HMAC yoluna dusmez.
+
+Pilot ZIP artifact (testai) ile gecici HMAC token fallback kurulumu:
 
 ```powershell
 $PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/EndpointAgent.zip"
