@@ -488,6 +488,20 @@ func handleDiagnoseCommand(args []string) {
 		if err := json.NewEncoder(os.Stdout).Encode(localUsers); err != nil {
 			log.Fatalf("diagnose local-users encode failed: %v", err)
 		}
+	case "local-admins":
+		// READ-ONLY Gate-0 (Codex 019ea719): the machine account-domain SID and
+		// the local-vs-domain classification of every Administrators-alias member,
+		// so the last-enabled-local-admin lockout discriminator can be verified on
+		// a domain-joined host WITHOUT any SAM write. Mutates nothing; on a correct
+		// member workstation Domain Admins / domain members show
+		// localUnderMachineDomain=false + a "*-skipped" classification.
+		diag, err := users.DiagnoseLocalAdmins()
+		if err != nil {
+			log.Fatalf("diagnose local-admins failed: %v", err)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(diag); err != nil {
+			log.Fatalf("diagnose local-admins encode failed: %v", err)
+		}
 	case "software":
 		// Software inventory and winget readiness are deliberately
 		// split into separate subcommands so a slow / hung winget
@@ -576,5 +590,5 @@ func handleDiagnoseCommand(args []string) {
 }
 
 func printDiagnoseUsage() {
-	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users|software|winget|winget-egress|hardware|services>")
+	fmt.Fprintln(os.Stderr, "usage: endpoint-agent diagnose <identity|local-users|local-admins|software|winget|winget-egress|hardware|services>")
 }
