@@ -23,12 +23,35 @@ Windows paket klasoru:
 Paket ciktisi:
 
 ```text
+dist/windows/EndpointAgent.zip
 dist/windows/EndpointAgent/endpoint-agent.exe
+dist/windows/EndpointAgent/bootstrap-package.ps1
 dist/windows/EndpointAgent/install.ps1
 dist/windows/EndpointAgent/uninstall.ps1
 dist/windows/EndpointAgent/README.md
 dist/windows/EndpointAgent/SHA256SUMS
 ```
+
+Pilot ZIP artifact kurulumu:
+
+```powershell
+$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/EndpointAgent.zip"
+$ExpectedZipSha256 = "<zip-sha256>"
+
+iwr -UseBasicParsing `
+  "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/bootstrap-package.ps1" `
+  -OutFile "$env:TEMP\endpoint-agent-bootstrap.ps1"
+
+powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
+  -PackageUrl $PackageUrl `
+  -ExpectedZipSha256 $ExpectedZipSha256 `
+  -ApiUrl "https://testai.acik.com/api/v1/endpoint-agent" `
+  -Start
+```
+
+`bootstrap-package.ps1` token'i gizli prompt ile alir; token komut satirina
+yazilmaz. Script ZIP hash'ini ve ZIP icindeki `SHA256SUMS` dosyasini dogrular,
+sonra `install.ps1` akisini calistirir.
 
 Windows uzerinde manuel path:
 

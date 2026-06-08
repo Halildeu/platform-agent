@@ -28,7 +28,7 @@ param(
     [switch]$Force,
     [switch]$DisableTamperProtection,
     # ------------------------------------------------------------------
-    # Faz 22.1.0 release-foundation (Codex 019e8284 PARTIAL→AGREE plan):
+    # Faz 22.1.0 release-foundation (Codex 019e8284 PARTIAL->AGREE plan):
     # URL-download path lets one PowerShell command fetch the agent
     # binary straight from a GitHub Release. When -BinaryUrl is set the
     # local -BinaryPath default is ignored; the binary is downloaded to
@@ -40,7 +40,7 @@ param(
     # time by `.github/workflows/release.yml` + `scripts/release/
     # patch-installer-manifest.ps1`. When this script ships UN-patched
     # (working tree, ad-hoc download, non-release artifact) the
-    # defaults stay literal sentinel strings — the URL path refuses to
+    # defaults stay literal sentinel strings - the URL path refuses to
     # run unless every field is overridden on the command line. The
     # original local -BinaryPath workflow is unchanged.
     #
@@ -318,7 +318,7 @@ function Set-ServiceEnvironmentRegkey {
     if ($entries.Count -gt 0) {
         New-ItemProperty -Path $servicePath -Name 'Environment' -Value $entries -PropertyType MultiString -Force | Out-Null
     } else {
-        # No values to set — clear any stale regkey so the next service
+        # No values to set - clear any stale regkey so the next service
         # spawn does not inherit obsolete state.
         Remove-ItemProperty -Path $servicePath -Name 'Environment' -ErrorAction SilentlyContinue
     }
@@ -435,8 +435,8 @@ function Remove-ServiceBestEffort {
 Assert-Administrator
 
 # ----------------------------------------------------------------------
-# Faz 22.1.0 release-foundation — URL download + signature verify
-# (Codex 019e8284 PARTIAL→AGREE plan). Runs ONLY when -BinaryUrl is
+# Faz 22.1.0 release-foundation - URL download + signature verify
+# (Codex 019e8284 PARTIAL->AGREE plan). Runs ONLY when -BinaryUrl is
 # set to a non-sentinel value (so the local -BinaryPath workflow stays
 # byte-identical when this script ships un-patched or a developer runs
 # from the working tree). Every guardrail is fail-closed: a single
@@ -495,10 +495,10 @@ function Invoke-VerifyDownloadedBinary {
                 # Lab self-signed cert chains to an ephemeral CA the
                 # runner creates per release. Windows reports the chain
                 # state as one of:
-                #   - NotTrusted        — most common: untrusted root
-                #   - Valid             — operator pre-imported the cert
+                #   - NotTrusted        - most common: untrusted root
+                #   - Valid             - operator pre-imported the cert
                 #                         into LocalMachine\Root
-                #   - UnknownError      — some Windows / PowerShell
+                #   - UnknownError      - some Windows / PowerShell
                 #                         versions surface untrusted-root
                 #                         here instead of NotTrusted;
                 #                         allowed ONLY when the message
@@ -523,14 +523,14 @@ function Invoke-VerifyDownloadedBinary {
                 }
             }
             default {
-                throw "unknown SigningTier '$Tier' — refusing install"
+                throw "unknown SigningTier '$Tier' - refusing install"
             }
         }
     }
 }
 
 if ($useUrlDownload) {
-    # Reject if any injected field is still a sentinel — this happens
+    # Reject if any injected field is still a sentinel - this happens
     # when an unpatched install.ps1 is fetched but -BinaryUrl alone is
     # passed. We need the full quartet to be either real values or
     # explicit command-line overrides.
@@ -575,7 +575,7 @@ if ($useUrlDownload) {
             -ExpectedThumbprint $ExpectedSignerThumbprint `
             -Tier $SigningTier
     } catch {
-        # Wipe the unverified file before throwing — never leave a
+        # Wipe the unverified file before throwing - never leave a
         # tampered or mismatched binary on disk for a curious operator
         # to later double-click.
         try { Remove-Item -LiteralPath $downloadTempPath -Force -ErrorAction Stop } catch {}
@@ -610,7 +610,7 @@ try {
     # token; clearing first guarantees the post-install
     # Set-ServiceEnvironmentRegkey write is the SOLE source of
     # agent config for the new install. Only runs in the -Force
-    # path now — fresh installs do not need it (no prior service)
+    # path now - fresh installs do not need it (no prior service)
     # and the no-Force-on-existing path already threw above.
     if ((Test-ServiceExists -Name $ServiceName) -and $Force) {
         Write-Step "clearing stale service env regkey: $ServiceName\\Environment"
@@ -622,7 +622,7 @@ try {
             # array-form splat with -Force failed to bind -LogDir to
             # uninstall.ps1 (PowerShell 5.1 reported
             # InvalidArgument / PositionalParameterNotFound for the
-            # path that followed). Use hashtable-form splat instead —
+            # path that followed). Use hashtable-form splat instead -
             # bindings are explicit and values containing backslashes
             # are never re-parsed by the array element walker.
             $uninstallArgs = @{
@@ -657,7 +657,7 @@ try {
     # quirk that delayed SCM from picking up Machine env changes on
     # high-uptime hosts (live evidence: SRB-AIDENETIMPC 3-hour debug
     # session, 2026-05-29; Codex 019e7314). The service spawn ALWAYS
-    # reads this regkey, so an install→reboot dance is no longer
+    # reads this regkey, so an install->reboot dance is no longer
     # required and a service restart inherits the new config
     # immediately.
     #
@@ -673,7 +673,7 @@ try {
     # DPAPI credential at cold start and bypasses the env-token path
     # entirely.
     # Codex 019e7314 iter-1 P1.2: ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256
-    # stays in Machine env. It is a hash (not a secret) — the
+    # stays in Machine env. It is a hash (not a secret) - the
     # uninstall script needs to read it without first having access
     # to the service-specific regkey (which is per-service and would
     # need to be looked up by service name AT uninstall time, but the
@@ -747,12 +747,12 @@ try {
     # `Get-ItemProperty HKLM:\...\Services\EndpointAgent` does not
     # see the consumed token. The degraded sentinel ("hmac credential
     # accepted (not persisted)") is deliberately ignored by the gate
-    # — without DPAPI confirmation we leave the token in place so the
+    # - without DPAPI confirmation we leave the token in place so the
     # next service restart can retry the same enroll.
     if ($Start -and -not [string]::IsNullOrWhiteSpace($EnrollmentToken)) {
         Write-Step "waiting for AG-026D credential-confirmed sentinel (up to 60s, log baseline=$logBaselineLength bytes)"
         if (Wait-ForCredentialConfirmed -LogPath $agentLog -TimeoutSeconds 60 -BaselineLength $logBaselineLength) {
-            Write-Step "AG-026C: enroll confirmed — removing token from service env regkey"
+            Write-Step "AG-026C: enroll confirmed - removing token from service env regkey"
             Remove-ServiceEnvironmentEntry -Name $ServiceName -Key "ENDPOINT_AGENT_ENROLLMENT_TOKEN"
         } else {
             Write-Warning "AG-026C: 'hmac credential confirmed' sentinel not seen within 60s; token left in service env regkey for next restart retry"

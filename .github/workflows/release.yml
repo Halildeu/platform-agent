@@ -298,7 +298,16 @@ jobs:
               -ExpectedSignerThumbprint $env:THUMB `
               -SigningTier $env:TIER `
               -ReleaseTag $env:TAG
-          Copy-Item installers/windows/uninstall.ps1 dist/uninstall.ps1
+          $uninstall = Get-Content -Raw -LiteralPath installers/windows/uninstall.ps1
+          [System.IO.File]::WriteAllText(
+              "dist/uninstall.ps1",
+              ($uninstall -replace "`r`n", "`n"),
+              [System.Text.UTF8Encoding]::new($true))
+          $bootstrap = Get-Content -Raw -LiteralPath installers/windows/bootstrap-package.ps1
+          [System.IO.File]::WriteAllText(
+              "dist/bootstrap-package.ps1",
+              ($bootstrap -replace "`r`n", "`n"),
+              [System.Text.UTF8Encoding]::new($true))
 
       - name: Validate patched install.ps1 parses cleanly
         # Codex 019e8284 iter-1 medium #5: a bad sentinel substitution
@@ -332,6 +341,7 @@ jobs:
         run: |
           $assets = @(
             "endpoint-agent.exe",
+            "bootstrap-package.ps1",
             "install.ps1",
             "uninstall.ps1"
           )
@@ -351,6 +361,7 @@ jobs:
             phase = "22.1.0"
             assets = @(
               [ordered]@{ name = "endpoint-agent.exe"; sha256 = $env:SHA256 }
+              [ordered]@{ name = "bootstrap-package.ps1"; sha256 = (Get-FileHash -Algorithm SHA256 dist/bootstrap-package.ps1).Hash.ToLowerInvariant() }
               [ordered]@{ name = "install.ps1";        sha256 = (Get-FileHash -Algorithm SHA256 dist/install.ps1).Hash.ToLowerInvariant() }
               [ordered]@{ name = "uninstall.ps1";      sha256 = (Get-FileHash -Algorithm SHA256 dist/uninstall.ps1).Hash.ToLowerInvariant() }
             )
@@ -422,6 +433,7 @@ jobs:
               --title "platform-agent $TAG" \
               --notes-file dist/RELEASE_NOTES.md \
               dist/endpoint-agent.exe \
+              dist/bootstrap-package.ps1 \
               dist/install.ps1 \
               dist/uninstall.ps1 \
               dist/SHA256SUMS \

@@ -124,12 +124,13 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
 
-# Preserve LF line endings (install.ps1 is line-ending neutral; we
-# avoid CRLF round-trips that would change the file hash and confuse
-# any downstream signing/integrity checks).
+# Preserve LF line endings and emit UTF-8 with BOM. Windows PowerShell 5.1
+# treats UTF-8 without BOM as ANSI on many hosts; the release asset must
+# parse correctly on standard Windows 10/11 endpoints without operator-side
+# encoding fixes.
 $lf = "`n"
 $content = $content -replace "`r`n", $lf
-[System.IO.File]::WriteAllText($OutputPath, $content, [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText($OutputPath, $content, [System.Text.UTF8Encoding]::new($true))
 
 Write-Host "patched installer manifest:"
 Write-Host "  release tag       = $ReleaseTag"

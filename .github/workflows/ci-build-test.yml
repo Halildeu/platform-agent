@@ -83,13 +83,24 @@ jobs:
           set -euo pipefail
           mkdir -p dist/package
           cp dist/endpoint-agent.exe dist/package/
-          cp installers/windows/install.ps1 dist/package/
-          cp installers/windows/uninstall.ps1 dist/package/
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for name in ("bootstrap-package.ps1", "install.ps1", "uninstall.ps1"):
+              source = Path("installers/windows") / name
+              target = Path("dist/package") / name
+              target.write_text(
+                  source.read_text(encoding="utf-8-sig"),
+                  encoding="utf-8-sig",
+                  newline="",
+              )
+          PY
           cp installers/windows/README.md dist/package/INSTALLER-README.md
           cp README.md dist/package/README.md
           cp LICENSE dist/package/LICENSE
 
           cd dist/package
+          sha256sum endpoint-agent.exe bootstrap-package.ps1 install.ps1 uninstall.ps1 INSTALLER-README.md README.md LICENSE > SHA256SUMS
           ZIPNAME="endpoint-agent-windows-amd64-${GITHUB_SHA::7}.zip"
           zip -r "../${ZIPNAME}" .
           cd ..
