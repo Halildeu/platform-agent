@@ -38,6 +38,27 @@ Yerel binary (release artifact'sız, hand-test/dev) — geri uyumlu:
 .\install.ps1 -BinaryPath .\endpoint-agent.exe -ApiUrl "..." -EnrollmentToken "..." -Start
 ```
 
+Pilot ZIP artifact (testai) ile standart PC kurulumu:
+
+```powershell
+$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/EndpointAgent.zip"
+$ExpectedZipSha256 = "<zip-sha256>"
+
+iwr -UseBasicParsing `
+  "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/bootstrap-package.ps1" `
+  -OutFile "$env:TEMP\endpoint-agent-bootstrap.ps1"
+
+powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
+  -PackageUrl $PackageUrl `
+  -ExpectedZipSha256 $ExpectedZipSha256 `
+  -ApiUrl "https://testai.acik.com/api/v1/endpoint-agent" `
+  -Start
+```
+
+Bu yol ZIP'i indirir, ZIP SHA256'yi kontrol eder, paket icindeki `SHA256SUMS`
+ile dosyalari dogrular ve enrollment token'i gizli prompt ile ister. Ayrinti:
+`installers/windows/README.md`.
+
 Pipeline + signing tier detayı: `.github/workflows/release.yml`, `scripts/release/patch-installer-manifest.ps1`. Tier kararları: `docs/adr/0012-EA-endpoint-admin-governance-charter.md` §22.1 Lab / §22.2 IT-owned pilot.
 
 Ana platform yerlesimi (4-component, 4 repo — `Halildeu/platform-k8s-gitops` `docs/adr/0012-EA-endpoint-admin-governance-charter.md`):
