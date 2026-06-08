@@ -17,3 +17,6 @@ coverage.out
 # Temporary files
 tmp/
 .cache/
+
+# Local cross-build artifacts (e.g. GOOS=windows go build ./cmd/endpoint-agent)
+/endpoint-agent.exe
