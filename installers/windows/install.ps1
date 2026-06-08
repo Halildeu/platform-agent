@@ -357,8 +357,10 @@ function Remove-ServiceEnvironmentEntry {
 }
 
 function Get-AgentRegistrySnapshot {
-    param([string[]]$Names)
-    $path = "HKLM:\SOFTWARE\EndpointAgent"
+    param(
+        [string[]]$Names,
+        [string]$Path = "HKLM:\SOFTWARE\EndpointAgent"
+    )
     $snapshot = @{}
     foreach ($name in $Names) {
         $entry = @{
@@ -366,10 +368,10 @@ function Get-AgentRegistrySnapshot {
             Value  = $null
             Kind   = "String"
         }
-        if (Test-Path -LiteralPath $path) {
+        if (Test-Path -LiteralPath $Path) {
             $key = $null
             try {
-                $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\EndpointAgent")
+                $key = Get-Item -LiteralPath $Path -ErrorAction Stop
                 if ($null -ne $key -and ($key.GetValueNames() -contains $name)) {
                     $entry.Exists = $true
                     $entry.Value = $key.GetValue($name)
@@ -385,15 +387,17 @@ function Get-AgentRegistrySnapshot {
 }
 
 function Restore-AgentRegistrySnapshot {
-    param([hashtable]$Snapshot)
-    $path = "HKLM:\SOFTWARE\EndpointAgent"
+    param(
+        [hashtable]$Snapshot,
+        [string]$Path = "HKLM:\SOFTWARE\EndpointAgent"
+    )
     foreach ($name in $Snapshot.Keys) {
         $entry = $Snapshot[$name]
         if ($entry.Exists) {
-            New-Item -Path $path -Force | Out-Null
-            New-ItemProperty -Path $path -Name $name -Value $entry.Value -PropertyType $entry.Kind -Force | Out-Null
-        } elseif (Test-Path -LiteralPath $path) {
-            Remove-ItemProperty -Path $path -Name $name -ErrorAction SilentlyContinue
+            New-Item -Path $Path -Force | Out-Null
+            New-ItemProperty -Path $Path -Name $name -Value $entry.Value -PropertyType $entry.Kind -Force | Out-Null
+        } elseif (Test-Path -LiteralPath $Path) {
+            Remove-ItemProperty -Path $Path -Name $name -ErrorAction SilentlyContinue
         }
     }
 }
@@ -401,16 +405,26 @@ function Restore-AgentRegistrySnapshot {
 function Set-AgentAutoEnrollRegistry {
     param(
         [string]$ApiUrl,
-        [int]$JitterSeconds
+        [int]$JitterSeconds,
+        [string]$Path = "HKLM:\SOFTWARE\EndpointAgent"
     )
-    $path = "HKLM:\SOFTWARE\EndpointAgent"
-    New-Item -Path $path -Force | Out-Null
-    New-ItemProperty -Path $path -Name "Mode" -Value "auto-enroll" -PropertyType String -Force | Out-Null
+    New-Item -Path $Path -Force | Out-Null
+    New-ItemProperty -Path $Path -Name "Mode" -Value "auto-enroll" -PropertyType String -Force | Out-Null
     if (-not [string]::IsNullOrWhiteSpace($ApiUrl)) {
-        New-ItemProperty -Path $path -Name "ApiUrl" -Value $ApiUrl -PropertyType String -Force | Out-Null
+        New-ItemProperty -Path $Path -Name "ApiUrl" -Value $ApiUrl -PropertyType String -Force | Out-Null
     }
     if ($JitterSeconds -gt 0) {
-        New-ItemProperty -Path $path -Name "EnrollmentJitterSeconds" -Value $JitterSeconds -PropertyType DWord -Force | Out-Null
+        New-ItemProperty -Path $Path -Name "EnrollmentJitterSeconds" -Value $JitterSeconds -PropertyType DWord -Force | Out-Null
+    }
+}
+
+function Clear-AgentAutoEnrollRegistry {
+    param([string]$Path = "HKLM:\SOFTWARE\EndpointAgent")
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    foreach ($name in @("Mode", "ApiUrl", "EnrollmentJitterSeconds")) {
+        Remove-ItemProperty -Path $Path -Name $name -ErrorAction SilentlyContinue
     }
 }
 
@@ -860,6 +874,16 @@ try {
             "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX" = $AutoEnrollCertSANURIPrefix
         }
     } else {
+        # #108: an earlier AutoEnroll install may have left
+        # HKLM:\SOFTWARE\EndpointAgent\Mode=auto-enroll. HMAC reinstall
+        # must explicitly clear that registry override before first
+        # service start, otherwise the runner ignores the HMAC service
+        # env and boots in auto-enroll mode.
+        $autoEnrollRegistrySnapshot = Get-AgentRegistrySnapshot -Names @("Mode", "ApiUrl", "EnrollmentJitterSeconds")
+        Write-Step "clearing auto-enroll registry mode for HMAC install"
+        Clear-AgentAutoEnrollRegistry
+        $autoEnrollRegistryTouched = $true
+
         $serviceEnv = @{
             "ENDPOINT_AGENT_API_URL" = $ApiUrl
             "ENDPOINT_AGENT_ENROLLMENT_TOKEN" = $EnrollmentToken

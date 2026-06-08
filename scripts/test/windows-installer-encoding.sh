@@ -35,6 +35,8 @@ required_install_markers = [
     "[switch]$ResetCredentialStore",
     'https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent',
     '"Mode" -Value "auto-enroll"',
+    "Clear-AgentAutoEnrollRegistry",
+    "clearing auto-enroll registry mode for HMAC install",
     "Assert-HmacEnrollmentTokenStorePolicy",
     "Backup-HmacCredentialStoreForFreshEnroll",
     "ENDPOINT_AGENT_AUTO_ENROLL_API_URL",

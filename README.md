@@ -80,7 +80,9 @@ powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap
 
 Bu yol ZIP'i indirir, ZIP SHA256'yi kontrol eder, paket icindeki `SHA256SUMS`
 ile dosyalari dogrular ve enrollment token'i gizli prompt ile ister. Ayrinti:
-`installers/windows/README.md`.
+`installers/windows/README.md`. HMAC fallback kurulumu, onceki `-AutoEnroll`
+denemesinden kalmis `HKLM:\SOFTWARE\EndpointAgent` mode override'larini servis
+baslamadan once temizler.
 
 Pipeline + signing tier detayı: `.github/workflows/release.yml`, `scripts/release/patch-installer-manifest.ps1`. Tier kararları: `docs/adr/0012-EA-endpoint-admin-governance-charter.md` §22.1 Lab / §22.2 IT-owned pilot.
 
