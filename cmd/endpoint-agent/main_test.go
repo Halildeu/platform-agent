@@ -108,7 +108,7 @@ func TestResolveAutoEnrollAPIURL_BakedFallback(t *testing.T) {
 }
 
 func TestResolveMode_FlagWins(t *testing.T) {
-	if got := resolveMode(true, false, config.Config{}); got != modeAutoEnroll {
+	if got := resolveMode(true, false, config.Config{}, ""); got != modeAutoEnroll {
 		t.Fatalf("flag should win: got %q", got)
 	}
 }
@@ -116,41 +116,45 @@ func TestResolveMode_FlagWins(t *testing.T) {
 func TestResolveMode_FlagOffNoRegistry(t *testing.T) {
 	// On non-Windows, registry.Reader returns def for ReadString, so the
 	// fallback is HMAC mode.
-	if got := resolveMode(false, false, config.Config{}); got != modeHMAC {
+	if got := resolveMode(false, false, config.Config{}, ""); got != modeHMAC {
 		t.Fatalf("default should be HMAC: got %q", got)
 	}
 }
 
 // #108 (live pilot MKR-A1): a stale Mode=auto-enroll registry value must not
 // strand a fully-provisioned HMAC service config, while the legitimate
-// MSI/auto-enroll flow (which ships ENDPOINT_AGENT_AUTO_ENROLL_API_URL) stays
-// unaffected.
+// MSI/auto-enroll flow (which ships ENDPOINT_AGENT_AUTO_ENROLL_API_URL or
+// --api-url) stays unaffected. Signals are SOURCE-aware (Codex 019ea879
+// must-fix) so a non-empty config DEFAULT (baked localhost APIURL) never
+// counts as an explicit HMAC choice.
 func TestDecideMode(t *testing.T) {
-	hmac := config.Config{APIURL: "https://h/api", EnrollmentToken: "tok"}
-	autoEnroll := config.Config{AutoEnrollAPIURL: "https://ae/api"}
-	bothCreds := config.Config{APIURL: "https://h/api", EnrollmentToken: "tok", AutoEnrollAPIURL: "https://ae/api"}
-	partialHMAC := config.Config{APIURL: "https://h/api"} // enrollment token missing
+	hmacExplicit := modeSignals{hmacAPIURLExplicit: true, hmacTokenPresent: true}
+	autoEnrollExplicit := modeSignals{autoEnrollURLExplicit: true}
+	bothExplicit := modeSignals{hmacAPIURLExplicit: true, hmacTokenPresent: true, autoEnrollURLExplicit: true}
+	tokenOnlyDefaultURL := modeSignals{hmacTokenPresent: true} // default APIURL, env not set
+	apiURLNoToken := modeSignals{hmacAPIURLExplicit: true}
 
 	cases := []struct {
 		name    string
 		flagSet bool
 		regMode string
-		cfg     config.Config
+		sig     modeSignals
 		want    string
 	}{
-		{"flag wins over everything", true, modeAutoEnroll, hmac, modeAutoEnroll},
-		{"#108 stale regkey overridden by unambiguous HMAC config", false, modeAutoEnroll, hmac, modeHMAC},
-		{"MSI auto-enroll honoured (auto-enroll URL present)", false, modeAutoEnroll, autoEnroll, modeAutoEnroll},
-		{"ambiguous config (both creds) defers to regkey", false, modeAutoEnroll, bothCreds, modeAutoEnroll},
-		{"incomplete HMAC config does not override regkey", false, modeAutoEnroll, partialHMAC, modeAutoEnroll},
-		{"no creds at all honours stale regkey", false, modeAutoEnroll, config.Config{}, modeAutoEnroll},
-		{"empty regkey is HMAC", false, "", hmac, modeHMAC},
-		{"non-auto-enroll regkey is HMAC", false, "hmac", autoEnroll, modeHMAC},
+		{"flag wins over everything", true, modeAutoEnroll, hmacExplicit, modeAutoEnroll},
+		{"#108 stale regkey overridden by unambiguous explicit HMAC", false, modeAutoEnroll, hmacExplicit, modeHMAC},
+		{"MSI auto-enroll honoured (auto-enroll URL present)", false, modeAutoEnroll, autoEnrollExplicit, modeAutoEnroll},
+		{"explicit auto-enroll URL blocks HMAC override (both present)", false, modeAutoEnroll, bothExplicit, modeAutoEnroll},
+		{"token only + DEFAULT APIURL is NOT explicit HMAC (Codex P1)", false, modeAutoEnroll, tokenOnlyDefaultURL, modeAutoEnroll},
+		{"explicit API URL but no token does not override regkey", false, modeAutoEnroll, apiURLNoToken, modeAutoEnroll},
+		{"no signals at all honours stale regkey", false, modeAutoEnroll, modeSignals{}, modeAutoEnroll},
+		{"empty regkey is HMAC", false, "", hmacExplicit, modeHMAC},
+		{"non-auto-enroll regkey is HMAC", false, "hmac", autoEnrollExplicit, modeHMAC},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := decideMode(tc.flagSet, tc.regMode, tc.cfg); got != tc.want {
-				t.Fatalf("decideMode(%v, %q, cfg)=%q want %q", tc.flagSet, tc.regMode, got, tc.want)
+			if got := decideMode(tc.flagSet, tc.regMode, tc.sig); got != tc.want {
+				t.Fatalf("decideMode(%v, %q, %+v)=%q want %q", tc.flagSet, tc.regMode, tc.sig, got, tc.want)
 			}
 		})
 	}

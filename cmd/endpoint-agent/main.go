@@ -98,7 +98,7 @@ func main() {
 	logger := loggerBundle.Logger
 	logger.Printf("logger initialized logPath=%s serviceMode=%t", loggerBundle.LogPath, runningAsService)
 
-	mode := resolveMode(*autoEnrollFlag, *dryRun, cfg)
+	mode := resolveMode(*autoEnrollFlag, *dryRun, cfg, *autoEnrollAPIURL)
 	logger.Printf("agent mode=%s", mode)
 
 	// AG-026B: fail-closed if the operator combines --enrollment-token
@@ -200,47 +200,64 @@ const (
 // so the function reduces to "honour the flag". --dry-run alone is NOT a
 // valid mode trigger (Codex iter-3 guardrail): it requires either the flag
 // or the registry to put us in auto-enroll mode first.
-func resolveMode(flagSet bool, dryRunFlag bool, cfg config.Config) string {
+func resolveMode(flagSet bool, dryRunFlag bool, cfg config.Config, autoEnrollAPIURLFlag string) string {
 	reader := winregistry.New()
 	regMode := reader.ReadString(`HKLM:\SOFTWARE\EndpointAgent`, "Mode", "")
 	_ = dryRunFlag // see comment on dry-run validation above; main() enforces.
-	return decideMode(flagSet, regMode, cfg)
+	// Codex 019ea879 must-fix: the mode decision must be SOURCE-aware, not
+	// value-aware. cfg.APIURL has a baked default (config.Default ->
+	// https://localhost/...), so `cfg.APIURL != ""` is ALWAYS true and would
+	// mistake the default for an explicit HMAC choice. We therefore read the
+	// provisioning SIGNALS from their sources: the API URL from the env var
+	// presence, the auto-enroll URL from the --api-url flag OR its env var.
+	sig := modeSignals{
+		hmacAPIURLExplicit:    os.Getenv("ENDPOINT_AGENT_API_URL") != "",
+		hmacTokenPresent:      cfg.EnrollmentToken != "",
+		autoEnrollURLExplicit: strings.TrimSpace(autoEnrollAPIURLFlag) != "" || cfg.AutoEnrollAPIURL != "",
+	}
+	return decideMode(flagSet, regMode, sig)
+}
+
+// modeSignals captures the SOURCE-aware provisioning signals that drive the
+// HMAC-vs-auto-enroll decision. Using sources (env-var presence / CLI flag)
+// instead of loaded config values prevents a non-empty config DEFAULT — e.g.
+// the baked localhost APIURL — from being mistaken for an explicit operator
+// HMAC choice (Codex 019ea879 must-fix).
+type modeSignals struct {
+	hmacAPIURLExplicit    bool // ENDPOINT_AGENT_API_URL env var was set
+	hmacTokenPresent      bool // ENDPOINT_AGENT_ENROLLMENT_TOKEN env var was set
+	autoEnrollURLExplicit bool // --api-url flag OR ENDPOINT_AGENT_AUTO_ENROLL_API_URL env was set
 }
 
 // decideMode is the pure (registry-free, OS-free) mode decision so it is unit
-// testable on any platform. It encodes the resolveMode precedence above plus
-// the #108 stale-registry defence.
+// testable on any platform. Precedence: --auto-enroll flag, then registry
+// HKLM\SOFTWARE\EndpointAgent\Mode, then HMAC — plus the #108 stale-registry
+// defence.
 //
 // #108 (live pilot MKR-A1): the FIRST auto-enroll install writes
-// HKLM\SOFTWARE\EndpointAgent\Mode=auto-enroll. A later HMAC install must clear
-// it (install.ps1 now does), but a stale value from ANY source (manual edit,
-// MSI leftover, a future installer regression) would otherwise strand the agent
-// in auto-enroll despite a fully-provisioned HMAC service env — on a host with
-// no eligible mTLS cert it then hangs and the service never reaches RUNNING.
+// Mode=auto-enroll. A later HMAC install must clear it (install.ps1 now does),
+// but a stale value from ANY source (manual edit, MSI leftover, a future
+// installer regression) would otherwise strand the agent in auto-enroll despite
+// a fully-provisioned HMAC service env — on a host with no eligible mTLS cert it
+// then hangs and the service never reaches RUNNING.
 //
-// Defence-in-depth: when the registry says auto-enroll but the service env
-// carries an UNAMBIGUOUS HMAC config (API URL + enrollment token AND no
-// auto-enroll API URL), honour HMAC — the operator clearly provisioned HMAC.
-// The legitimate MSI/auto-enroll flow ships ENDPOINT_AGENT_AUTO_ENROLL_API_URL
-// (and no HMAC creds), so its decision is unchanged.
-func decideMode(flagSet bool, regMode string, cfg config.Config) string {
+// Defence-in-depth: override the stale registry ONLY when the operator
+// UNAMBIGUOUSLY provisioned HMAC — explicit API URL env + enrollment token AND
+// no auto-enroll URL (neither --api-url nor the auto-enroll env). The legitimate
+// MSI/auto-enroll flow ships ENDPOINT_AGENT_AUTO_ENROLL_API_URL (and no HMAC
+// creds), so it is unaffected; ambiguous/incomplete configs defer to the
+// registry hint.
+func decideMode(flagSet bool, regMode string, sig modeSignals) string {
 	if flagSet {
 		return modeAutoEnroll
 	}
 	if regMode == modeAutoEnroll {
-		if hasHMACServiceConfig(cfg) && cfg.AutoEnrollAPIURL == "" {
+		if sig.hmacAPIURLExplicit && sig.hmacTokenPresent && !sig.autoEnrollURLExplicit {
 			return modeHMAC
 		}
 		return modeAutoEnroll
 	}
 	return modeHMAC
-}
-
-// hasHMACServiceConfig reports whether the loaded config carries a complete
-// HMAC enrolment provisioning (API URL + enrollment token). Both are required
-// for the HMAC runner to make progress.
-func hasHMACServiceConfig(cfg config.Config) bool {
-	return cfg.APIURL != "" && cfg.EnrollmentToken != ""
 }
 
 // resolveAutoEnrollAPIURL applies the documented precedence:
