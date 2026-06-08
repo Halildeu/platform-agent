@@ -16,18 +16,37 @@
 # unconditionally — under a non-admin Pester runner those terminating
 # throws break test discovery even with `-ErrorAction SilentlyContinue`.
 # We only need the helper function definitions; read the source and
-# extract them by regex.
+# extract them from the PowerShell AST.
 
 $installSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot "install.ps1") -Raw
+$installTokens = $null
+$installParseErrors = $null
+$script:installAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $installSource,
+    [ref]$installTokens,
+    [ref]$installParseErrors
+)
+if ($installParseErrors -and $installParseErrors.Count -gt 0) {
+    throw "install.ps1 helper test import failed: install.ps1 has parser errors"
+}
+
+function Write-Step {
+    param([string]$Message)
+    Write-Verbose $Message
+}
 
 function Import-InstallHelper {
     param([string]$Name)
-    $pattern = "function $Name \{[\s\S]*?\n\}"
-    $match = [regex]::Match($installSource, $pattern)
-    if (-not $match.Success) {
+    $functionAst = $script:installAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $Name
+    }, $true)
+
+    if ($null -eq $functionAst) {
         throw "Helper '$Name' not found in install.ps1"
     }
-    $definition = $match.Value -replace "function $Name", "function script:$Name"
+    $definition = $functionAst.Extent.Text -replace "^function\s+$([regex]::Escape($Name))\b", "function script:$Name"
     Invoke-Expression $definition
 }
 
@@ -177,8 +196,13 @@ Describe "HMAC enrollment-token reinstall guard" {
 
     It "fails fast when a token is supplied over an existing store without reset" {
         Set-Content -LiteralPath $script:storePath -Value "stored" -Encoding ASCII
-        { Assert-HmacEnrollmentTokenStorePolicy -Token "fresh-token" -ResetRequested $false -CredentialStorePath $script:storePath } |
-            Should Throw "Existing EndpointAgent HMAC credential store found*"
+        $thrownMessage = $null
+        try {
+            Assert-HmacEnrollmentTokenStorePolicy -Token "fresh-token" -ResetRequested $false -CredentialStorePath $script:storePath
+        } catch {
+            $thrownMessage = $_.Exception.Message
+        }
+        $thrownMessage | Should Match "^Existing EndpointAgent HMAC credential store found"
     }
 
     It "allows explicit reset intent when a token is supplied over an existing store" {
@@ -379,9 +403,23 @@ Describe "EndpointAgent mode registry helpers" {
         $snapshot = Get-AgentRegistrySnapshot `
             -Path $script:modeRoot `
             -Names @("Mode", "ApiUrl", "EnrollmentJitterSeconds")
+        $snapshot["Mode"].Exists | Should Be $true
+        $snapshot["Mode"].Value | Should Be "auto-enroll"
+        $snapshot["Mode"].Kind | Should Be "String"
+        $snapshot["ApiUrl"].Exists | Should Be $true
+        $snapshot["ApiUrl"].Value | Should Be "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent"
+        $snapshot["ApiUrl"].Kind | Should Be "String"
+        $snapshot["EnrollmentJitterSeconds"].Exists | Should Be $true
+        $snapshot["EnrollmentJitterSeconds"].Value | Should Be 21
+        $snapshot["EnrollmentJitterSeconds"].Kind | Should Be "DWord"
 
         Clear-AgentAutoEnrollRegistry -Path $script:modeRoot
         Restore-AgentRegistrySnapshot -Path $script:modeRoot -Snapshot $snapshot
+
+        $names = @((Get-Item -LiteralPath $script:modeRoot).GetValueNames())
+        $names -contains "Mode" | Should Be $true
+        $names -contains "ApiUrl" | Should Be $true
+        $names -contains "EnrollmentJitterSeconds" | Should Be $true
 
         $props = Get-ItemProperty -Path $script:modeRoot
         $props.Mode | Should Be "auto-enroll"

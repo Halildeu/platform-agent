@@ -44,7 +44,7 @@ jobs:
         id: go-version
         run: |
           VERSION=$(grep '^go ' go.mod | awk '{print $2}')
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Go version: ${VERSION}"
 
       - name: Setup Go
@@ -366,7 +366,24 @@ jobs:
           }
 
   # ============================================================
-  # Job 3: Windows go test (AG-EA-AUTO Faz 22.3 Katman 3)
+  # Job 3: Windows PowerShell 5.1 installer gate
+  # ============================================================
+  windows-installer-ps51:
+    name: Windows PowerShell 5.1 installer gate
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run installer parser + Pester gate under powershell.exe
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test\windows-powershell51-installer.ps1
+
+  # ============================================================
+  # Job 4: Windows go test (AG-EA-AUTO Faz 22.3 Katman 3)
   # ============================================================
   # Codex iter-3 absorb: Windows-specific code paths (certstore /
   # registry / DPAPI) build only with //go:build windows. The Ubuntu job

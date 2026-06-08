@@ -363,7 +363,7 @@ function Get-AgentRegistrySnapshot {
     )
     $snapshot = @{}
     foreach ($name in $Names) {
-        $entry = @{
+        $entry = [pscustomobject]@{
             Exists = $false
             Value  = $null
             Kind   = "String"
@@ -391,13 +391,28 @@ function Restore-AgentRegistrySnapshot {
         [hashtable]$Snapshot,
         [string]$Path = "HKLM:\SOFTWARE\EndpointAgent"
     )
-    foreach ($name in $Snapshot.Keys) {
-        $entry = $Snapshot[$name]
-        if ($entry.Exists) {
-            New-Item -Path $Path -Force | Out-Null
-            New-ItemProperty -Path $Path -Name $name -Value $entry.Value -PropertyType $entry.Kind -Force | Out-Null
+    foreach ($registryName in @("Mode", "ApiUrl", "EnrollmentJitterSeconds")) {
+        $entry = $Snapshot[$registryName]
+        if ($null -eq $entry) {
+            continue
+        }
+        $exists = [bool]$entry.Exists
+        if ($exists) {
+            if (-not (Test-Path -LiteralPath $Path)) {
+                New-Item -Path $Path -Force | Out-Null
+            }
+            $propertyType = [string]$entry.Kind
+            $propertyValue = $entry.Value
+            switch ($propertyType) {
+                "DWord" {
+                    New-ItemProperty -Path $Path -Name $registryName -Value ([int]$propertyValue) -PropertyType DWord -Force | Out-Null
+                }
+                default {
+                    New-ItemProperty -Path $Path -Name $registryName -Value ([string]$propertyValue) -PropertyType String -Force | Out-Null
+                }
+            }
         } elseif (Test-Path -LiteralPath $Path) {
-            Remove-ItemProperty -Path $Path -Name $name -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $Path -Name $registryName -ErrorAction SilentlyContinue
         }
     }
 }
