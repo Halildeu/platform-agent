@@ -31,6 +31,7 @@ param(
     [int]$AutoEnrollJitterSeconds = 0,
     [switch]$Start,
     [switch]$Force,
+    [switch]$ResetCredentialStore,
     [switch]$DisableTamperProtection,
     # ------------------------------------------------------------------
     # Faz 22.1.0 release-foundation (Codex 019e8284 PARTIAL->AGREE plan):
@@ -498,6 +499,60 @@ function Remove-ServiceBestEffort {
     sc.exe delete $Name | Out-Null
 }
 
+function Get-HmacCredentialStorePath {
+    param([string]$ProgramDataRoot = "")
+    if ([string]::IsNullOrWhiteSpace($ProgramDataRoot)) {
+        $ProgramDataRoot = $env:ProgramData
+    }
+    if ([string]::IsNullOrWhiteSpace($ProgramDataRoot)) {
+        $ProgramDataRoot = "C:\ProgramData"
+    }
+    return (Join-Path $ProgramDataRoot "EndpointAgent\config\hmac-credential.dpapi")
+}
+
+function Assert-HmacEnrollmentTokenStorePolicy {
+    param(
+        [string]$Token,
+        [bool]$ResetRequested,
+        [string]$CredentialStorePath
+    )
+    if ([string]::IsNullOrWhiteSpace($Token)) {
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($CredentialStorePath)) {
+        throw "CredentialStorePath is required for HMAC enrollment-token policy check."
+    }
+    if (-not (Test-Path -LiteralPath $CredentialStorePath)) {
+        return
+    }
+    if ($ResetRequested) {
+        return
+    }
+    throw "Existing EndpointAgent HMAC credential store found at $CredentialStorePath. Supplying -EnrollmentToken does not force fresh enrollment because the agent will prefer the stored credential on cold start. Re-run without -EnrollmentToken for upgrade-preserve, or pass -ResetCredentialStore to back up the store and fresh-enroll."
+}
+
+function Backup-HmacCredentialStoreForFreshEnroll {
+    param(
+        [Parameter(Mandatory)] [string]$CredentialStorePath,
+        [string]$Timestamp = ""
+    )
+    if (-not (Test-Path -LiteralPath $CredentialStorePath)) {
+        return ""
+    }
+    if ([string]::IsNullOrWhiteSpace($Timestamp)) {
+        $Timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+    }
+    $backupPath = "$CredentialStorePath.bak-$Timestamp"
+    if (Test-Path -LiteralPath $backupPath) {
+        $backupPath = "$backupPath-$([guid]::NewGuid().ToString("N"))"
+    }
+    # ProgramData lives on the same volume as the store path in supported
+    # installs; Move-Item keeps the backup non-destructive and atomic there.
+    Move-Item -LiteralPath $CredentialStorePath -Destination $backupPath -Force
+    Write-Step "backed up existing HMAC credential store for fresh enrollment: $backupPath"
+    return $backupPath
+}
+
 Assert-Administrator
 
 if ($AutoEnroll) {
@@ -513,6 +568,9 @@ if ($AutoEnroll) {
     }
     if ($AutoEnrollJitterSeconds -lt 0) {
         throw "-AutoEnrollJitterSeconds must be zero or positive."
+    }
+    if ($ResetCredentialStore) {
+        throw "-ResetCredentialStore is only valid for the HMAC enrollment-token fallback path."
     }
 }
 
@@ -676,6 +734,8 @@ $autoEnrollRegistryTouched = $false
 $copiedBinary = $false
 $installedService = $false
 $resolvedMaintenanceTokenHash = Resolve-MaintenanceTokenHash -Token $MaintenanceToken -Hash $MaintenanceTokenHash
+$hmacCredentialStorePath = Get-HmacCredentialStorePath
+$hmacCredentialStoreBackup = ""
 
 try {
     # Codex 019e7314 iter-2 P1: non-destructive existence check FIRST.
@@ -685,6 +745,23 @@ try {
     # cleanup would leave it credential-less on the next restart.
     if ((Test-ServiceExists -Name $ServiceName) -and -not $Force) {
         throw "Service '$ServiceName' already exists. Use -Force to replace it."
+    }
+
+    # AG-026C / #109: a stored HMAC credential wins over
+    # ENDPOINT_AGENT_ENROLLMENT_TOKEN on cold start. That is the
+    # correct upgrade-preserve default, but it makes "fresh enroll"
+    # ambiguous if an operator supplies a new token on an already
+    # enrolled machine. Fail before service/config mutation unless the
+    # operator explicitly asks to reset the store.
+    if (-not $AutoEnroll) {
+        Assert-HmacEnrollmentTokenStorePolicy `
+            -Token $EnrollmentToken `
+            -ResetRequested ([bool]$ResetCredentialStore) `
+            -CredentialStorePath $hmacCredentialStorePath
+        if (-not [string]::IsNullOrWhiteSpace($EnrollmentToken) -and $ResetCredentialStore) {
+            $hmacCredentialStoreBackup = Backup-HmacCredentialStoreForFreshEnroll `
+                -CredentialStorePath $hmacCredentialStorePath
+        }
     }
 
     # AG-026C: defuse the regkey override mechanism BEFORE the

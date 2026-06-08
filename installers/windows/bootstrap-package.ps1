@@ -23,7 +23,8 @@ param(
     [string]$ZipPath = (Join-Path $env:TEMP "EndpointAgent.zip"),
     [string]$EnrollmentToken = "",
     [switch]$Start,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$ResetCredentialStore
 )
 
 Set-StrictMode -Version Latest
@@ -125,6 +126,9 @@ if (-not (Test-Path -LiteralPath $installScript)) {
 if ($AutoEnroll -and -not [string]::IsNullOrWhiteSpace($EnrollmentToken)) {
     throw "-AutoEnroll is mutually exclusive with -EnrollmentToken."
 }
+if ($AutoEnroll -and $ResetCredentialStore) {
+    throw "-ResetCredentialStore is only valid for the HMAC enrollment-token fallback path."
+}
 
 $installArgs = @{}
 if ($AutoEnroll) {
@@ -146,6 +150,9 @@ if ($Start) {
 }
 if ($Force) {
     $installArgs["Force"] = $true
+}
+if ($ResetCredentialStore) {
+    $installArgs["ResetCredentialStore"] = $true
 }
 
 try {
