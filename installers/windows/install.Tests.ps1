@@ -96,6 +96,10 @@ Describe "Wait-ForCredentialConfirmed" {
 Import-InstallHelper -Name "Set-ServiceEnvironmentRegkey"
 Import-InstallHelper -Name "Remove-ServiceEnvironmentEntry"
 Import-InstallHelper -Name "Add-ServiceEnvironmentBaseVariables"
+Import-InstallHelper -Name "Get-AgentRegistrySnapshot"
+Import-InstallHelper -Name "Restore-AgentRegistrySnapshot"
+Import-InstallHelper -Name "Set-AgentAutoEnrollRegistry"
+Import-InstallHelper -Name "Clear-AgentAutoEnrollRegistry"
 Import-InstallHelper -Name "Get-HmacCredentialStorePath"
 Import-InstallHelper -Name "Assert-HmacEnrollmentTokenStorePolicy"
 Import-InstallHelper -Name "Backup-HmacCredentialStoreForFreshEnroll"
@@ -301,5 +305,88 @@ Describe "Set-ServiceEnvironmentRegkey + Remove-ServiceEnvironmentEntry" {
         Remove-RegEnvKeyAt -Path $script:fakeService -Key "ENDPOINT_AGENT_ENROLLMENT_TOKEN"
         $got = Get-ItemProperty -Path $script:fakeService -Name 'Environment' -ErrorAction SilentlyContinue
         $got | Should BeNullOrEmpty
+    }
+}
+
+Describe "EndpointAgent mode registry helpers" {
+    BeforeAll {
+        $script:modeRoot = "HKCU:\Software\Halildeu\AG026CModeTest"
+    }
+
+    BeforeEach {
+        if (Test-Path -LiteralPath $script:modeRoot) {
+            Remove-Item -LiteralPath $script:modeRoot -Recurse -Force
+        }
+    }
+
+    AfterAll {
+        if (Test-Path -LiteralPath $script:modeRoot) {
+            Remove-Item -LiteralPath $script:modeRoot -Recurse -Force
+        }
+    }
+
+    It "writes auto-enroll mode, api url, and jitter" {
+        Set-AgentAutoEnrollRegistry `
+            -Path $script:modeRoot `
+            -ApiUrl "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent" `
+            -JitterSeconds 17
+
+        $props = Get-ItemProperty -Path $script:modeRoot
+        $props.Mode | Should Be "auto-enroll"
+        $props.ApiUrl | Should Be "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent"
+        $props.EnrollmentJitterSeconds | Should Be 17
+        (Get-Item -LiteralPath $script:modeRoot).GetValueKind("EnrollmentJitterSeconds").ToString() | Should Be "DWord"
+    }
+
+    It "returns absent entries when the registry path does not exist" {
+        $snapshot = Get-AgentRegistrySnapshot `
+            -Path $script:modeRoot `
+            -Names @("Mode", "ApiUrl", "EnrollmentJitterSeconds")
+
+        $snapshot["Mode"].Exists | Should Be $false
+        $snapshot["ApiUrl"].Exists | Should Be $false
+        $snapshot["EnrollmentJitterSeconds"].Exists | Should Be $false
+    }
+
+    It "treats clear on a missing registry path as a no-op" {
+        { Clear-AgentAutoEnrollRegistry -Path $script:modeRoot } | Should Not Throw
+        Test-Path -LiteralPath $script:modeRoot | Should Be $false
+    }
+
+    It "clears stale auto-enroll mode for HMAC reinstall while preserving unrelated values" {
+        New-Item -Path $script:modeRoot -Force | Out-Null
+        New-ItemProperty -Path $script:modeRoot -Name "Mode" -Value "auto-enroll" -PropertyType String -Force | Out-Null
+        New-ItemProperty -Path $script:modeRoot -Name "ApiUrl" -Value "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent" -PropertyType String -Force | Out-Null
+        New-ItemProperty -Path $script:modeRoot -Name "EnrollmentJitterSeconds" -Value 9 -PropertyType DWord -Force | Out-Null
+        New-ItemProperty -Path $script:modeRoot -Name "Unrelated" -Value "keep" -PropertyType String -Force | Out-Null
+
+        Clear-AgentAutoEnrollRegistry -Path $script:modeRoot
+
+        $key = Get-Item -LiteralPath $script:modeRoot
+        $names = @($key.GetValueNames())
+        $names -contains "Mode" | Should Be $false
+        $names -contains "ApiUrl" | Should Be $false
+        $names -contains "EnrollmentJitterSeconds" | Should Be $false
+        (Get-ItemProperty -Path $script:modeRoot).Unrelated | Should Be "keep"
+    }
+
+    It "restores a snapshot if install rollback runs after clearing stale mode" {
+        Set-AgentAutoEnrollRegistry `
+            -Path $script:modeRoot `
+            -ApiUrl "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent" `
+            -JitterSeconds 21
+
+        $snapshot = Get-AgentRegistrySnapshot `
+            -Path $script:modeRoot `
+            -Names @("Mode", "ApiUrl", "EnrollmentJitterSeconds")
+
+        Clear-AgentAutoEnrollRegistry -Path $script:modeRoot
+        Restore-AgentRegistrySnapshot -Path $script:modeRoot -Snapshot $snapshot
+
+        $props = Get-ItemProperty -Path $script:modeRoot
+        $props.Mode | Should Be "auto-enroll"
+        $props.ApiUrl | Should Be "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent"
+        $props.EnrollmentJitterSeconds | Should Be 21
+        (Get-Item -LiteralPath $script:modeRoot).GetValueKind("EnrollmentJitterSeconds").ToString() | Should Be "DWord"
     }
 }

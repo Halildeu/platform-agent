@@ -76,6 +76,11 @@ powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap
 yazilmaz. Script ZIP hash'ini ve ZIP icindeki `SHA256SUMS` dosyasini dogrular,
 sonra `install.ps1` akisini calistirir.
 
+HMAC fallback kurulumu, onceki bir `-AutoEnroll` denemesinden kalmis
+`HKLM:\SOFTWARE\EndpointAgent` `Mode` / `ApiUrl` / `EnrollmentJitterSeconds`
+override'larini servis baslamadan once temizler. Boylece servis HMAC env
+tasirken stale registry yuzunden auto-enroll modunda acilmaz.
+
 Mevcut enrolled cihazda HMAC credential store varsa bu yol upgrade-preserve
 modunda eski credential'i korur. Fresh re-enrollment istiyorsaniz explicit
 olarak `-ResetCredentialStore` verin; aksi halde yeni token verilse bile script
