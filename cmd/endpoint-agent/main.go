@@ -204,28 +204,48 @@ func resolveMode(flagSet bool, dryRunFlag bool, cfg config.Config, autoEnrollAPI
 	reader := winregistry.New()
 	regMode := reader.ReadString(`HKLM:\SOFTWARE\EndpointAgent`, "Mode", "")
 	_ = dryRunFlag // see comment on dry-run validation above; main() enforces.
-	// Codex 019ea879 must-fix: the mode decision must be SOURCE-aware, not
-	// value-aware. cfg.APIURL has a baked default (config.Default ->
-	// https://localhost/...), so `cfg.APIURL != ""` is ALWAYS true and would
-	// mistake the default for an explicit HMAC choice. We therefore read the
-	// provisioning SIGNALS from their sources: the API URL from the env var
-	// presence, the auto-enroll URL from the --api-url flag OR its env var.
+	// Codex 019ea886 must-fix: the mode decision must be SOURCE-aware (which
+	// provisioning channels are present), not value-aware. cfg.APIURL has a
+	// baked default (config.Default -> https://localhost/...), so
+	// `cfg.APIURL != ""` is ALWAYS true and would mistake the default for an
+	// explicit HMAC choice. We read each signal from its real source:
+	//   - the HMAC API URL from the env var presence,
+	//   - HMAC credential presence from the env enrollment token OR a valid
+	//     DPAPI-persisted device credential. install.ps1 REMOVES the env
+	//     token after a successful enroll, so a healthy post-install HMAC
+	//     host has ONLY the persisted credential — gating on the env token
+	//     alone would miss exactly the #108 host we must rescue,
+	//   - the auto-enroll URL from the --api-url flag OR its env var.
 	sig := modeSignals{
-		hmacAPIURLExplicit:    os.Getenv("ENDPOINT_AGENT_API_URL") != "",
-		hmacTokenPresent:      cfg.EnrollmentToken != "",
-		autoEnrollURLExplicit: strings.TrimSpace(autoEnrollAPIURLFlag) != "" || cfg.AutoEnrollAPIURL != "",
+		hmacAPIURLExplicit:    strings.TrimSpace(os.Getenv("ENDPOINT_AGENT_API_URL")) != "",
+		hmacCredentialPresent: strings.TrimSpace(cfg.EnrollmentToken) != "" || hmacCredentialPersisted(),
+		autoEnrollURLExplicit: strings.TrimSpace(autoEnrollAPIURLFlag) != "" || strings.TrimSpace(cfg.AutoEnrollAPIURL) != "",
 	}
 	return decideMode(flagSet, regMode, sig)
 }
 
+// hmacCredentialPersisted reports whether a VALID HMAC device credential is
+// persisted on disk (AG-026D DPAPI store). It is true ONLY on a successful,
+// validated Read: ErrEmpty (first run), ErrUnsupportedOS (non-Windows),
+// ErrInvalid (corrupt/zeroed blob) and any I/O error all yield false — a
+// missing or tampered credential must never blindly flip a stale auto-enroll
+// host to HMAC (Codex 019ea886 must-fix; hmacstore tamper-protection
+// 019e7314 #4). Mirrors the production store construction in main()
+// (New("", nil): default %ProgramData% path, nil entropy) so the probe reads
+// the same blob the runner will later hydrate.
+func hmacCredentialPersisted() bool {
+	_, err := hmacstore.New("", nil).Read(context.Background())
+	return err == nil
+}
+
 // modeSignals captures the SOURCE-aware provisioning signals that drive the
-// HMAC-vs-auto-enroll decision. Using sources (env-var presence / CLI flag)
-// instead of loaded config values prevents a non-empty config DEFAULT — e.g.
-// the baked localhost APIURL — from being mistaken for an explicit operator
-// HMAC choice (Codex 019ea879 must-fix).
+// HMAC-vs-auto-enroll decision. Using sources (env-var presence / CLI flag /
+// a valid persisted credential) instead of loaded config values prevents a
+// non-empty config DEFAULT — e.g. the baked localhost APIURL — from being
+// mistaken for an explicit operator HMAC choice (Codex 019ea886 must-fix).
 type modeSignals struct {
 	hmacAPIURLExplicit    bool // ENDPOINT_AGENT_API_URL env var was set
-	hmacTokenPresent      bool // ENDPOINT_AGENT_ENROLLMENT_TOKEN env var was set
+	hmacCredentialPresent bool // env enrollment token OR a valid DPAPI-persisted HMAC device credential
 	autoEnrollURLExplicit bool // --api-url flag OR ENDPOINT_AGENT_AUTO_ENROLL_API_URL env was set
 }
 
@@ -242,17 +262,20 @@ type modeSignals struct {
 // then hangs and the service never reaches RUNNING.
 //
 // Defence-in-depth: override the stale registry ONLY when the operator
-// UNAMBIGUOUSLY provisioned HMAC — explicit API URL env + enrollment token AND
-// no auto-enroll URL (neither --api-url nor the auto-enroll env). The legitimate
-// MSI/auto-enroll flow ships ENDPOINT_AGENT_AUTO_ENROLL_API_URL (and no HMAC
-// creds), so it is unaffected; ambiguous/incomplete configs defer to the
-// registry hint.
+// UNAMBIGUOUSLY provisioned HMAC — explicit API URL env + an HMAC credential
+// (env enrollment token OR a valid DPAPI-persisted device credential) AND no
+// auto-enroll URL (neither --api-url nor the auto-enroll env). A healthy
+// post-install HMAC host has the persisted credential but NO env token
+// (install.ps1 clears it), so credential presence — not the transient env
+// token — is the durable HMAC signal. The legitimate MSI/auto-enroll flow
+// ships ENDPOINT_AGENT_AUTO_ENROLL_API_URL (and no HMAC creds), so it is
+// unaffected; ambiguous/incomplete configs defer to the registry hint.
 func decideMode(flagSet bool, regMode string, sig modeSignals) string {
 	if flagSet {
 		return modeAutoEnroll
 	}
 	if regMode == modeAutoEnroll {
-		if sig.hmacAPIURLExplicit && sig.hmacTokenPresent && !sig.autoEnrollURLExplicit {
+		if sig.hmacAPIURLExplicit && sig.hmacCredentialPresent && !sig.autoEnrollURLExplicit {
 			return modeHMAC
 		}
 		return modeAutoEnroll

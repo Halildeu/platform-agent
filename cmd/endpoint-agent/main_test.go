@@ -122,17 +122,27 @@ func TestResolveMode_FlagOffNoRegistry(t *testing.T) {
 }
 
 // #108 (live pilot MKR-A1): a stale Mode=auto-enroll registry value must not
-// strand a fully-provisioned HMAC service config, while the legitimate
-// MSI/auto-enroll flow (which ships ENDPOINT_AGENT_AUTO_ENROLL_API_URL or
-// --api-url) stays unaffected. Signals are SOURCE-aware (Codex 019ea879
-// must-fix) so a non-empty config DEFAULT (baked localhost APIURL) never
-// counts as an explicit HMAC choice.
+// strand a fully-provisioned HMAC host, while the legitimate MSI/auto-enroll
+// flow (which ships ENDPOINT_AGENT_AUTO_ENROLL_API_URL or --api-url) stays
+// unaffected. Signals are SOURCE-aware (Codex 019ea886 must-fix) so a non-empty
+// config DEFAULT (baked localhost APIURL) never counts as an explicit HMAC
+// choice; credential presence — env token OR a valid DPAPI-persisted credential
+// — is the durable HMAC signal, because install.ps1 clears the env token after
+// a successful enroll.
 func TestDecideMode(t *testing.T) {
-	hmacExplicit := modeSignals{hmacAPIURLExplicit: true, hmacTokenPresent: true}
+	// envTokenHost: explicit API URL env + env enrollment token still present
+	// (mid-install, before install.ps1 clears the token).
+	envTokenHost := modeSignals{hmacAPIURLExplicit: true, hmacCredentialPresent: true}
+	// persistedCredHost: the NORMAL healthy post-install HMAC host — explicit
+	// API URL env + a valid DPAPI-persisted credential, but NO env token (cleared
+	// by install.ps1). At the pure-decision layer this collapses to the same two
+	// booleans as envTokenHost, which is the point: provenance of the credential
+	// does not change the decision (Codex 019ea886 P1 — this host MUST be rescued).
+	persistedCredHost := modeSignals{hmacAPIURLExplicit: true, hmacCredentialPresent: true}
 	autoEnrollExplicit := modeSignals{autoEnrollURLExplicit: true}
-	bothExplicit := modeSignals{hmacAPIURLExplicit: true, hmacTokenPresent: true, autoEnrollURLExplicit: true}
-	tokenOnlyDefaultURL := modeSignals{hmacTokenPresent: true} // default APIURL, env not set
-	apiURLNoToken := modeSignals{hmacAPIURLExplicit: true}
+	bothExplicit := modeSignals{hmacAPIURLExplicit: true, hmacCredentialPresent: true, autoEnrollURLExplicit: true}
+	credOnlyDefaultURL := modeSignals{hmacCredentialPresent: true} // default APIURL, env API URL not set
+	apiURLNoCred := modeSignals{hmacAPIURLExplicit: true}
 
 	cases := []struct {
 		name    string
@@ -141,14 +151,15 @@ func TestDecideMode(t *testing.T) {
 		sig     modeSignals
 		want    string
 	}{
-		{"flag wins over everything", true, modeAutoEnroll, hmacExplicit, modeAutoEnroll},
-		{"#108 stale regkey overridden by unambiguous explicit HMAC", false, modeAutoEnroll, hmacExplicit, modeHMAC},
+		{"flag wins over everything", true, modeAutoEnroll, envTokenHost, modeAutoEnroll},
+		{"#108 stale regkey overridden by explicit HMAC (env token)", false, modeAutoEnroll, envTokenHost, modeHMAC},
+		{"#108 stale regkey overridden by persisted HMAC cred, no env token (Codex P1)", false, modeAutoEnroll, persistedCredHost, modeHMAC},
 		{"MSI auto-enroll honoured (auto-enroll URL present)", false, modeAutoEnroll, autoEnrollExplicit, modeAutoEnroll},
 		{"explicit auto-enroll URL blocks HMAC override (both present)", false, modeAutoEnroll, bothExplicit, modeAutoEnroll},
-		{"token only + DEFAULT APIURL is NOT explicit HMAC (Codex P1)", false, modeAutoEnroll, tokenOnlyDefaultURL, modeAutoEnroll},
-		{"explicit API URL but no token does not override regkey", false, modeAutoEnroll, apiURLNoToken, modeAutoEnroll},
+		{"credential present + DEFAULT APIURL is NOT explicit HMAC", false, modeAutoEnroll, credOnlyDefaultURL, modeAutoEnroll},
+		{"explicit API URL but no credential does not override regkey", false, modeAutoEnroll, apiURLNoCred, modeAutoEnroll},
 		{"no signals at all honours stale regkey", false, modeAutoEnroll, modeSignals{}, modeAutoEnroll},
-		{"empty regkey is HMAC", false, "", hmacExplicit, modeHMAC},
+		{"empty regkey is HMAC", false, "", envTokenHost, modeHMAC},
 		{"non-auto-enroll regkey is HMAC", false, "hmac", autoEnrollExplicit, modeHMAC},
 	}
 	for _, tc := range cases {
@@ -157,6 +168,18 @@ func TestDecideMode(t *testing.T) {
 				t.Fatalf("decideMode(%v, %q, %+v)=%q want %q", tc.flagSet, tc.regMode, tc.sig, got, tc.want)
 			}
 		})
+	}
+}
+
+// hmacCredentialPersisted must fail closed: on the non-Windows test host the
+// DPAPI store returns ErrUnsupportedOS, so the probe returns false and never
+// blindly flips a stale auto-enroll host to HMAC without a real credential
+// (Codex 019ea886 must-fix). On Windows the same false-closed contract holds
+// for ErrEmpty / ErrInvalid / I/O errors; only a successful validated Read is
+// true.
+func TestHMACCredentialPersisted_FailsClosed(t *testing.T) {
+	if hmacCredentialPersisted() {
+		t.Fatalf("expected false on a host with no valid persisted HMAC credential")
 	}
 }
 
