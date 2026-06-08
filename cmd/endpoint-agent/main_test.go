@@ -171,13 +171,18 @@ func TestDecideMode(t *testing.T) {
 	}
 }
 
-// hmacCredentialPersisted must fail closed: on the non-Windows test host the
-// DPAPI store returns ErrUnsupportedOS, so the probe returns false and never
-// blindly flips a stale auto-enroll host to HMAC without a real credential
-// (Codex 019ea886 must-fix). On Windows the same false-closed contract holds
-// for ErrEmpty / ErrInvalid / I/O errors; only a successful validated Read is
-// true.
+// hmacCredentialPersisted must fail closed: when no valid credential is
+// persisted the probe returns false and never blindly flips a stale auto-enroll
+// host to HMAC (Codex 019ea886 must-fix). On non-Windows the store returns
+// ErrUnsupportedOS; on Windows the same false-closed contract holds for
+// ErrEmpty / ErrInvalid / I/O errors. Only a successful validated Read is true.
+//
+// Hermetic: point ProgramData (which DefaultPath() uses to build the store
+// location) at an empty temp dir so the test is deterministic on EVERY platform
+// — even a Windows host that has a real agent + valid credential installed
+// (Codex 019ea886 non-blocking note).
 func TestHMACCredentialPersisted_FailsClosed(t *testing.T) {
+	t.Setenv("ProgramData", t.TempDir())
 	if hmacCredentialPersisted() {
 		t.Fatalf("expected false on a host with no valid persisted HMAC credential")
 	}
