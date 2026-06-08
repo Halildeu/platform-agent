@@ -32,6 +32,7 @@ install_text = install_source.read_text(encoding="utf-8")
 bootstrap_text = bootstrap_source.read_text(encoding="utf-8")
 required_install_markers = [
     "[switch]$AutoEnroll",
+    'https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent',
     '"Mode" -Value "auto-enroll"',
     "ENDPOINT_AGENT_AUTO_ENROLL_API_URL",
     "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX",
@@ -50,6 +51,12 @@ for marker in required_install_markers:
 for marker in required_bootstrap_markers:
     if marker not in bootstrap_text:
         failures.append(f"{bootstrap_source}: missing auto-enroll bootstrap marker: {marker}")
+
+stale_autoenroll_base = "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin"
+if stale_autoenroll_base in install_text:
+    failures.append(f"{install_source}: stale AutoEnroll endpoint-admin base URL present")
+if stale_autoenroll_base in bootstrap_text:
+    failures.append(f"{bootstrap_source}: stale AutoEnroll endpoint-admin base URL present")
 
 package_dir = Path("dist/windows/EndpointAgent")
 if package_dir.exists():
