@@ -108,7 +108,7 @@ func TestResolveAutoEnrollAPIURL_BakedFallback(t *testing.T) {
 }
 
 func TestResolveMode_FlagWins(t *testing.T) {
-	if got := resolveMode(true, false); got != modeAutoEnroll {
+	if got := resolveMode(true, false, config.Config{}); got != modeAutoEnroll {
 		t.Fatalf("flag should win: got %q", got)
 	}
 }
@@ -116,8 +116,43 @@ func TestResolveMode_FlagWins(t *testing.T) {
 func TestResolveMode_FlagOffNoRegistry(t *testing.T) {
 	// On non-Windows, registry.Reader returns def for ReadString, so the
 	// fallback is HMAC mode.
-	if got := resolveMode(false, false); got != modeHMAC {
+	if got := resolveMode(false, false, config.Config{}); got != modeHMAC {
 		t.Fatalf("default should be HMAC: got %q", got)
+	}
+}
+
+// #108 (live pilot MKR-A1): a stale Mode=auto-enroll registry value must not
+// strand a fully-provisioned HMAC service config, while the legitimate
+// MSI/auto-enroll flow (which ships ENDPOINT_AGENT_AUTO_ENROLL_API_URL) stays
+// unaffected.
+func TestDecideMode(t *testing.T) {
+	hmac := config.Config{APIURL: "https://h/api", EnrollmentToken: "tok"}
+	autoEnroll := config.Config{AutoEnrollAPIURL: "https://ae/api"}
+	bothCreds := config.Config{APIURL: "https://h/api", EnrollmentToken: "tok", AutoEnrollAPIURL: "https://ae/api"}
+	partialHMAC := config.Config{APIURL: "https://h/api"} // enrollment token missing
+
+	cases := []struct {
+		name    string
+		flagSet bool
+		regMode string
+		cfg     config.Config
+		want    string
+	}{
+		{"flag wins over everything", true, modeAutoEnroll, hmac, modeAutoEnroll},
+		{"#108 stale regkey overridden by unambiguous HMAC config", false, modeAutoEnroll, hmac, modeHMAC},
+		{"MSI auto-enroll honoured (auto-enroll URL present)", false, modeAutoEnroll, autoEnroll, modeAutoEnroll},
+		{"ambiguous config (both creds) defers to regkey", false, modeAutoEnroll, bothCreds, modeAutoEnroll},
+		{"incomplete HMAC config does not override regkey", false, modeAutoEnroll, partialHMAC, modeAutoEnroll},
+		{"no creds at all honours stale regkey", false, modeAutoEnroll, config.Config{}, modeAutoEnroll},
+		{"empty regkey is HMAC", false, "", hmac, modeHMAC},
+		{"non-auto-enroll regkey is HMAC", false, "hmac", autoEnroll, modeHMAC},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := decideMode(tc.flagSet, tc.regMode, tc.cfg); got != tc.want {
+				t.Fatalf("decideMode(%v, %q, cfg)=%q want %q", tc.flagSet, tc.regMode, got, tc.want)
+			}
+		})
 	}
 }
 
