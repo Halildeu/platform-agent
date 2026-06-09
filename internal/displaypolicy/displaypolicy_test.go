@@ -113,6 +113,36 @@ func TestValidate_WallpaperNeedsPathAndStyle(t *testing.T) {
 	}
 }
 
+func TestIsUsableLocalWallpaperPath(t *testing.T) {
+	good := []string{`C:\wall.jpg`, `c:\Windows\Web\Wallpaper\img.jpg`, `D:/pics/x.png`}
+	for _, p := range good {
+		if !IsUsableLocalWallpaperPath(p) {
+			t.Fatalf("usable local path %q rejected", p)
+		}
+	}
+	bad := []string{
+		``, `   `, `wall.jpg`, // relative
+		`\\server\share\wall.jpg`,   // UNC
+		`C:\dir\..\wall.jpg`,        // traversal
+		`%SystemRoot%\Web\wall.jpg`, // env var
+		`1:\wall.jpg`,               // not a drive letter
+		`C:wall.jpg`,                // drive-relative (no separator)
+		`/etc/wall.jpg`,             // posix absolute
+	}
+	for _, p := range bad {
+		if IsUsableLocalWallpaperPath(p) {
+			t.Fatalf("non-usable path %q accepted", p)
+		}
+	}
+	// Validate must reject an enabled wallpaper whose path is UNC/relative.
+	for _, p := range []string{`\\srv\s\w.jpg`, `w.jpg`, `C:\a\..\w.jpg`} {
+		c := Command{Operation: OperationEnforce, Wallpaper: &Wallpaper{Enabled: true, Style: "FILL", AssetRef: p}}
+		if err := Validate(c); err == nil {
+			t.Fatalf("Validate accepted wallpaper with bad path %q", p)
+		}
+	}
+}
+
 func TestStyleToRegistryValue(t *testing.T) {
 	want := map[string]string{"CENTER": "0", "STRETCH": "2", "FIT": "6", "FILL": "10", "SPAN": "22"}
 	for style, exp := range want {

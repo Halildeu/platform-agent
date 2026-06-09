@@ -165,8 +165,9 @@ func Validate(cmd Command) error {
 		if _, ok := StyleToRegistryValue(w.Style); !ok {
 			return fmt.Errorf("SET_DISPLAY_POLICY: unknown wallpaper style %q", w.Style)
 		}
-		if strings.TrimSpace(w.AssetRef) == "" {
-			return fmt.Errorf("SET_DISPLAY_POLICY: wallpaper enabled but no usable asset path (assetRef empty)")
+		if !IsUsableLocalWallpaperPath(w.AssetRef) {
+			return fmt.Errorf("SET_DISPLAY_POLICY: wallpaper enabled but assetRef %q is not a usable local path "+
+				"(need a drive-rooted path like C:\\…; no UNC, relative or parent-traversal)", w.AssetRef)
 		}
 	}
 	return nil
@@ -177,6 +178,35 @@ func Validate(cmd Command) error {
 func IsAllowedScrPath(p string) bool {
 	_, ok := allowedScrPaths[strings.ToLower(strings.TrimSpace(p))]
 	return ok
+}
+
+// IsUsableLocalWallpaperPath reports whether p is a Windows absolute LOCAL file
+// path the v1 wallpaper applier will accept: drive-rooted (e.g. C:\...), NOT a
+// UNC share (\\server\...), with no parent-traversal segment. This is the
+// OS-agnostic SHAPE gate (unit-testable anywhere); the file's actual existence
+// is checked at apply time on Windows (os.Stat) before any registry write, so a
+// non-existent path never yields a dishonest "wallpaper enforced" (Codex
+// 019ea9c5 must-fix 2). v1 does not download assets — assetRef must already be
+// a path the agent can read on the endpoint.
+func IsUsableLocalWallpaperPath(p string) bool {
+	s := strings.TrimSpace(p)
+	if len(s) < 3 {
+		return false
+	}
+	if strings.HasPrefix(s, `\\`) { // UNC share — unsupported in v1
+		return false
+	}
+	if !isDriveLetter(s[0]) || s[1] != ':' || (s[2] != '\\' && s[2] != '/') {
+		return false
+	}
+	if strings.Contains(s, "..") { // parent traversal
+		return false
+	}
+	return true
+}
+
+func isDriveLetter(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
 }
 
 // IsTargetUserSID reports whether a HKEY_USERS subkey name is a loaded real

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 
 	"golang.org/x/sys/windows/registry"
@@ -60,6 +61,22 @@ func Apply(_ context.Context, cmd Command) Result {
 		return res
 	}
 
+	// Wallpaper asset existence pre-flight (Codex 019ea9c5 must-fix 2): a
+	// non-existent / directory path fails BEFORE any registry side effect, so a
+	// Wallpaper policy value that cannot render is never written.
+	if cmd.Operation == OperationEnforce && cmd.Wallpaper != nil && cmd.Wallpaper.Enabled {
+		if fi, statErr := os.Stat(cmd.Wallpaper.AssetRef); statErr != nil || fi.IsDir() {
+			res.FinalStatus = StatusFailedInvalid
+			if statErr != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("wallpaper asset %q not readable: %v", cmd.Wallpaper.AssetRef, statErr))
+			} else {
+				res.Errors = append(res.Errors, fmt.Sprintf("wallpaper asset %q is a directory", cmd.Wallpaper.AssetRef))
+			}
+			res.Summary = "SET_DISPLAY_POLICY ENFORCE: wallpaper asset path not usable (no registry change)"
+			return res
+		}
+	}
+
 	successes, failures := 0, 0
 	for _, sid := range sids {
 		res.TargetedSIDs = append(res.TargetedSIDs, sid)
@@ -67,7 +84,7 @@ func Apply(_ context.Context, cmd Command) Result {
 		if cmd.Operation == OperationEnforce {
 			sidErr = applyEnforceForSID(sid, cmd, &res)
 		} else {
-			applyClearForSID(sid, &res)
+			sidErr = applyClearForSID(sid, &res)
 		}
 		if sidErr {
 			failures++
@@ -127,7 +144,9 @@ func applyEnforceForSID(sid string, cmd Command, res *Result) bool {
 			}
 		} else {
 			for _, name := range screensaverValues {
-				deleteValue(spath, name, res)
+				if deleteValue(spath, name, res) {
+					hadErr = true
+				}
 			}
 		}
 	}
@@ -147,29 +166,49 @@ func applyEnforceForSID(sid string, cmd Command, res *Result) bool {
 					hadErr = true
 				}
 			} else {
-				deleteValue(apath, "NoChangingWallPaper", res)
+				if deleteValue(apath, "NoChangingWallPaper", res) {
+					hadErr = true
+				}
 			}
 		} else {
-			deleteValue(wpath, "Wallpaper", res)
-			deleteValue(wpath, "WallpaperStyle", res)
-			deleteValue(apath, "NoChangingWallPaper", res)
+			if deleteValue(wpath, "Wallpaper", res) {
+				hadErr = true
+			}
+			if deleteValue(wpath, "WallpaperStyle", res) {
+				hadErr = true
+			}
+			if deleteValue(apath, "NoChangingWallPaper", res) {
+				hadErr = true
+			}
 		}
 	}
 	return hadErr
 }
 
-// applyClearForSID deletes every managed value; a missing value is not a
-// failure (CLEAR = revert to user control).
-func applyClearForSID(sid string, res *Result) {
+// applyClearForSID deletes every managed value (CLEAR = revert to user control).
+// A missing value is not a failure; a real registry error (access denied, hive
+// race) IS — it returns true so the per-SID aggregation never reports a swallowed
+// failure as SUCCEEDED (Codex 019ea9c5 must-fix 1).
+func applyClearForSID(sid string, res *Result) bool {
 	spath := sid + `\` + keyScreensaver
 	wpath := sid + `\` + keyWallpaper
 	apath := sid + `\` + keyActiveDesktop
+	hadErr := false
 	for _, name := range screensaverValues {
-		deleteValue(spath, name, res)
+		if deleteValue(spath, name, res) {
+			hadErr = true
+		}
 	}
-	deleteValue(wpath, "Wallpaper", res)
-	deleteValue(wpath, "WallpaperStyle", res)
-	deleteValue(apath, "NoChangingWallPaper", res)
+	if deleteValue(wpath, "Wallpaper", res) {
+		hadErr = true
+	}
+	if deleteValue(wpath, "WallpaperStyle", res) {
+		hadErr = true
+	}
+	if deleteValue(apath, "NoChangingWallPaper", res) {
+		hadErr = true
+	}
+	return hadErr
 }
 
 func boolToReg(b bool) string {
@@ -215,19 +254,27 @@ func setDWord(path, name string, val uint32, res *Result) bool {
 	return false
 }
 
-func deleteValue(path, name string, res *Result) {
-	k, err := registry.OpenKey(registry.USERS, path, registry.SET_VALUE)
+// deleteValue removes a managed policy value. An ABSENT key/value is a no-op
+// success (false); a real registry error (access denied, hive race) is a
+// failure (true) recorded in res.Errors — never swallowed as success (Codex
+// 019ea9c5 must-fix 1).
+func deleteValue(path, name string, res *Result) bool {
+	k, err := registry.OpenKey(registry.USERS, path, registry.SET_VALUE|registry.QUERY_VALUE)
 	if err != nil {
-		// Key absent → the managed value is already absent; nothing to do.
-		return
+		if errors.Is(err, registry.ErrNotExist) {
+			return false // key absent → managed value already absent
+		}
+		res.Errors = append(res.Errors, fmt.Sprintf("open %q for delete: %v", path, err))
+		return true
 	}
 	defer k.Close()
 	if err := k.DeleteValue(name); err != nil {
 		if errors.Is(err, registry.ErrNotExist) {
-			return
+			return false // value absent → nothing to revert
 		}
 		res.Errors = append(res.Errors, fmt.Sprintf("delete %s\\%s: %v", path, name, err))
-		return
+		return true
 	}
 	res.DeletedValues = append(res.DeletedValues, `HKU\`+path+`\`+name)
+	return false
 }
