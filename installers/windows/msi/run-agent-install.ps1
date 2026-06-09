@@ -126,7 +126,11 @@ try {
         } else {
             Write-MsiLog "uninstall: default -> credential/config PRESERVED"
         }
-        if ($cfg.ContainsKey('SERVICE_NAME')) { $uArgs['ServiceName'] = $cfg['SERVICE_NAME'] }
+        # Guard empty SERVICE_NAME (mirror the install path) so we never call
+        # uninstall.ps1 -ServiceName "" — let it default to "EndpointAgent".
+        if ($cfg.ContainsKey('SERVICE_NAME') -and -not [string]::IsNullOrWhiteSpace($cfg['SERVICE_NAME'])) {
+            $uArgs['ServiceName'] = $cfg['SERVICE_NAME']
+        }
         & $uninstallScript @uArgs
         # uninstall.ps1 is a PowerShell script ($ErrorActionPreference=Stop): it
         # signals failure by THROWING (caught below), NOT via $LASTEXITCODE —

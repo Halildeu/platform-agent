@@ -62,7 +62,12 @@
     <Property Id="LOG_DIR" Secure="yes" />
     <Property Id="INSTALL_ID" Secure="yes" />
     <Property Id="MAINTENANCE_TOKEN_HASH" Secure="yes" />
-    <Property Id="SERVICE_NAME" Secure="yes" />
+    <!-- Default service name so the uninstall CA never sends an empty
+         SERVICE_NAME (which would call uninstall.ps1 -ServiceName ""). A CUSTOM
+         install-time service name is NOT remembered at /x time (MSI does not
+         persist custom public properties) — uninstall then targets the default;
+         documented limitation, fine for the default deployment. -->
+    <Property Id="SERVICE_NAME" Value="EndpointAgent" Secure="yes" />
     <!-- Tokenless domain/GPO path (ADR-0029 Katman 3). -->
     <Property Id="AUTO_ENROLL" Secure="yes" />
     <Property Id="AUTO_ENROLL_API_URL" Secure="yes" />

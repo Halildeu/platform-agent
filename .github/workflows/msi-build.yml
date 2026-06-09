@@ -111,8 +111,10 @@ jobs:
           $p = Start-Process msiexec -ArgumentList @(
               "/i", "`"$msi`"", "/qn", "/l*v", "`"$log`"",
               "API_URL=https://testai.acik.com/api/v1/endpoint-agent",
-              "ENROLL_RESPONSE_FILE=`"$respFile`"",
-              "SERVICE_NAME=EndpointAgent"
+              "ENROLL_RESPONSE_FILE=`"$respFile`""
+              # NOTE: SERVICE_NAME intentionally omitted -> exercises the WiX
+              # default ("EndpointAgent"); uninstall step also passes none, so the
+              # default-property install+uninstall path is covered (Codex review).
           ) -Wait -PassThru
           Write-Host "msiexec exit=$($p.ExitCode)"
           if ($p.ExitCode -ne 0) {
@@ -239,8 +241,11 @@ jobs:
           $p = Start-Process msiexec -ArgumentList @("/i","`"$msi4`"","/qn","/l*v","`"$logF`"","API_URL=https://testai.acik.com/api/v1/endpoint-agent","ENROLL_RESPONSE_FILE=`"$short`"","SERVICE_NAME=EndpointAgentFU") -Wait -PassThru
           Write-Host "failed-upgrade msiexec exit=$($p.ExitCode) (expected NON-zero)"
           if ($p.ExitCode -eq 0) { throw "expected the short-token upgrade to FAIL, but it succeeded" }
-          # 3) INVARIANT: RemoveExistingProducts is afterInstallExecute, so a new-install
-          #    CA failure happens BEFORE old removal => OLD v0.1.3 must remain (NOT degraded).
+          # 3) INVARIANT (pre-mutation failure class): the short-token failure occurs in
+          #    install.ps1's preflight (Assert-EnrollmentTokenLength), BEFORE -Force touches
+          #    the existing service, and the old MSI's RemoveExistingProducts is deferred
+          #    (afterInstallExecute) => OLD v0.1.3 must remain. (A failure AFTER install.ps1
+          #    -Force's own old-service removal is a residual limitation, recovered by re-run.)
           if (-not (Get-Service EndpointAgentFU -ErrorAction SilentlyContinue)) { throw "DEGRADED: old service gone after failed upgrade" }
           if (-not (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.3\payload\endpoint-agent.exe")) { throw "DEGRADED: old v0.1.3 payload gone" }
           if (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.4\payload\endpoint-agent.exe") { throw "rollback incomplete: v0.1.4 payload remains" }
