@@ -64,6 +64,25 @@ if ($SelfSign) {
         -KeyExportPolicy Exportable -KeySpec Signature `
         -NotAfter (Get-Date).AddDays(30)
 
+    # Import the PUBLIC cert into the machine Trusted Root + Trusted Publisher
+    # stores so the lab signature validates to 'Valid' AND the signed scripts are
+    # actually trusted on this box (AppLocker/WDAC realism). Needs admin (CI
+    # runner + SYSTEM smoke both qualify); if import fails we accept the
+    # signed-but-untrusted state for the lab tier rather than hard-fail.
+    $trusted = $false
+    try {
+        $tmpCer = Join-Path $OutputDir "ea-lab-signer.cer"
+        New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+        Export-Certificate -Cert $cert -FilePath $tmpCer -Force | Out-Null
+        Import-Certificate -FilePath $tmpCer -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
+        Import-Certificate -FilePath $tmpCer -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" | Out-Null
+        Remove-Item $tmpCer -Force -ErrorAction SilentlyContinue
+        $trusted = $true
+        Step "lab signer imported into LocalMachine Root + TrustedPublisher"
+    } catch {
+        Step "WARN: trust-store import failed ($($_.Exception.Message)); lab signature will be untrusted"
+    }
+
     $toSign = @(
         (Join-Path $payloadDir "install.ps1"),
         (Join-Path $payloadDir "uninstall.ps1"),
@@ -74,7 +93,13 @@ if ($SelfSign) {
     foreach ($f in $toSign) {
         $r = Set-AuthenticodeSignature -FilePath $f -Certificate $cert -HashAlgorithm SHA256
         Step ("signed {0} -> {1}" -f (Split-Path -Leaf $f), $r.Status)
-        if ($r.Status -ne 'Valid') { throw "sign failed (lab cert not trusted is OK for status=UnknownError on a fresh box; got $($r.Status)) for $f" }
+        # Trusted import => 'Valid'. Without trust => 'UnknownError' (signed but
+        # chain not trusted) is acceptable for the lab tier; anything else fails.
+        $ok = @('Valid', 'UnknownError')
+        if ($r.Status -notin $ok) { throw "sign failed status=$($r.Status) for $f" }
+        if ($trusted -and $r.Status -ne 'Valid') {
+            throw "lab signer was trusted but signature still $($r.Status) for $f"
+        }
     }
 }
 
