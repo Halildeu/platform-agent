@@ -1,19 +1,36 @@
 <#
 .SYNOPSIS
-  Build the Endpoint Agent MSI (Faz 22.5 M4, lab tier) from a staged payload.
+  Build the Endpoint Agent MSI (Faz 22.5 M4) from a staged payload, with a tiered
+  signing model: lab self-signed (default), Azure Trusted Signing (prod), or none.
 
 .DESCRIPTION
-  Runs on a Windows host with the WiX v4 dotnet tool (`dotnet tool install --global wix`).
-  Stages the payload (agent exe + install/uninstall/bootstrap/run-agent-install ps1),
-  lab self-signs the scripts (and exe if unsigned) AFTER any release patching, builds
-  the MSI via `wix build`, then lab self-signs the MSI. Emits a signing-tier manifest.
+  Runs on a Windows host with the WiX v4 dotnet tool. Stages the payload (agent exe
+  + install/uninstall/bootstrap/run-agent-install ps1), signs per -SigningMode AFTER
+  any release patching (sign-last), builds the MSI via `wix build`, signs the MSI,
+  then verifies + emits a signing-tier manifest.
 
-  LAB TIER ONLY: self-signed. Prod uses Authenticode trusted-signing (Faz 22.2,
-  operator cert) through the same manifest — this script marks the artifact non-prod.
+  SIGNING MODES (-SigningMode):
+    lab     (default) — ephemeral self-signed cert, imported to the local trust
+                        stores so Authenticode validates Valid. `production=false`.
+    trusted (Faz 22.2 / AG-018) — Azure Trusted Signing via signtool /dlib over an
+                        active `azure/login@v2` OIDC session. FAIL-CLOSED: throws if
+                        any TRUSTED_SIGNING_* env is missing (never ships unsigned as
+                        production). Each artifact is signtool-verified with /pa
+                        (production trust policy, NO import) AND asserted to carry an
+                        RFC3161 timestamp; only then `production=true`.
+    none    — build unsigned. `production=false`.
+
+  Trusted mode env (set by the release workflow; NO PFX/secret — only these + the
+  azure/login OIDC session):
+    TRUSTED_SIGNING_ENDPOINT       e.g. https://eus.codesigning.azure.net/
+    TRUSTED_SIGNING_ACCOUNT        Trusted Signing account name
+    TRUSTED_SIGNING_CERT_PROFILE   certificate profile name
+    TRUSTED_SIGNING_TIMESTAMP_URL  RFC3161 TSA (Azure default TSA is free)
+    TRUSTED_SIGNING_DLIB           path to Azure.CodeSigning.Dlib.dll
 
 .NOTES
-  Codex 019ead14 conditions: sign-last (no post-sign mutation), one manifest for
-  MSI+EXE+PS1, MSI version obeys first-3-field semantics (CI guards greater-than).
+  Codex 019ead14: sign-last (no post-sign mutation; manifest written AFTER signing),
+  one manifest for MSI+EXE+PS1, fail-closed trusted, /pa + timestamp = production gate.
 #>
 [CmdletBinding()]
 param(
@@ -24,14 +41,22 @@ param(
     [ValidatePattern('^\d+\.\d+\.\d+')]      # first 3 fields drive MSI upgrade semantics
     [string]$Version,                        # e.g. 0.1.1  (MSI ProductVersion)
 
+    [ValidateSet('lab', 'trusted', 'none')]
+    [string]$SigningMode = 'lab',
+
     [string]$InstallersDir = (Split-Path -Parent $PSCommandPath), # installers/windows/msi
     [string]$OutputDir     = (Join-Path (Split-Path -Parent $PSCommandPath) "out"),
-    [switch]$SelfSign      = $true,          # lab tier default
-    [switch]$NoExeSign                       # skip exe signing if already release-signed
+    [switch]$NoExeSign,                       # skip exe signing if already release-signed
+
+    # Deprecated back-compat: -SelfSign:$false maps to -SigningMode none.
+    [switch]$SelfSign = $true
 )
 
 $ErrorActionPreference = "Stop"
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
+
+# Back-compat: an explicit -SelfSign:$false (old callers) means "no signing".
+if ($PSBoundParameters.ContainsKey('SelfSign') -and -not $SelfSign) { $SigningMode = 'none' }
 
 $windowsDir = Split-Path -Parent $InstallersDir        # installers/windows
 $msiVersion = ($Version -split '[-+]')[0]               # strip prerelease/build metadata for MSI
@@ -41,7 +66,62 @@ $parts = $msiVersion -split '\.'
 if ($parts.Count -lt 3) { throw "Version '$Version' must have at least 3 numeric fields" }
 $msiVersion = ("{0}.{1}.{2}" -f $parts[0], $parts[1], $parts[2])
 
-Step "MSI ProductVersion = $msiVersion (from $Version)"
+$tierTag = switch ($SigningMode) { 'lab' { 'lab' } 'trusted' { 'signed' } default { 'unsigned' } }
+Step "MSI ProductVersion = $msiVersion (from $Version); SigningMode=$SigningMode tierTag=$tierTag"
+
+# ---- trusted-mode config (fail-closed) ----
+$trustedCfg = $null
+if ($SigningMode -eq 'trusted') {
+    $req = @{
+        Endpoint     = $env:TRUSTED_SIGNING_ENDPOINT
+        Account      = $env:TRUSTED_SIGNING_ACCOUNT
+        CertProfile  = $env:TRUSTED_SIGNING_CERT_PROFILE
+        TimestampUrl = $env:TRUSTED_SIGNING_TIMESTAMP_URL
+        Dlib         = $env:TRUSTED_SIGNING_DLIB
+    }
+    $missing = $req.GetEnumerator() | Where-Object { [string]::IsNullOrWhiteSpace($_.Value) } | ForEach-Object { $_.Key }
+    if ($missing) {
+        throw "trusted signing NOT configured — missing TRUSTED_SIGNING_* for: $($missing -join ', '). " +
+              "Complete docs/22-2-trusted-signing-onboarding.md (operator) before a trusted release."
+    }
+    if (-not (Test-Path -LiteralPath $req.Dlib)) { throw "Azure Trusted Signing dlib not found: $($req.Dlib)" }
+    $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)?.Source
+    if (-not $signtool) {
+        $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $signtool) { throw "signtool.exe not found (install the Windows SDK signing tools)" }
+    $metaJson = Join-Path $OutputDir "trusted-signing-metadata.json"
+    New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+    [ordered]@{
+        Endpoint               = $req.Endpoint
+        CodeSigningAccountName = $req.Account
+        CertificateProfileName = $req.CertProfile
+    } | ConvertTo-Json | Set-Content -LiteralPath $metaJson -Encoding UTF8
+    $trustedCfg = @{ Signtool = $signtool; Dlib = $req.Dlib; Meta = $metaJson; Tsa = $req.TimestampUrl }
+    Step "trusted signing configured (endpoint=$($req.Endpoint) account=$($req.Account) profile=$($req.CertProfile))"
+}
+
+# Sign + verify ONE artifact via Azure Trusted Signing. Production gate: signtool
+# verify /pa (trust policy, no import) MUST pass AND the signature MUST carry an
+# RFC3161 timestamp. (Helper boundary so a future swap to azure/trusted-signing-action is local.)
+function Invoke-TrustedSign {
+    param([string]$File, [hashtable]$Cfg)
+    & $Cfg.Signtool sign /v /fd SHA256 /tr $Cfg.Tsa /td SHA256 /dlib $Cfg.Dlib /dmdf $Cfg.Meta $File | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "trusted sign failed (exit $LASTEXITCODE) for $File" }
+    $out = (& $Cfg.Signtool verify /pa /v $File 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw "signtool verify /pa FAILED for $File`n$out" }
+    # RFC3161 timestamp: fail on negative phrasing first, then REQUIRE positive
+    # evidence (the bare word "timestamp" also appears in "not timestamped").
+    if ($out -match '(?i)\b(not timestamped|no timestamp)\b') { throw "signature is NOT timestamped for $File`n$out" }
+    if ($out -notmatch '(?im)^\s*(The signature is timestamped:|Timestamp Verified by:)') {
+        throw "no positive RFC3161 timestamp evidence in /pa verify for $File`n$out"
+    }
+    # Defense-in-depth metadata assert (NOT the main gate — /pa above is).
+    $auth = Get-AuthenticodeSignature -FilePath $File
+    if (-not $auth.TimeStamperCertificate) { throw "no timestamper certificate on $File" }
+    Step ("trusted-signed + /pa-verified + timestamped {0}" -f (Split-Path -Leaf $File))
+}
 
 # ---- stage payload ----
 $payloadDir = Join-Path $OutputDir "payload"
@@ -54,22 +134,23 @@ foreach ($s in @("install.ps1", "uninstall.ps1", "bootstrap-package.ps1")) {
 }
 Copy-Item (Join-Path $InstallersDir "run-agent-install.ps1") (Join-Path $payloadDir "run-agent-install.ps1") -Force
 
-# ---- lab self-sign (AFTER staging/patching; sign-last) ----
-$cert = $null
-if ($SelfSign) {
+$payloadToSign = @(
+    (Join-Path $payloadDir "install.ps1"),
+    (Join-Path $payloadDir "uninstall.ps1"),
+    (Join-Path $payloadDir "bootstrap-package.ps1"),
+    (Join-Path $payloadDir "run-agent-install.ps1")
+)
+if (-not $NoExeSign) { $payloadToSign += (Join-Path $payloadDir "endpoint-agent.exe") }
+
+# ---- sign payload (BEFORE wix build, since the cab embeds these) ----
+$cert = $null; $labTrusted = $false
+if ($SigningMode -eq 'lab') {
     Step "Lab self-sign: provisioning ephemeral code-signing cert"
     $cert = New-SelfSignedCertificate -Type CodeSigningCert `
         -Subject "CN=Endpoint Agent Lab Signing (NON-PROD)" `
         -CertStoreLocation "Cert:\CurrentUser\My" `
         -KeyExportPolicy Exportable -KeySpec Signature `
         -NotAfter (Get-Date).AddDays(30)
-
-    # Import the PUBLIC cert into the machine Trusted Root + Trusted Publisher
-    # stores so the lab signature validates to 'Valid' AND the signed scripts are
-    # actually trusted on this box (AppLocker/WDAC realism). Needs admin (CI
-    # runner + SYSTEM smoke both qualify); if import fails we accept the
-    # signed-but-untrusted state for the lab tier rather than hard-fail.
-    $trusted = $false
     try {
         $tmpCer = Join-Path $OutputDir "ea-lab-signer.cer"
         New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
@@ -77,35 +158,26 @@ if ($SelfSign) {
         Import-Certificate -FilePath $tmpCer -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
         Import-Certificate -FilePath $tmpCer -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" | Out-Null
         Remove-Item $tmpCer -Force -ErrorAction SilentlyContinue
-        $trusted = $true
+        $labTrusted = $true
         Step "lab signer imported into LocalMachine Root + TrustedPublisher"
     } catch {
         Step "WARN: trust-store import failed ($($_.Exception.Message)); lab signature will be untrusted"
     }
-
-    $toSign = @(
-        (Join-Path $payloadDir "install.ps1"),
-        (Join-Path $payloadDir "uninstall.ps1"),
-        (Join-Path $payloadDir "bootstrap-package.ps1"),
-        (Join-Path $payloadDir "run-agent-install.ps1")
-    )
-    if (-not $NoExeSign) { $toSign += (Join-Path $payloadDir "endpoint-agent.exe") }
-    foreach ($f in $toSign) {
+    foreach ($f in $payloadToSign) {
         $r = Set-AuthenticodeSignature -FilePath $f -Certificate $cert -HashAlgorithm SHA256
-        Step ("signed {0} -> {1}" -f (Split-Path -Leaf $f), $r.Status)
-        # Trusted import => 'Valid'. Without trust => 'UnknownError' (signed but
-        # chain not trusted) is acceptable for the lab tier; anything else fails.
-        $ok = @('Valid', 'UnknownError')
-        if ($r.Status -notin $ok) { throw "sign failed status=$($r.Status) for $f" }
-        if ($trusted -and $r.Status -ne 'Valid') {
-            throw "lab signer was trusted but signature still $($r.Status) for $f"
-        }
+        Step ("lab-signed {0} -> {1}" -f (Split-Path -Leaf $f), $r.Status)
+        if ("$($r.Status)" -notin @('Valid', 'UnknownError')) { throw "sign failed status=$($r.Status) for $f" }
+        if ($labTrusted -and $r.Status -ne 'Valid') { throw "lab signer trusted but $f signature $($r.Status)" }
     }
+} elseif ($SigningMode -eq 'trusted') {
+    foreach ($f in $payloadToSign) { Invoke-TrustedSign -File $f -Cfg $trustedCfg }
+} else {
+    Step "SigningMode=none — payload left unsigned"
 }
 
 # ---- build MSI ----
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
-$msiPath = Join-Path $OutputDir "EndpointAgent-$msiVersion-lab.msi"
+$msiPath = Join-Path $OutputDir "EndpointAgent-$msiVersion-$tierTag.msi"
 $wxs = Join-Path $InstallersDir "EndpointAgent.wxs"
 
 Step "wix build -> $msiPath"
@@ -117,56 +189,65 @@ Step "wix build -> $msiPath"
     -out $msiPath
 if ($LASTEXITCODE -ne 0) { throw "wix build failed (exit $LASTEXITCODE)" }
 
-# ---- lab-sign the MSI ----
-if ($SelfSign -and $cert) {
-    Step "Lab self-sign MSI"
+# ---- sign the MSI (AFTER build) ----
+if ($SigningMode -eq 'lab' -and $cert) {
     $r = Set-AuthenticodeSignature -FilePath $msiPath -Certificate $cert -HashAlgorithm SHA256
-    Step "MSI signature -> $($r.Status)"
-    $ok = @('Valid', 'UnknownError')
-    if ($r.Status -notin $ok) { throw "MSI signing failed status=$($r.Status)" }
-    if ($trusted -and $r.Status -ne 'Valid') { throw "lab signer trusted but MSI signature still $($r.Status)" }
+    Step "MSI lab signature -> $($r.Status)"
+    if ("$($r.Status)" -notin @('Valid', 'UnknownError')) { throw "MSI signing failed status=$($r.Status)" }
+    if ($labTrusted -and $r.Status -ne 'Valid') { throw "lab signer trusted but MSI signature $($r.Status)" }
+} elseif ($SigningMode -eq 'trusted') {
+    Invoke-TrustedSign -File $msiPath -Cfg $trustedCfg
 }
 
-# ---- verify every shipped artifact carries a (lab) signature ----
-$sigStatus = @{}
-foreach ($f in @($msiPath,
-                 (Join-Path $payloadDir "endpoint-agent.exe"),
-                 (Join-Path $payloadDir "install.ps1"),
-                 (Join-Path $payloadDir "uninstall.ps1"),
-                 (Join-Path $payloadDir "bootstrap-package.ps1"),
-                 (Join-Path $payloadDir "run-agent-install.ps1"))) {
-    $s = Get-AuthenticodeSignature -FilePath $f
-    $sigStatus[(Split-Path -Leaf $f)] = "$($s.Status)"
-    Step ("sig {0,-26} -> {1}" -f (Split-Path -Leaf $f), $s.Status)
-    if ($SelfSign) {
-        if ("$($s.Status)" -notin @('Valid', 'UnknownError')) { throw "bad signature on $f : $($s.Status)" }
-        if ($trusted -and "$($s.Status)" -ne 'Valid')         { throw "trusted signer but $f signature $($s.Status)" }
-    }
-}
-
-# ---- manifest (one manifest: MSI + EXE + PS1, lab tier) ----
-$manifest = [ordered]@{
-    artifact_kind = "endpoint-agent-msi"
-    signing_tier  = if ($SelfSign) { "lab-self-signed" } else { "unsigned" }
-    production    = $false
-    product_version = $msiVersion
-    source_version  = $Version
-    built_at_utc  = (Get-Date).ToUniversalTime().ToString("o")
-    signer_thumbprint = if ($cert) { $cert.Thumbprint } else { $null }
-    signatures = $sigStatus
-    files = @{}
-}
-foreach ($f in @($msiPath, (Join-Path $payloadDir "endpoint-agent.exe"),
+# ---- verify every shipped artifact + collect signature status ----
+$allArtifacts = @($msiPath,
+                  (Join-Path $payloadDir "endpoint-agent.exe"),
                   (Join-Path $payloadDir "install.ps1"),
                   (Join-Path $payloadDir "uninstall.ps1"),
                   (Join-Path $payloadDir "bootstrap-package.ps1"),
-                  (Join-Path $payloadDir "run-agent-install.ps1"))) {
-    $manifest.files[(Split-Path -Leaf $f)] = (Get-FileHash $f -Algorithm SHA256).Hash
+                  (Join-Path $payloadDir "run-agent-install.ps1"))
+$sigStatus = @{}; $thumbprints = @{}
+foreach ($f in $allArtifacts) {
+    $s = Get-AuthenticodeSignature -FilePath $f
+    $sigStatus[(Split-Path -Leaf $f)] = "$($s.Status)"
+    if ($s.SignerCertificate) { $thumbprints[(Split-Path -Leaf $f)] = $s.SignerCertificate.Thumbprint }
+    Step ("sig {0,-26} -> {1}" -f (Split-Path -Leaf $f), $s.Status)
+    if ($SigningMode -eq 'lab') {
+        if ("$($s.Status)" -notin @('Valid', 'UnknownError')) { throw "bad signature on $f : $($s.Status)" }
+        if ($labTrusted -and "$($s.Status)" -ne 'Valid')       { throw "trusted signer but $f signature $($s.Status)" }
+    } elseif ($SigningMode -eq 'trusted') {
+        # Authenticode metadata must be Valid (the /pa + timestamp gate already ran in Invoke-TrustedSign).
+        if ("$($s.Status)" -ne 'Valid') { throw "trusted artifact $f Authenticode status $($s.Status) (expected Valid)" }
+    }
 }
+
+# production=true ONLY for a fully verified trusted build (/pa + timestamp passed above).
+$isProduction = ($SigningMode -eq 'trusted')
+$signingTier  = switch ($SigningMode) { 'lab' { 'lab-self-signed' } 'trusted' { 'trusted-azure' } default { 'unsigned' } }
+
+# ---- manifest (written AFTER all signing; signed artifacts are NOT mutated after this) ----
+$manifest = [ordered]@{
+    artifact_kind   = "endpoint-agent-msi"
+    signing_tier    = $signingTier
+    production      = $isProduction
+    product_version = $msiVersion
+    source_version  = $Version
+    built_at_utc    = (Get-Date).ToUniversalTime().ToString("o")
+    signer_thumbprint = if ($cert) { $cert.Thumbprint } elseif ($thumbprints[(Split-Path -Leaf $msiPath)]) { $thumbprints[(Split-Path -Leaf $msiPath)] } else { $null }
+    signatures      = $sigStatus
+    timestamp_url   = if ($SigningMode -eq 'trusted') { $trustedCfg.Tsa } else { $null }
+    timestamped     = ($SigningMode -eq 'trusted')
+    files           = @{}
+}
+foreach ($f in $allArtifacts) { $manifest.files[(Split-Path -Leaf $f)] = (Get-FileHash $f -Algorithm SHA256).Hash }
 $manifestPath = Join-Path $OutputDir "msi-build-manifest.json"
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $manifestPath -Encoding UTF8
 
 Step "DONE"
 Step "  MSI       : $msiPath"
-Step "  Manifest  : $manifestPath  (signing_tier=$($manifest.signing_tier), production=false)"
-Write-Host "LAB-ONLY / NON-PROD artifact. Prod requires Authenticode trusted-signing + AppLocker/WDAC preflight + GPO domain pilot." -ForegroundColor Yellow
+Step "  Manifest  : $manifestPath  (signing_tier=$signingTier, production=$isProduction)"
+if ($isProduction) {
+    Write-Host "TRUSTED (production) MSI — Authenticode /pa-verified + RFC3161-timestamped. AppLocker/WDAC/EDR preflight + GPO pilot still operator-gated." -ForegroundColor Green
+} else {
+    Write-Host "NON-PROD artifact (signing_tier=$signingTier). Trusted signing = -SigningMode trusted with operator Azure infra (docs/22-2-trusted-signing-onboarding.md)." -ForegroundColor Yellow
+}

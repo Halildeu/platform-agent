@@ -1,0 +1,165 @@
+# Faz 22.5 M4 / AG-018 — Trusted-signed MSI release (Azure Trusted Signing).
+#
+# SKELETON: ready + activatable, but INERT until the operator completes the Azure
+# infra (docs/22-2-trusted-signing-onboarding.md). When unconfigured, `config-check`
+# emits a visible ::notice:: and `trusted-sign` is skipped — the lab `msi-build.yml`
+# is untouched and stays green, and no false-"trusted" MSI is ever produced.
+#
+# Activation (operator, NO PFX/long-lived secret — only OIDC + non-secret vars):
+#   Repo VARIABLES: TRUSTED_SIGNING_ENDPOINT, TRUSTED_SIGNING_ACCOUNT,
+#                   TRUSTED_SIGNING_CERT_PROFILE, TRUSTED_SIGNING_TIMESTAMP_URL
+#   Repo SECRETS:   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_SUBSCRIPTION_ID
+#   GitHub ENVIRONMENT `trusted-signing-prod` (required reviewers + protected tags),
+#   Azure federated credential subject:
+#     repo:Halildeu/platform-agent:environment:trusted-signing-prod
+name: AG-018 Trusted MSI release
+
+on:
+  push:
+    tags: ["v*.*.*"]          # semver; the job guards reject any prerelease (-lab/-rc)
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build+trusted-sign (e.g. 0.2.0); must be a clean a.b.c"
+        required: true
+
+permissions:
+  contents: read              # id-token:write is granted ONLY on the signing job below
+
+concurrency:
+  group: trusted-msi-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Always runs — makes "not configured" VISIBLE (no silent skip) and gates the rest.
+  config-check:
+    name: Trusted-signing config check
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.c.outputs.configured }}
+    steps:
+      - id: c
+        shell: bash
+        env:
+          TS_ACCOUNT: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          TS_ENDPOINT: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          TS_PROFILE: ${{ vars.TRUSTED_SIGNING_CERT_PROFILE }}
+          TS_TSA: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_URL }}
+        run: |
+          if [ -n "$TS_ACCOUNT" ] && [ -n "$TS_ENDPOINT" ] && [ -n "$TS_PROFILE" ] && [ -n "$TS_TSA" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Trusted signing configured — trusted-sign job will run."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Trusted signing NOT configured — operator must complete docs/22-2-trusted-signing-onboarding.md (set TRUSTED_SIGNING_* repo vars + Azure OIDC). Skipping trusted-sign; no MSI produced."
+          fi
+
+  trusted-sign:
+    name: Build + Azure-trusted-sign MSI
+    needs: config-check
+    if: >-
+      needs.config-check.outputs.configured == 'true' &&
+      github.repository == 'Halildeu/platform-agent' &&
+      ((github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-')) ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: windows-latest
+    environment: trusted-signing-prod   # required-reviewers + protected-tags gate; OIDC subject binds here
+    permissions:
+      id-token: write                   # OIDC ONLY here (not workflow-global)
+      contents: read
+    env:
+      DLIB_PKG_VERSION: "1.0.60"         # pin the Trusted Signing client (Codex: record + pin)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                 # need history for the ancestor-of-main check
+
+      # Confused-deputy guard: the build ref (tag push OR manual dispatch) must
+      # point at a commit on main — runs for BOTH events so a workflow_dispatch
+      # from a feature branch can't acquire the environment OIDC token to sign an
+      # off-main ref.
+      - name: Guard — build commit must be an ancestor of origin/main
+        shell: bash
+        run: |
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::ref ${GITHUB_REF_NAME} (${GITHUB_SHA}) is not on origin/main — refusing to trusted-sign an off-main ref"
+            exit 1
+          fi
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then V="${{ github.event.inputs.version }}"; else V="${GITHUB_REF_NAME#v}"; fi
+          if ! printf '%s' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version '$V' must be a clean a.b.c (no prerelease) for a trusted release"; exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release agent exe
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
+          go build -ldflags "-s -w -X platform-agent/internal/config.BuildVersion=$v" -o out\endpoint-agent.exe .\cmd\endpoint-agent
+
+      - name: WiX v4 toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.0.5
+          wix extension add -g WixToolset.Util.wixext/4.0.5
+
+      - name: Azure OIDC login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Azure Trusted Signing dlib (pinned)
+        id: dlib
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "tsclient"
+          nuget install Microsoft.Trusted.Signing.Client -Version $env:DLIB_PKG_VERSION -OutputDirectory $dir -ExcludeVersion
+          $dll = Join-Path $dir "Microsoft.Trusted.Signing.Client\bin\x64\Azure.CodeSigning.Dlib.dll"
+          if (-not (Test-Path $dll)) { throw "Trusted Signing dlib not found at $dll" }
+          "dll=$dll" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build + trusted-sign MSI
+        shell: pwsh
+        env:
+          TRUSTED_SIGNING_ENDPOINT: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          TRUSTED_SIGNING_CERT_PROFILE: ${{ vars.TRUSTED_SIGNING_CERT_PROFILE }}
+          TRUSTED_SIGNING_TIMESTAMP_URL: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_URL }}
+          TRUSTED_SIGNING_DLIB: ${{ steps.dlib.outputs.dll }}
+        run: |
+          .\installers\windows\msi\build-msi.ps1 `
+            -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
+            -Version "${{ steps.ver.outputs.version }}" `
+            -SigningMode trusted `
+            -OutputDir (Join-Path (Get-Location) "msi-out")
+
+      - name: Assert manifest production=true
+        shell: pwsh
+        run: |
+          $m = Get-Content msi-out\msi-build-manifest.json -Raw | ConvertFrom-Json
+          if (-not $m.production) { throw "manifest production!=true after trusted sign" }
+          if ($m.signing_tier -ne 'trusted-azure') { throw "manifest signing_tier=$($m.signing_tier)" }
+          if (-not $m.timestamped) { throw "manifest timestamped!=true" }
+          Write-Host "OK trusted manifest: tier=$($m.signing_tier) production=$($m.production) ts=$($m.timestamp_url)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-agent-msi-signed
+          path: |
+            msi-out/*.msi
+            msi-out/msi-build-manifest.json
+          if-no-files-found: error

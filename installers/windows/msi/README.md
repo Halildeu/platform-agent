@@ -79,6 +79,21 @@ wix extension add -g WixToolset.Util.wixext
 # -> out\EndpointAgent-0.1.1-lab.msi + out\msi-build-manifest.json (production=false)
 ```
 
+`-SigningMode` selects the tier: `lab` (default, self-signed, `production=false`), `trusted` (Azure Trusted Signing, `production=true` — see below), or `none` (unsigned).
+
+## Trusted signing activation (Faz 22.2 / AG-018)
+
+The `.github/workflows/release-msi.yml` workflow is a **ready-but-inert skeleton**: it stays skipped (with a visible `::notice::`) until the operator completes the Azure infra, and `build-msi.ps1 -SigningMode trusted` is **fail-closed** (throws if `TRUSTED_SIGNING_*` is unset — never ships unsigned-as-production). No PFX / long-lived secret — only OIDC + non-secret vars.
+
+**Operator activation** (maps to [`docs/22-2-trusted-signing-onboarding.md`](../../../../platform-k8s-gitops/docs/22-2-trusted-signing-onboarding.md) 7-item checklist):
+
+1. **Repo variables** (non-secret): `TRUSTED_SIGNING_ENDPOINT` (e.g. `https://eus.codesigning.azure.net/`), `TRUSTED_SIGNING_ACCOUNT`, `TRUSTED_SIGNING_CERT_PROFILE`, `TRUSTED_SIGNING_TIMESTAMP_URL` (Azure default TSA is free).
+2. **Repo secrets** (OIDC App Registration — NOT a PFX): `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_SUBSCRIPTION_ID`.
+3. **GitHub environment** `trusted-signing-prod` with **required reviewers** + a **protected-tag ruleset** (`v*.*.*`).
+4. **Azure federated credential** subject = `repo:Halildeu/platform-agent:environment:trusted-signing-prod` + RBAC role **`Trusted Signing Certificate Profile Signer`** for the App Registration.
+
+Then a clean `v0.2.0` tag (no `-lab`/`-rc` suffix, on `main`) → `release-msi.yml` runs `azure/login@v2` (OIDC) → installs the pinned Trusted Signing dlib → `build-msi.ps1 -SigningMode trusted` signs the MSI + the 5 staged files, **verifies each with `signtool verify /pa`** (production trust policy, no import) + asserts an RFC3161 timestamp → manifest `production=true` / `signing_tier=trusted-azure`. The lab `msi-build.yml` is untouched and a CI guard asserts the fail-closed behavior. Authenticode trusted-signing is the **operator promotion gate**; AppLocker/WDAC/EDR signer preflight + GPO domain pilot remain separate operator/domain gates.
+
 ## Install / GPO
 
 ```powershell

@@ -256,3 +256,24 @@ jobs:
           if (-not (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.4\payload\endpoint-agent.exe")) { throw "recovery did not install v0.1.4" }
           Write-Host "OK recovery: a valid re-run installed v0.1.4"
           Start-Process msiexec -ArgumentList @("/x","`"$msi4`"","/qn") -Wait | Out-Null
+
+      - name: Smoke — signing-mode guards (AG-018, no Azure needed)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # FAIL-CLOSED: trusted mode WITHOUT TRUSTED_SIGNING_* env MUST throw
+          # (never ship unsigned-as-production). Runs on the lab runner; no Azure.
+          $threw = $false
+          try {
+            .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
+              -Version "0.1.5" -SigningMode trusted -OutputDir (Join-Path (Get-Location) "msi-out-tc")
+          } catch { $threw = $true; Write-Host "expected fail-closed throw: $($_.Exception.Message)" }
+          if (-not $threw) { throw "FAIL-CLOSED FAIL: trusted mode without TRUSTED_SIGNING_* did not throw" }
+          # none mode: build unsigned, manifest production=false + signing_tier=unsigned
+          .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
+            -Version "0.1.6" -SigningMode none -OutputDir (Join-Path (Get-Location) "msi-out-none")
+          $m = Get-Content msi-out-none\msi-build-manifest.json -Raw | ConvertFrom-Json
+          if ($m.production) { throw "none mode: production must be false" }
+          if ($m.signing_tier -ne 'unsigned') { throw "none mode: signing_tier=$($m.signing_tier) (expected unsigned)" }
+          if ($m.timestamped) { throw "none mode: timestamped must be false" }
+          Write-Host "OK AG-018 guards: trusted fail-closed + none unsigned/production=false"
