@@ -270,6 +270,7 @@ func (r *Runner) enroll(ctx context.Context) error {
 		OsType:             string(snapshot.OSFamily),
 		AgentVersion:       r.Config.AgentVersion,
 		MachineFingerprint: inventory.MachineFingerprint(),
+		ActiveUser:         snapshot.Identity.ActiveUser,
 	})
 	if err != nil {
 		return err
@@ -321,6 +322,7 @@ func (r *Runner) heartbeat(ctx context.Context) error {
 		OsType:       string(snapshot.OSFamily),
 		Architecture: snapshot.Architecture,
 		AgentVersion: snapshot.AgentVersion,
+		ActiveUser:   snapshot.Identity.ActiveUser,
 		State:        string(currentState),
 		Capabilities: r.Executor.Capabilities,
 		Timestamp:    time.Now(),

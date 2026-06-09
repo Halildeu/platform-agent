@@ -39,6 +39,7 @@ type Inventory struct {
 	Hostname        string           `json:"hostname,omitempty"`
 	OSVersion       string           `json:"osVersion,omitempty"`
 	OSBuild         string           `json:"osBuild,omitempty"`
+	ActiveUser      string           `json:"activeUser,omitempty"`
 	Domain          string           `json:"domain,omitempty"`
 	Workgroup       string           `json:"workgroup,omitempty"`
 	PartOfDomain    bool             `json:"partOfDomain"`
