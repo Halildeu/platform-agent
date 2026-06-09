@@ -85,23 +85,22 @@ jobs:
       # on main — runs UNCONDITIONALLY so a dispatch from a feature branch can't
       # use the self-hosted signing runner to sign an off-main ref.
       - name: Guard — build commit must be an ancestor of origin/main
-        shell: bash
+        shell: pwsh   # pwsh, not bash — a dedicated signing runner may lack Git Bash
         run: |
           git fetch origin main --quiet
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::ref ${GITHUB_REF_NAME} (${GITHUB_SHA}) is not on origin/main — refusing to sign an off-main ref"
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::ref $($env:GITHUB_REF_NAME) ($($env:GITHUB_SHA)) is not on origin/main — refusing to sign an off-main ref"
             exit 1
-          fi
+          }
 
       - name: Resolve version
         id: ver
-        shell: bash
+        shell: pwsh
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then V="${{ github.event.inputs.version }}"; else V="${GITHUB_REF_NAME#v}"; fi
-          if ! printf '%s' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::version '$V' must be a clean a.b.c (no prerelease) for a trusted release"; exit 1
-          fi
-          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { $v = "${{ github.event.inputs.version }}" } else { $v = ($env:GITHUB_REF_NAME -replace '^v','') }
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { Write-Host "::error::version '$v' must be a clean a.b.c (no prerelease) for a trusted release"; exit 1 }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - uses: actions/setup-go@v5
         with:

@@ -166,7 +166,9 @@ jobs:
     timeout-minutes: 10
 
     # 22.1.0 mandatory: imza pipeline mechanics + signtool verify çalışıyor
-    # 22.2'de Azure Trusted Signing'e geçilir (CA-issued cert + GitHub OIDC)
+    # 22.2'de AD CS internal CA-issued cert ile imzalanır (self-hosted signing
+    # runner; Azure Trusted Signing EXCLUDED — owner: no paid services). MSI
+    # trusted path: release-msi-adcs.yml.
     steps:
       - name: Checkout (for context)
         uses: actions/checkout@v6
@@ -359,7 +361,7 @@ jobs:
           $lines += "## Lab-only-evidence invariant"
           $lines += ""
           $lines += "WARNING: This signature is lab-only-evidence."
-          $lines += "Faz 22.2 IT-owned pilot requires Authenticode trusted signing (Azure Trusted Signing)."
+          $lines += "Faz 22.2 IT-owned pilot requires Authenticode trusted signing (AD CS internal cert; Azure Trusted Signing EXCLUDED by owner decision = no paid services). MSI trusted path: release-msi-adcs.yml."
           $lines += ""
           $lines += "Reference: ADR-0012-EA platform-k8s-gitops docs/adr/0012-EA-endpoint-admin-governance-charter.md 22.1 invariantları"
 

@@ -30,7 +30,8 @@
   Trusted (AD CS) mode env (set by the self-hosted release-msi-adcs workflow; NO
   PFX/secret — the cert lives in the runner's machine store):
     ADCS_SIGNING_CERT_THUMBPRINT   preferred — exact signer (signtool /sha1)
-    ADCS_SIGNING_CERT_SUBJECT      fallback CN (only with a UNIQUE matching cert)
+    ADCS_SIGNING_CERT_SUBJECT      fallback CN (UNIQUE match only; the release-msi-adcs
+                                   workflow uses thumbprint — subject is for local/manual debug)
     ADCS_THUMBPRINT_ALLOWLIST      CSV of allowed signer thumbprints (required)
     ADCS_TIMESTAMP_URL             RFC3161 TSA (required; free public option:
                                    http://timestamp.digicert.com)
@@ -96,8 +97,11 @@ function Resolve-AdcsSigningCert {
     if (-not $c.HasPrivateKey)                       { throw "ADCS: signer cert has no private key ($($c.Thumbprint))" }
     if ($c.NotAfter -lt (Get-Date))                  { throw "ADCS: signer cert expired $($c.NotAfter) ($($c.Thumbprint))" }
     if ($c.NotBefore -gt (Get-Date))                 { throw "ADCS: signer cert not yet valid $($c.NotBefore)" }
-    $ekus = @($c.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | ForEach-Object { $_.EnhancedKeyUsages.Value })
-    if ($ekus -and ($ekus -notcontains $CODE_SIGNING_EKU)) { throw "ADCS: signer cert EKU lacks Code Signing ($CODE_SIGNING_EKU); has: $($ekus -join ',')" }
+    # Code Signing EKU REQUIRED — an EKU-less ("any purpose") cert must NOT pass.
+    $ekuExt = $c.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
+    if (-not $ekuExt) { throw "ADCS: signer cert has no EKU extension; Code Signing EKU ($CODE_SIGNING_EKU) is required" }
+    $ekuOids = @($ekuExt.EnhancedKeyUsages | ForEach-Object { $_.Value })
+    if ($ekuOids -notcontains $CODE_SIGNING_EKU) { throw "ADCS: signer cert EKU lacks Code Signing ($CODE_SIGNING_EKU); has: $($ekuOids -join ',')" }
     if ($Allowlist -and ($Allowlist -notcontains $c.Thumbprint.ToUpperInvariant())) {
         throw "ADCS: signer thumbprint $($c.Thumbprint) NOT in ADCS_THUMBPRINT_ALLOWLIST"
     }

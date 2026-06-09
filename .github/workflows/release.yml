@@ -3,15 +3,19 @@
 # Tag-driven release pipeline that produces a one-line-install GitHub
 # Release for the Windows endpoint agent. Faz 22.1 stays on lab-only
 # ephemeral signing (per ADR-0012-EA §22.1 Lab); the trusted-signing tier
-# is gated to `v*.*.*` (no `-lab.N` suffix) and stays parked until Faz
-# 22.2 Azure Trusted Signing is wired up.
+# is gated to `v*.*.*` (no `-lab.N` suffix) and stays parked until Faz 22.2
+# AD CS internal signing is wired here (Azure Trusted Signing EXCLUDED —
+# owner: no paid services). NOTE: the MSI trusted path already exists at
+# `.github/workflows/release-msi-adcs.yml` (self-hosted AD CS runner); this
+# EXE-release trusted tier is NOT wired here yet.
 #
 # Tag conventions:
 #   v0.1.0-lab.1   — Faz 22.1 lab-only-evidence (this PR's target)
-#   v0.1.0         — Faz 22.2 trusted-signing release (parked)
+#   v0.1.0         — Faz 22.2 trusted-signing release (parked; AD CS)
 #
 # What this workflow does NOT do (yet):
-#   - Authenticode trusted signing — Faz 22.2 via Azure Trusted Signing
+#   - Authenticode trusted signing — Faz 22.2 via AD CS internal cert (EXE; the
+#     MSI is already covered by release-msi-adcs.yml). Azure = paid, excluded.
 #   - MSI packaging — out of scope for the one-line PowerShell install
 #   - cosign manifest signing — covered by gate-sbom.yml at PR time
 #
@@ -42,10 +46,10 @@ on:
 permissions:
   # Codex 019e8284 iter-2 medium #3: principle-of-least-privilege per
   # job. Workflow default is read-only; only the `publish` job below
-  # opts in to `contents: write` (needed for `gh release create`). The
-  # `id-token: write` line that 22.2 Azure Trusted Signing will need is
-  # NOT granted yet — it's added by the 22.2 PR alongside the OIDC
-  # signing job, not held idle here.
+  # opts in to `contents: write` (needed for `gh release create`). The AD CS
+  # internal-signing path (Faz 22.2; Azure EXCLUDED, owner: no paid) needs NO
+  # `id-token`/OIDC — it signs on a self-hosted runner (cert in the machine
+  # store), already wired for the MSI in release-msi-adcs.yml.
   contents: read
 
 env:
@@ -90,9 +94,10 @@ jobs:
             PRE="false"
           fi
           if [ "$TIER" = "trusted" ]; then
-            # Faz 22.1 boundary guard — do NOT publish a "trusted"
-            # release until Azure Trusted Signing OIDC is wired up
-            # (separate PR, Faz 22.2). The lab branch can still ship.
+            # Faz 22.1 boundary guard — do NOT publish a "trusted" EXE
+            # release until AD CS internal signing is wired here (Faz 22.2;
+            # Azure EXCLUDED — owner: no paid). The MSI trusted path already
+            # exists in release-msi-adcs.yml. The lab branch can still ship.
             echo "::error::trusted-signing tier is parked until Faz 22.2 — use a -lab.N tag for now"
             exit 1
           fi
