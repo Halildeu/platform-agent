@@ -74,14 +74,16 @@ jobs:
         with:
           fetch-depth: 0                 # need history for the ancestor-of-main check
 
-      # Confused-deputy guard: a tag build must point at a commit on main.
-      - name: Guard — tag commit must be an ancestor of origin/main
-        if: github.event_name == 'push'
+      # Confused-deputy guard: the build ref (tag push OR manual dispatch) must
+      # point at a commit on main — runs for BOTH events so a workflow_dispatch
+      # from a feature branch can't acquire the environment OIDC token to sign an
+      # off-main ref.
+      - name: Guard — build commit must be an ancestor of origin/main
         shell: bash
         run: |
           git fetch origin main --quiet
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::tag $GITHUB_REF_NAME ($GITHUB_SHA) is not on origin/main — refusing to trusted-sign an off-main ref"
+            echo "::error::ref ${GITHUB_REF_NAME} (${GITHUB_SHA}) is not on origin/main — refusing to trusted-sign an off-main ref"
             exit 1
           fi
 

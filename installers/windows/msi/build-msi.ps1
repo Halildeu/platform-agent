@@ -111,8 +111,16 @@ function Invoke-TrustedSign {
     if ($LASTEXITCODE -ne 0) { throw "trusted sign failed (exit $LASTEXITCODE) for $File" }
     $out = (& $Cfg.Signtool verify /pa /v $File 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) { throw "signtool verify /pa FAILED for $File`n$out" }
-    if ($out -notmatch '(?i)timestamp') { throw "no RFC3161 timestamp in verify output for $File`n$out" }
-    Step ("trusted-signed + /pa-verified {0}" -f (Split-Path -Leaf $File))
+    # RFC3161 timestamp: fail on negative phrasing first, then REQUIRE positive
+    # evidence (the bare word "timestamp" also appears in "not timestamped").
+    if ($out -match '(?i)\b(not timestamped|no timestamp)\b') { throw "signature is NOT timestamped for $File`n$out" }
+    if ($out -notmatch '(?im)^\s*(The signature is timestamped:|Timestamp Verified by:)') {
+        throw "no positive RFC3161 timestamp evidence in /pa verify for $File`n$out"
+    }
+    # Defense-in-depth metadata assert (NOT the main gate — /pa above is).
+    $auth = Get-AuthenticodeSignature -FilePath $File
+    if (-not $auth.TimeStamperCertificate) { throw "no timestamper certificate on $File" }
+    Step ("trusted-signed + /pa-verified + timestamped {0}" -f (Split-Path -Leaf $File))
 }
 
 # ---- stage payload ----
