@@ -125,31 +125,37 @@
          install/uninstall SetProperty actions are mutually exclusive by
          condition, so they never both feed WixQuietExec64CmdLine in one session. -->
 
-    <!-- INSTALL / UPGRADE: fires on fresh install AND major-upgrade install-new
-         (NOT on the REMOVE pass). -->
+    <!-- INSTALL / UPGRADE (64-bit CA): fires on fresh install AND major-upgrade
+         install-new (NOT on the REMOVE pass). Uses WixQuietExec64 + its dedicated
+         WixQuietExec64CmdLine property. [System64Folder] => the real System32
+         (no WOW64 redirect inside a 64-bit CA host), 64-bit powershell. -->
     <SetProperty Id="WixQuietExec64CmdLine"
-                 Before="EaRunInstall"
+                 Before="WixQuietExec64"
                  Sequence="execute"
                  Condition="NOT REMOVE"
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode install -PayloadDir &quot;[STAGEDIR]&quot; -ConfigData &quot;API_URL=[API_URL];LOG_DIR=[LOG_DIR];INSTALL_ID=[INSTALL_ID];MAINTENANCE_TOKEN_HASH=[MAINTENANCE_TOKEN_HASH];SERVICE_NAME=[SERVICE_NAME];AUTO_ENROLL=[AUTO_ENROLL];AUTO_ENROLL_API_URL=[AUTO_ENROLL_API_URL];AUTO_ENROLL_CERT_SUBJECT_SUFFIX=[AUTO_ENROLL_CERT_SUBJECT_SUFFIX];AUTO_ENROLL_CERT_SAN_URI_PREFIX=[AUTO_ENROLL_CERT_SAN_URI_PREFIX];AUTO_ENROLL_JITTER_SECONDS=[AUTO_ENROLL_JITTER_SECONDS]&quot; -ResponseFile &quot;[ENROLL_RESPONSE_FILE]&quot;" />
-    <CustomAction Id="EaRunInstall"
+    <CustomAction Id="WixQuietExec64"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
                   Impersonate="no"
                   Return="check" />
 
-    <!-- UNINSTALL: full removal of THIS product only (never on major-upgrade's
-         RemoveExistingProducts of the old code, which runs the OLD package's
-         sequence). Default preserves credential/config; PURGE_CONFIG=1 purges. -->
-    <SetProperty Id="WixQuietExec64CmdLine"
-                 Before="EaRunUninstall"
+    <!-- UNINSTALL (separate CA Id => no property/symbol collision with install):
+         full removal of THIS product only (never on major-upgrade's
+         RemoveExistingProducts of the OLD code). Default preserves
+         credential/config; PURGE_CONFIG=1 purges. Uses WixQuietExec + its own
+         WixQuietExecCmdLine property; [WindowsFolder]Sysnative\... gives the
+         64-bit powershell even though the X86 util CA host is 32-bit (Codex
+         cond.3 — avoid System32->SysWOW64 redirection). -->
+    <SetProperty Id="WixQuietExecCmdLine"
+                 Before="WixQuietExec"
                  Sequence="execute"
                  Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"
-                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode uninstall -PayloadDir &quot;[STAGEDIR]&quot; -ConfigData &quot;SERVICE_NAME=[SERVICE_NAME];PURGE_CONFIG=[PURGE_CONFIG]&quot;" />
-    <CustomAction Id="EaRunUninstall"
-                  BinaryRef="Wix4UtilCA_X64"
-                  DllEntry="WixQuietExec64"
+                 Value="&quot;[WindowsFolder]Sysnative\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode uninstall -PayloadDir &quot;[STAGEDIR]&quot; -ConfigData &quot;SERVICE_NAME=[SERVICE_NAME];PURGE_CONFIG=[PURGE_CONFIG]&quot;" />
+    <CustomAction Id="WixQuietExec"
+                  BinaryRef="Wix4UtilCA_X86"
+                  DllEntry="WixQuietExec"
                   Execute="deferred"
                   Impersonate="no"
                   Return="check" />
@@ -158,12 +164,12 @@
          the file content, which never enters the MSI), so it needs no hiding. -->
 
     <InstallExecuteSequence>
-      <!-- Install/upgrade: after files are laid down (InstallFiles), before the
-           old product is removed (RemoveExistingProducts afterInstallExecute). -->
-      <Custom Action="EaRunInstall" After="InstallFiles" Condition="NOT REMOVE" />
+      <!-- Install/upgrade: after files are laid down (InstallFiles), before
+           RemoveExistingProducts (afterInstallExecute). -->
+      <Custom Action="WixQuietExec64" After="InstallFiles" Condition="NOT REMOVE" />
       <!-- Uninstall: before the staged payload files are removed, so
            run-agent-install.ps1 + uninstall.ps1 still exist on disk. -->
-      <Custom Action="EaRunUninstall" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="WixQuietExec" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
   </Package>
