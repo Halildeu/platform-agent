@@ -17,6 +17,14 @@ param(
     [string]$Description = "Endpoint management platform agent",
     [string]$ApiUrl = "",
     [string]$EnrollmentToken = "",
+    # #120: minimum plausible length for an HMAC enrollment token. Real signed
+    # tokens are ~600+ chars; this floor catches an impossibly-short truncated
+    # paste (the MKR-A1 live pilot captured a single char over AnyDesk) without
+    # false-rejecting a real token. NOTE: it does NOT catch a partial (e.g.
+    # 100-char) paste — it is a truncation floor, not a token validator.
+    # ValidateRange keeps an operator from weakening the guard below 32.
+    [ValidateRange(32, [int]::MaxValue)]
+    [int]$MinEnrollmentTokenLength = 32,
     [string]$AgentId = "",
     [string]$AgentSecret = "",
     [string]$InstallId = "",
@@ -582,6 +590,26 @@ function Backup-HmacCredentialStoreForFreshEnroll {
     return $backupPath
 }
 
+# #120: fail-loud on a truncated-paste enrollment token. A blank/absent token is
+# a no-op (the AgentId/AgentSecret HMAC variant + the -AutoEnroll path carry no
+# token). Throws BEFORE any service/config mutation so a 1-char paste never
+# silently installs a bad-token agent that then fails auth.
+function Assert-EnrollmentTokenLength {
+    param(
+        [string]$Token,
+        [int]$MinLength
+    )
+    if ([string]::IsNullOrWhiteSpace($Token)) {
+        return
+    }
+    $trimmed = $Token.Trim()
+    if ($trimmed.Length -lt $MinLength) {
+        throw ("-EnrollmentToken is only $($trimmed.Length) character(s); a valid signed enrollment token is " +
+            "far longer (likely a truncated paste). Refusing to install a bad-token agent. Re-run with the full " +
+            "token, e.g. -EnrollmentToken (Get-Clipboard).")
+    }
+}
+
 Assert-Administrator
 
 if ($AutoEnroll) {
@@ -601,6 +629,12 @@ if ($AutoEnroll) {
     if ($ResetCredentialStore) {
         throw "-ResetCredentialStore is only valid for the HMAC enrollment-token fallback path."
     }
+} else {
+    # #120: HMAC enrollment-token path. Fail-loud on a truncated-paste token
+    # BEFORE any service/config mutation (the MKR-A1 live pilot captured a single
+    # char over AnyDesk and silently installed a bad-token agent that then failed
+    # auth). No-op when no token is supplied (the AgentId/AgentSecret variant).
+    Assert-EnrollmentTokenLength -Token $EnrollmentToken -MinLength $MinEnrollmentTokenLength
 }
 
 # ----------------------------------------------------------------------
