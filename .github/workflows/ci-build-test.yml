@@ -72,8 +72,29 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist
+          # Stamp a COMMIT-DISTINCT, SemVer-safe version so the agent never reports
+          # the static "0.1.0-dev" sentinel from a CI build. The ldflags var MUST be
+          # the real package path platform-agent/internal/config.BuildVersion — the
+          # old `-X main.Version` targeted a NON-EXISTENT var and silently did
+          # nothing, so every CI build reported "0.1.0-dev" (indistinguishable).
+          #
+          # Format: 0.1.0-ci.<run>.g<sha7>.
+          #  - GITHUB_RUN_NUMBER (numeric, monotonic) gives chronological SemVer
+          #    ordering — a raw hash is NOT chronological.
+          #  - the `g` prefix keeps the SHA a SAFE ALPHANUMERIC SemVer identifier;
+          #    a bare all-numeric leading-zero SHA (e.g. 0123456) is rejected by
+          #    strict SemVer, and the agent's own self-update policy parses the
+          #    running version and would fail-closed (Codex 019eac32).
+          #
+          # This CI artifact is a TEST build, NOT a self-update release target, so
+          # it intentionally does NOT stamp the PE ProductVersion resource (which
+          # the self-update stager binds to targetVersion). Release-catalog
+          # artifacts get both the ldflags + PE stamp via release.yml +
+          # scripts/build/windows-versioninfo.sh. The ldflags value below is what
+          # the agent reports on the wire / `--version` / the UI "Ajan Sürümü".
+          VERSION="0.1.0-ci.${GITHUB_RUN_NUMBER}.g${GITHUB_SHA::7}"
           go build -trimpath \
-            -ldflags "-s -w -X main.Version=${GITHUB_SHA::7} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -ldflags "-s -w -X platform-agent/internal/config.BuildVersion=${VERSION}" \
             -o dist/endpoint-agent.exe \
             ./cmd/endpoint-agent
           ls -la dist/
