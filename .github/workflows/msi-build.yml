@@ -261,14 +261,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # FAIL-CLOSED: trusted mode WITHOUT TRUSTED_SIGNING_* env MUST throw
-          # (never ship unsigned-as-production). Runs on the lab runner; no Azure.
+          # FAIL-CLOSED: trusted (AD CS) mode WITHOUT ADCS_* env MUST throw
+          # (never ship unsigned-as-production). Runs on the lab runner; no AD CS.
           $threw = $false
           try {
             .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
               -Version "0.1.5" -SigningMode trusted -OutputDir (Join-Path (Get-Location) "msi-out-tc")
           } catch { $threw = $true; Write-Host "expected fail-closed throw: $($_.Exception.Message)" }
-          if (-not $threw) { throw "FAIL-CLOSED FAIL: trusted mode without TRUSTED_SIGNING_* did not throw" }
+          if (-not $threw) { throw "FAIL-CLOSED FAIL: trusted (AD CS) mode without ADCS_* did not throw" }
           # none mode: build unsigned, manifest production=false + signing_tier=unsigned
           .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
             -Version "0.1.6" -SigningMode none -OutputDir (Join-Path (Get-Location) "msi-out-none")
