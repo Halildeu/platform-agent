@@ -19,7 +19,7 @@ for source in (bootstrap_source, install_source, uninstall_source):
     except UnicodeDecodeError as exc:
         failures.append(f"{source}: not valid UTF-8 ({exc})")
 
-for source in (bootstrap_source, install_source):
+for source in (bootstrap_source, install_source, uninstall_source):
     source_text = source.read_text(encoding="utf-8")
     non_ascii = sorted({f"U+{ord(char):04X}" for char in source_text if ord(char) > 127})
     if non_ascii:
