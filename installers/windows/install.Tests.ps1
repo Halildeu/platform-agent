@@ -131,8 +131,10 @@ Describe "Assert-EnrollmentTokenLength (#120 truncated-paste guard)" {
     }
 
     It "throws on a token just below the floor and reports the actual length" {
+        # Pester 3/4 `Should Throw` does a literal substring (.Contains) match, not a
+        # wildcard — so no leading/trailing '*'.
         { Assert-EnrollmentTokenLength -Token ("a" * 31) -MinLength 32 } |
-            Should Throw "*31 character(s)*"
+            Should Throw "31 character"
     }
 
     It "accepts a real-length (~600 char) token" {
