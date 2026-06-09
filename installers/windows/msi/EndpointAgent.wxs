@@ -138,7 +138,7 @@
                  Before="EaRunInstall"
                  Sequence="execute"
                  Condition="NOT REMOVE"
-                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode install -PayloadDir &quot;[STAGEDIR]&quot; -ConfigData &quot;API_URL=[API_URL];LOG_DIR=[LOG_DIR];INSTALL_ID=[INSTALL_ID];MAINTENANCE_TOKEN_HASH=[MAINTENANCE_TOKEN_HASH];SERVICE_NAME=[SERVICE_NAME];AUTO_ENROLL=[AUTO_ENROLL];AUTO_ENROLL_API_URL=[AUTO_ENROLL_API_URL];AUTO_ENROLL_CERT_SUBJECT_SUFFIX=[AUTO_ENROLL_CERT_SUBJECT_SUFFIX];AUTO_ENROLL_CERT_SAN_URI_PREFIX=[AUTO_ENROLL_CERT_SAN_URI_PREFIX];AUTO_ENROLL_JITTER_SECONDS=[AUTO_ENROLL_JITTER_SECONDS]&quot; -ResponseFile &quot;[ENROLL_RESPONSE_FILE]&quot;" />
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode install -ConfigData &quot;API_URL=[API_URL];LOG_DIR=[LOG_DIR];INSTALL_ID=[INSTALL_ID];MAINTENANCE_TOKEN_HASH=[MAINTENANCE_TOKEN_HASH];SERVICE_NAME=[SERVICE_NAME];AUTO_ENROLL=[AUTO_ENROLL];AUTO_ENROLL_API_URL=[AUTO_ENROLL_API_URL];AUTO_ENROLL_CERT_SUBJECT_SUFFIX=[AUTO_ENROLL_CERT_SUBJECT_SUFFIX];AUTO_ENROLL_CERT_SAN_URI_PREFIX=[AUTO_ENROLL_CERT_SAN_URI_PREFIX];AUTO_ENROLL_JITTER_SECONDS=[AUTO_ENROLL_JITTER_SECONDS]&quot; -ResponseFile &quot;[ENROLL_RESPONSE_FILE]&quot;" />
     <CustomAction Id="EaRunInstall"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
@@ -153,7 +153,7 @@
                  Before="EaRunUninstall"
                  Sequence="execute"
                  Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"
-                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode uninstall -PayloadDir &quot;[STAGEDIR]&quot; -ConfigData &quot;SERVICE_NAME=[SERVICE_NAME];PURGE_CONFIG=[PURGE_CONFIG]&quot;" />
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode uninstall -ConfigData &quot;SERVICE_NAME=[SERVICE_NAME];PURGE_CONFIG=[PURGE_CONFIG]&quot;" />
     <CustomAction Id="EaRunUninstall"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
