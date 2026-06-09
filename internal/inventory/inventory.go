@@ -742,6 +742,14 @@ func RuntimeCapabilitiesWithOptions(opts RuntimeCapabilityOptions) []protocol.Co
 			// 019e8de2 iter-1 absorb: advertise only what is actually
 			// dispatchable on this build (no forward-matrix).
 			protocol.CommandUninstallSoftware,
+			// #508 (Faz 22.5): managed screensaver + wallpaper Group-Policy.
+			// Advertised ONLY on Windows — the loaded-user-hive registry
+			// writer (internal/displaypolicy) exists only on Windows; the
+			// non-Windows executor returns FAILED_UNSUPPORTED_PLATFORM. The
+			// backend approve gate reads heartbeat payload.capabilities and
+			// rejects SET_DISPLAY_POLICY with 422 if missing, so the
+			// propose→approve→enforce path is gated on this advertisement.
+			protocol.CommandSetDisplayPolicy,
 		)
 		if opts.EnableUpdateAgent {
 			// AG-029 PR2: UPDATE_AGENT is opt-in because the command is

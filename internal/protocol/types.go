@@ -56,6 +56,11 @@ const (
 	// stages a verified binary and returns a bounded StageResult. It does
 	// not stop/replace the running service in this PR2 command wire.
 	CommandUpdateAgent CommandType = "UPDATE_AGENT"
+	// #508 (Faz 22.5): managed screensaver + desktop wallpaper Group-Policy.
+	// Always maker-checker on the backend; advertised as a capability only on
+	// Windows (RuntimeCapabilitiesWithOptions). The agent applies the policy to
+	// every loaded interactive user hive (internal/displaypolicy).
+	CommandSetDisplayPolicy CommandType = "SET_DISPLAY_POLICY"
 )
 
 type CommandStatus string
@@ -66,6 +71,7 @@ const (
 	CommandStatusRunning     CommandStatus = "RUNNING"
 	CommandStatusSucceeded   CommandStatus = "SUCCEEDED"
 	CommandStatusFailed      CommandStatus = "FAILED"
+	CommandStatusPartial     CommandStatus = "PARTIAL"
 	CommandStatusUnsupported CommandStatus = "UNSUPPORTED"
 	CommandStatusExpired     CommandStatus = "EXPIRED"
 )
@@ -182,6 +188,8 @@ func (r CommandResult) ToWire() CommandResultWire {
 	switch r.Status {
 	case CommandStatusSucceeded:
 		wire.Status = "SUCCEEDED"
+	case CommandStatusPartial:
+		wire.Status = "PARTIAL"
 	case CommandStatusUnsupported:
 		wire.Status = "UNSUPPORTED"
 	case CommandStatusExpired:
