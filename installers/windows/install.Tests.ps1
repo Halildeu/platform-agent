@@ -122,6 +122,39 @@ Import-InstallHelper -Name "Clear-AgentAutoEnrollRegistry"
 Import-InstallHelper -Name "Get-HmacCredentialStorePath"
 Import-InstallHelper -Name "Assert-HmacEnrollmentTokenStorePolicy"
 Import-InstallHelper -Name "Backup-HmacCredentialStoreForFreshEnroll"
+Import-InstallHelper -Name "Assert-EnrollmentTokenLength"
+
+Describe "Assert-EnrollmentTokenLength (#120 truncated-paste guard)" {
+    It "throws on a 1-char token (the MKR-A1 live-pilot truncated paste)" {
+        { Assert-EnrollmentTokenLength -Token "v" -MinLength 32 } |
+            Should Throw
+    }
+
+    It "throws on a token just below the floor and reports the actual length" {
+        { Assert-EnrollmentTokenLength -Token ("a" * 31) -MinLength 32 } |
+            Should Throw "*31 character(s)*"
+    }
+
+    It "accepts a real-length (~600 char) token" {
+        { Assert-EnrollmentTokenLength -Token ("x" * 600) -MinLength 32 } |
+            Should Not Throw
+    }
+
+    It "accepts a token exactly at the floor" {
+        { Assert-EnrollmentTokenLength -Token ("a" * 32) -MinLength 32 } |
+            Should Not Throw
+    }
+
+    It "is a no-op for a blank/absent token (AgentId/AgentSecret or auto-enroll path)" {
+        { Assert-EnrollmentTokenLength -Token "" -MinLength 32 } | Should Not Throw
+        { Assert-EnrollmentTokenLength -Token "   " -MinLength 32 } | Should Not Throw
+    }
+
+    It "trims surrounding whitespace before measuring" {
+        { Assert-EnrollmentTokenLength -Token ("  " + ("a" * 31) + "  ") -MinLength 32 } |
+            Should Throw
+    }
+}
 
 Describe "Add-ServiceEnvironmentBaseVariables" {
     It "adds the minimal non-secret OS environment needed by service child processes" {
