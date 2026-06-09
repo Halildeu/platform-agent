@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"platform-agent/internal/displaypolicy"
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
 	"platform-agent/internal/selfupdate"
@@ -28,6 +29,12 @@ var installWinGetFn = winget.InstallWinGet
 // Tests override to exercise the executor path without spawning a real
 // winget invocation.
 var uninstallWinGetFn = winget.UninstallWinGet
+
+// applyDisplayPolicyFn is the #508 SET_DISPLAY_POLICY executor seam. Production
+// wires displaypolicy.Apply (Windows loaded-user-hive registry writer /
+// non-Windows fail-loud stub via the build-tagged apply_*.go). Tests override
+// the seam to exercise the executor path without touching the registry.
+var applyDisplayPolicyFn = displaypolicy.Apply
 
 // updateAgentStageFn is the AG-029 executor seam. Production passes a
 // selfupdate.Stager configured from local trust policy; tests override this
@@ -375,6 +382,27 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 		result.Status = mapUpdateStageStatusToCommandStatus(stageResult.StageStatus)
 		result.Summary = fmt.Sprintf("UPDATE_AGENT %s", stageResult.StageStatus)
 		result.Details = map[string]interface{}{"update": stageResult}
+	case protocol.CommandSetDisplayPolicy:
+		// #508 (Faz 22.5) — managed screensaver + wallpaper Group-Policy.
+		// Payload JSON round-trip (fail-closed), then OS-agnostic Validate
+		// BEFORE any registry side effect, then the build-tagged applier.
+		// The structured displaypolicy.Result is shipped via Details so the
+		// backend audit pipeline stores the per-hive outcome verbatim.
+		dpCmd, payloadErr := unmarshalDisplayPolicy(command.Payload)
+		if payloadErr != nil {
+			result.Status = protocol.CommandStatusFailed
+			result.Summary = payloadErr.Error()
+			break
+		}
+		if vErr := displaypolicy.Validate(dpCmd); vErr != nil {
+			result.Status = protocol.CommandStatusFailed
+			result.Summary = vErr.Error()
+			break
+		}
+		dpResult := applyDisplayPolicyFn(ctx, dpCmd)
+		result.Status = mapDisplayPolicyStatusToCommandStatus(dpResult.FinalStatus)
+		result.Summary = dpResult.Summary
+		result.Details = map[string]interface{}{"displayPolicy": dpResult}
 	default:
 		result.Status = protocol.CommandStatusUnsupported
 		result.Summary = "Command is not implemented by this agent build"
@@ -388,6 +416,41 @@ func (e *LocalExecutor) now() time.Time {
 		return time.Now()
 	}
 	return e.Now()
+}
+
+// unmarshalDisplayPolicy converts the wire-side payload map into a
+// displaypolicy.Command via a JSON round-trip, fail-closed on a malformed shape
+// (a precise FAILED rather than a panic on a missing-field assertion).
+func unmarshalDisplayPolicy(payload map[string]interface{}) (displaypolicy.Command, error) {
+	if payload == nil {
+		return displaypolicy.Command{}, errors.New("SET_DISPLAY_POLICY payload is empty")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return displaypolicy.Command{}, fmt.Errorf("SET_DISPLAY_POLICY payload re-marshal failed: %w", err)
+	}
+	var cmd displaypolicy.Command
+	if err := json.Unmarshal(raw, &cmd); err != nil {
+		return displaypolicy.Command{}, fmt.Errorf("SET_DISPLAY_POLICY payload decode failed: %w", err)
+	}
+	return cmd, nil
+}
+
+// mapDisplayPolicyStatusToCommandStatus maps the structured displaypolicy
+// FinalStatus onto the executor CommandStatus. PARTIAL maps to PARTIAL (the
+// backend CommandResultStatus enum carries it); the unsupported-platform stub
+// maps to UNSUPPORTED; every other FAILED_* maps to FAILED.
+func mapDisplayPolicyStatusToCommandStatus(s displaypolicy.FinalStatus) protocol.CommandStatus {
+	switch s {
+	case displaypolicy.StatusSucceeded:
+		return protocol.CommandStatusSucceeded
+	case displaypolicy.StatusPartial:
+		return protocol.CommandStatusPartial
+	case displaypolicy.StatusFailedUnsupportedOS:
+		return protocol.CommandStatusUnsupported
+	default:
+		return protocol.CommandStatusFailed
+	}
 }
 
 // unmarshalInstallRequest converts the wire-side payload map into a
