@@ -1,0 +1,2 @@
+# CI stages the served release assets here ephemerally (release.yml publish job).
+build-assets/

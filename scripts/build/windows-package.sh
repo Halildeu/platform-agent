@@ -9,7 +9,18 @@ rm -rf "$package_dir"
 rm -f "$zip_path"
 mkdir -p "$package_dir"
 
-./scripts/build/windows.sh >/dev/null
+# PREBUILT_EXE lets CI (release.yml publish job) package the *signed* binary
+# produced by the windows build+sign job instead of cross-compiling a fresh
+# unsigned dev binary here. Local dev with no PREBUILT_EXE keeps the old
+# behaviour: build via scripts/build/windows.sh. Either way the resulting
+# endpoint-agent.exe is the one whose hash lands in the package SHA256SUMS.
+if [ -n "${PREBUILT_EXE:-}" ]; then
+  test -f "$PREBUILT_EXE" || { echo "windows-package.sh: PREBUILT_EXE not found: $PREBUILT_EXE" >&2; exit 1; }
+  exe_src="$PREBUILT_EXE"
+else
+  ./scripts/build/windows.sh >/dev/null
+  exe_src="bin/endpoint-agent.exe"
+fi
 
 copy_ps1_with_bom() {
   local source_path="$1"
@@ -25,7 +36,7 @@ target.write_text(content, encoding="utf-8-sig", newline="")
 PY
 }
 
-cp bin/endpoint-agent.exe "$package_dir/endpoint-agent.exe"
+cp "$exe_src" "$package_dir/endpoint-agent.exe"
 copy_ps1_with_bom installers/windows/bootstrap-package.ps1 "$package_dir/bootstrap-package.ps1"
 copy_ps1_with_bom installers/windows/install.ps1 "$package_dir/install.ps1"
 copy_ps1_with_bom installers/windows/uninstall.ps1 "$package_dir/uninstall.ps1"
