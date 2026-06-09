@@ -65,6 +65,16 @@ jobs:
           version: v1.62
         continue-on-error: true
 
+      # Enforce the Windows installer encoding gate so a non-ASCII char (e.g. an
+      # em-dash) never reaches the SHIPPED install.ps1 / bootstrap-package.ps1 /
+      # uninstall.ps1. Windows PowerShell 5.1 reads a BOM-less file as the system
+      # ANSI codepage, which corrupts non-ASCII bytes and breaks parsing on the
+      # target machine (a real device install failed this way 2026-06-09 on an old
+      # release whose install.ps1 carried an em-dash). The guard script already
+      # existed but was never wired into CI, so the regression could ship.
+      - name: Installer encoding gate (no non-ASCII in shipped .ps1)
+        run: bash scripts/test/windows-installer-encoding.sh
+
       - name: Cross-compile Windows amd64
         env:
           GOOS: windows

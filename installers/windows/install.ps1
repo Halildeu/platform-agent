@@ -21,7 +21,7 @@ param(
     # tokens are ~600+ chars; this floor catches an impossibly-short truncated
     # paste (the MKR-A1 live pilot captured a single char over AnyDesk) without
     # false-rejecting a real token. NOTE: it does NOT catch a partial (e.g.
-    # 100-char) paste — it is a truncation floor, not a token validator.
+    # 100-char) paste -- it is a truncation floor, not a token validator.
     # ValidateRange keeps an operator from weakening the guard below 32.
     [ValidateRange(32, [int]::MaxValue)]
     [int]$MinEnrollmentTokenLength = 32,
