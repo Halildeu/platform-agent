@@ -113,7 +113,15 @@ jobs:
               "SERVICE_NAME=EndpointAgent"
           ) -Wait -PassThru
           Write-Host "msiexec exit=$($p.ExitCode)"
-          if ($p.ExitCode -ne 0) { if (Test-Path $log) { Get-Content $log -Tail 60 }; throw "install exit $($p.ExitCode)" }
+          if ($p.ExitCode -ne 0) {
+            Write-Host "----- msiexec verbose (CA/errors) -----"
+            if (Test-Path $log) { (Get-Content $log) | Select-String -Pattern 'WixQuietExec|return value 3|Action ended|powershell|Error|1603|1721|1722' | Select-Object -Last 50 | ForEach-Object { $_.Line } }
+            Write-Host "----- install-msi wrapper log -----"
+            Get-ChildItem C:\ProgramData\EndpointAgent\logs\install-msi-*.log -EA SilentlyContinue | ForEach-Object { Get-Content $_.FullName }
+            Write-Host "----- agent log tail -----"
+            Get-Content C:\ProgramData\EndpointAgent\logs\endpoint-agent.log -EA SilentlyContinue -Tail 20
+            throw "install exit $($p.ExitCode)"
+          }
           # service created
           $svc = Get-Service EndpointAgent -ErrorAction SilentlyContinue
           if (-not $svc) { throw "service EndpointAgent not created" }

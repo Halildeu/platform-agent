@@ -128,8 +128,11 @@ try {
         }
         if ($cfg.ContainsKey('SERVICE_NAME')) { $uArgs['ServiceName'] = $cfg['SERVICE_NAME'] }
         & $uninstallScript @uArgs
-        Write-MsiLog "uninstall.ps1 exit=$LASTEXITCODE"
-        if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { exit $LASTEXITCODE }
+        # uninstall.ps1 is a PowerShell script ($ErrorActionPreference=Stop): it
+        # signals failure by THROWING (caught below), NOT via $LASTEXITCODE —
+        # which carries the exit code of its last NATIVE call (e.g. sc.exe) and
+        # would mis-fail a clean uninstall.
+        Write-MsiLog "uninstall.ps1 completed (no exception)"
         exit 0
     }
 
@@ -192,9 +195,12 @@ try {
     Write-MsiLog ("install.ps1 params: " + (($splat.Keys | Sort-Object) -join ', '))
 
     & $installScript @splat
-    $code = $LASTEXITCODE
-    Write-MsiLog "install.ps1 exit=$code"
-    if ($null -ne $code -and $code -ne 0) { exit $code }
+    # install.ps1 is a PowerShell script ($ErrorActionPreference=Stop): it
+    # signals failure by THROWING (caught below), NOT via $LASTEXITCODE — which
+    # carries the exit code of its last NATIVE call (e.g. `endpoint-agent.exe
+    # service status` returns non-zero for a not-yet-enrolled service even on a
+    # clean install) and would mis-fail the MSI custom action (1603).
+    Write-MsiLog "install.ps1 completed (no exception)"
     exit 0
 }
 catch {
