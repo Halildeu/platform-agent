@@ -20,6 +20,7 @@ type computerSystemProbe struct {
 	Workgroup    string `json:"Workgroup"`
 	OSVersion    string `json:"OSVersion"`
 	OSBuild      string `json:"OSBuild"`
+	UserName     string `json:"UserName"`
 }
 
 func collect(now time.Time) Inventory {
@@ -36,6 +37,7 @@ func collect(now time.Time) Inventory {
 		inv.Workgroup = probe.Workgroup
 		inv.OSVersion = probe.OSVersion
 		inv.OSBuild = probe.OSBuild
+		inv.ActiveUser = probe.UserName
 	} else {
 		inv.ProbeErrors = append(inv.ProbeErrors, "Win32_ComputerSystem probe failed")
 	}
@@ -73,6 +75,7 @@ $os = Get-CimInstance Win32_OperatingSystem
   Workgroup = $cs.Workgroup
   OSVersion = $os.Version
   OSBuild = $os.BuildNumber
+  UserName = $cs.UserName
 } | ConvertTo-Json -Compress`
 	out, err := runCommand(5*time.Second, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
 	if err != nil {

@@ -94,6 +94,7 @@ type EnrollRequest struct {
 	AgentVersion       string `json:"agentVersion"`
 	MachineFingerprint string `json:"machineFingerprint"`
 	DomainName         string `json:"domainName,omitempty"`
+	ActiveUser         string `json:"activeUser,omitempty"`
 }
 
 // EnrollResponse is the backend ConsumeEnrollmentResponse. The device
@@ -112,6 +113,7 @@ type EnrollResponse struct {
 // carried in the body.
 type HeartbeatRequest struct {
 	InstallID    string        `json:"installId,omitempty"`
+	ActiveUser   string        `json:"activeUser,omitempty"`
 	Hostname     string        `json:"hostname"`
 	OsType       string        `json:"osType"`
 	Architecture string        `json:"architecture"`
