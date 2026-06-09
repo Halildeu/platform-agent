@@ -1,0 +1,155 @@
+# Faz 22.5 M4 / AG-018 — Trusted-signed MSI release (AD CS internal, FREE).
+#
+# Owner decision: NO paid services → Azure Trusted Signing EXCLUDED. The production
+# trust path is an AD CS internal code-signing cert (Windows Server Enterprise CA,
+# free) on a SELF-HOSTED Windows signing runner whose LocalMachine\My store holds
+# the cert + private key (PFX-in-GitHub FORBIDDEN). No Azure, no OIDC, no secrets.
+#
+# SKELETON: ready + activatable, INERT until the operator sets ADCS_SIGNING_ENABLED
+# and stands up the self-hosted signing runner. When unconfigured, `config-check`
+# emits a visible ::notice:: and `trusted-sign` is skipped; the lab `msi-build.yml`
+# is untouched and no false-"production" MSI is produced.
+#
+# Activation (operator — see docs/22-2-trusted-signing-onboarding.md AD CS section):
+#   Repo VARIABLES (non-secret — thumbprints/URLs are not secrets; the key is on the runner):
+#     ADCS_SIGNING_ENABLED=true
+#     ADCS_SIGNING_CERT_THUMBPRINT   (the EndpointAgent CodeSign cert thumbprint)
+#     ADCS_THUMBPRINT_ALLOWLIST      (CSV of allowed signer thumbprints)
+#     ADCS_TIMESTAMP_URL             (free public option: http://timestamp.digicert.com)
+#   A dedicated SELF-HOSTED runner labelled [self-hosted, windows, signing], AD-joined,
+#   Windows SDK signtool + WiX present, the AD CS code-signing cert in LocalMachine\My
+#   (non-exportable private key). GitHub environment `trusted-signing-prod` with
+#   required reviewers + protected `v*.*.*` tags.
+name: AG-018 Trusted MSI release (AD CS)
+
+on:
+  push:
+    tags: ["v*.*.*"]          # semver; the job guards reject any prerelease (-lab/-rc)
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build+AD-CS-sign (e.g. 0.2.0); must be a clean a.b.c"
+        required: true
+  # NO pull_request trigger — the self-hosted signing runner must never run on a PR.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trusted-msi-adcs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Always runs — makes "not configured" VISIBLE (no silent skip) and gates the rest.
+  # NOTE: a GitHub-hosted job cannot reliably know the self-hosted signing runner is
+  # online, so activation is an EXPLICIT operator var (ADCS_SIGNING_ENABLED) + the
+  # runner standing up (documented operator gate), not runner auto-discovery.
+  config-check:
+    name: AD CS signing config check
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.c.outputs.configured }}
+    steps:
+      - id: c
+        shell: bash
+        env:
+          ENABLED: ${{ vars.ADCS_SIGNING_ENABLED }}
+          TP: ${{ vars.ADCS_SIGNING_CERT_THUMBPRINT }}
+          ALLOW: ${{ vars.ADCS_THUMBPRINT_ALLOWLIST }}
+          TSA: ${{ vars.ADCS_TIMESTAMP_URL }}
+        run: |
+          if [ "$ENABLED" = "true" ] && [ -n "$TP" ] && [ -n "$ALLOW" ] && [ -n "$TSA" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::AD CS signing enabled — trusted-sign will run on the self-hosted signing runner."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AD CS signing NOT configured/enabled — set ADCS_SIGNING_ENABLED=true + ADCS_* vars and stand up the [self-hosted,windows,signing] runner (docs/22-2-trusted-signing-onboarding.md). Skipping; no MSI produced. Azure Trusted Signing (paid) is EXCLUDED by owner decision."
+          fi
+
+  trusted-sign:
+    name: Build + AD CS-sign MSI (self-hosted)
+    needs: config-check
+    if: >-
+      needs.config-check.outputs.configured == 'true' &&
+      github.repository == 'Halildeu/platform-agent' &&
+      ((github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-')) ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, windows, signing]
+    environment: trusted-signing-prod   # required-reviewers + protected-tags gate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                 # need history for the ancestor-of-main check
+
+      # Confused-deputy guard: the build ref (tag push OR manual dispatch) must be
+      # on main — runs UNCONDITIONALLY so a dispatch from a feature branch can't
+      # use the self-hosted signing runner to sign an off-main ref.
+      - name: Guard — build commit must be an ancestor of origin/main
+        shell: bash
+        run: |
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::ref ${GITHUB_REF_NAME} (${GITHUB_SHA}) is not on origin/main — refusing to sign an off-main ref"
+            exit 1
+          fi
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then V="${{ github.event.inputs.version }}"; else V="${GITHUB_REF_NAME#v}"; fi
+          if ! printf '%s' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version '$V' must be a clean a.b.c (no prerelease) for a trusted release"; exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release agent exe
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
+          go build -ldflags "-s -w -X platform-agent/internal/config.BuildVersion=$v" -o out\endpoint-agent.exe .\cmd\endpoint-agent
+
+      - name: WiX v4 toolset (idempotent)
+        shell: pwsh
+        run: |
+          dotnet tool update --global wix --version 4.0.5
+          wix extension add -g WixToolset.Util.wixext/4.0.5
+
+      - name: Build + AD CS-sign MSI
+        shell: pwsh
+        env:
+          ADCS_SIGNING_CERT_THUMBPRINT: ${{ vars.ADCS_SIGNING_CERT_THUMBPRINT }}
+          ADCS_SIGNING_CERT_SUBJECT: ${{ vars.ADCS_SIGNING_CERT_SUBJECT }}
+          ADCS_THUMBPRINT_ALLOWLIST: ${{ vars.ADCS_THUMBPRINT_ALLOWLIST }}
+          ADCS_TIMESTAMP_URL: ${{ vars.ADCS_TIMESTAMP_URL }}
+        run: |
+          .\installers\windows\msi\build-msi.ps1 `
+            -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
+            -Version "${{ steps.ver.outputs.version }}" `
+            -SigningMode trusted `
+            -OutputDir (Join-Path (Get-Location) "msi-out")
+
+      - name: Assert manifest production=true (internal trust)
+        shell: pwsh
+        run: |
+          $m = Get-Content msi-out\msi-build-manifest.json -Raw | ConvertFrom-Json
+          if (-not $m.production) { throw "manifest production!=true after AD CS sign" }
+          if ($m.signing_tier -ne 'trusted-adcs') { throw "manifest signing_tier=$($m.signing_tier)" }
+          if (-not $m.timestamped) { throw "manifest timestamped!=true" }
+          if ($m.trust_scope -ne 'internal-ad-domain') { throw "manifest trust_scope=$($m.trust_scope)" }
+          if ($m.publicly_trusted) { throw "AD CS sig must NOT claim public trust" }
+          Write-Host "OK AD CS trusted manifest: tier=$($m.signing_tier) production=$($m.production) trust=$($m.trust_scope) thumbprint=$($m.signer_thumbprint)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-agent-msi-signed-adcs
+          path: |
+            msi-out/*.msi
+            msi-out/msi-build-manifest.json
+          if-no-files-found: error

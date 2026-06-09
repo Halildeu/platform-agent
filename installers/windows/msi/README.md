@@ -79,20 +79,22 @@ wix extension add -g WixToolset.Util.wixext
 # -> out\EndpointAgent-0.1.1-lab.msi + out\msi-build-manifest.json (production=false)
 ```
 
-`-SigningMode` selects the tier: `lab` (default, self-signed, `production=false`), `trusted` (Azure Trusted Signing, `production=true` — see below), or `none` (unsigned).
+`-SigningMode` selects the tier: `lab` (default, self-signed, `production=false`), `trusted` (**AD CS internal**, `production=true` — see below), or `none` (unsigned).
 
-## Trusted signing activation (Faz 22.2 / AG-018)
+## Trusted signing activation (Faz 22.2 / AG-018) — AD CS, FREE
 
-The `.github/workflows/release-msi.yml` workflow is a **ready-but-inert skeleton**: it stays skipped (with a visible `::notice::`) until the operator completes the Azure infra, and `build-msi.ps1 -SigningMode trusted` is **fail-closed** (throws if `TRUSTED_SIGNING_*` is unset — never ships unsigned-as-production). No PFX / long-lived secret — only OIDC + non-secret vars.
+> **Owner decision: NO paid services → Azure Trusted Signing (pay-as-you-go) is EXCLUDED.** The production trust path is an **AD CS internal code-signing cert** — Windows Server Enterprise CA, **$0, built-in** (ADR-0029). The cert + private key live on a **self-hosted Windows signing runner** (PFX-in-GitHub FORBIDDEN). Trust is **internal/AD-domain** (the AD CS root reaches domain machines' Trusted Publisher via GPO — free); it is NOT public Windows trust.
 
-**Operator activation** (maps to [`docs/22-2-trusted-signing-onboarding.md`](../../../../platform-k8s-gitops/docs/22-2-trusted-signing-onboarding.md) 7-item checklist):
+The `.github/workflows/release-msi-adcs.yml` workflow is a **ready-but-inert skeleton**: it stays skipped (visible `::notice::`) until the operator enables it, and `build-msi.ps1 -SigningMode trusted` is **fail-closed** (throws if `ADCS_*` is unset — never ships unsigned-as-production). No PFX / secret — the key never leaves the runner's machine store.
 
-1. **Repo variables** (non-secret): `TRUSTED_SIGNING_ENDPOINT` (e.g. `https://eus.codesigning.azure.net/`), `TRUSTED_SIGNING_ACCOUNT`, `TRUSTED_SIGNING_CERT_PROFILE`, `TRUSTED_SIGNING_TIMESTAMP_URL` (Azure default TSA is free).
-2. **Repo secrets** (OIDC App Registration — NOT a PFX): `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_SUBSCRIPTION_ID`.
-3. **GitHub environment** `trusted-signing-prod` with **required reviewers** + a **protected-tag ruleset** (`v*.*.*`).
-4. **Azure federated credential** subject = `repo:Halildeu/platform-agent:environment:trusted-signing-prod` + RBAC role **`Trusted Signing Certificate Profile Signer`** for the App Registration.
+**Operator activation** (free — no billing anywhere):
 
-Then a clean `v0.2.0` tag (no `-lab`/`-rc` suffix, on `main`) → `release-msi.yml` runs `azure/login@v2` (OIDC) → installs the pinned Trusted Signing dlib → `build-msi.ps1 -SigningMode trusted` signs the MSI + the 5 staged files, **verifies each with `signtool verify /pa`** (production trust policy, no import) + asserts an RFC3161 timestamp → manifest `production=true` / `signing_tier=trusted-azure`. The lab `msi-build.yml` is untouched and a CI guard asserts the fail-closed behavior. Authenticode trusted-signing is the **operator promotion gate**; AppLocker/WDAC/EDR signer preflight + GPO domain pilot remain separate operator/domain gates.
+1. **AD CS Code Signing cert** (duplicate the "Code Signing" template on the corp Enterprise CA, `CN=EndpointAgent CodeSign`) enrolled into the signing runner's `LocalMachine\My` with a **non-exportable** private key.
+2. A dedicated **self-hosted runner** labelled `[self-hosted, windows, signing]`, AD-joined, with the Windows SDK `signtool` + WiX.
+3. **Repo variables** (non-secret — thumbprints/URLs aren't secrets; the key is on the runner): `ADCS_SIGNING_ENABLED=true`, `ADCS_SIGNING_CERT_THUMBPRINT`, `ADCS_THUMBPRINT_ALLOWLIST` (CSV), `ADCS_TIMESTAMP_URL` (free public option `http://timestamp.digicert.com`).
+4. **GitHub environment** `trusted-signing-prod` with **required reviewers** + a **protected-tag ruleset** (`v*.*.*`).
+
+Then a clean `v0.2.0` tag (no `-lab`/`-rc`, on `main`) → `release-msi-adcs.yml` runs on the self-hosted runner → `build-msi.ps1 -SigningMode trusted` **pre-flights the cert** (private key, validity, Code-Signing EKU, thumbprint allowlist, chain) → signs the MSI + the 5 staged files with `signtool /sm /sha1 <thumbprint> /tr <TSA> /td SHA256 /fd SHA256` → **verifies each with `signtool verify /pa`** (no import) + RFC3161 timestamp + signer-thumbprint allowlist → manifest `production=true` / `signing_tier=trusted-adcs` / `trust_scope=internal-ad-domain` / `publicly_trusted=false`. The lab `msi-build.yml` is untouched and a CI guard asserts the fail-closed behavior. AppLocker/WDAC/EDR signer preflight (the AD CS root in Trusted Publisher via GPO) + GPO domain pilot remain separate operator/domain gates.
 
 ## Install / GPO
 
