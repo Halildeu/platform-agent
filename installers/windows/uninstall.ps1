@@ -132,6 +132,36 @@ function Remove-PathWithRetry {
     }
 }
 
+function Wait-AgentProcessExit {
+    # After `service uninstall` the SCM can report the service removed while the
+    # agent process is still terminating (or a watchdog child still holds the
+    # binary), so the subsequent install-dir removal races a locked exe
+    # ("Access to the path 'endpoint-agent.exe' is denied"). Wait for every
+    # endpoint-agent process running from $InstallPath to exit, then force-kill
+    # any stragglers as a last resort.
+    param(
+        [string]$InstallPath,
+        [int]$TimeoutSeconds = 30
+    )
+    $isOurs = {
+        param($p)
+        try { $p.Path -and $p.Path.StartsWith($InstallPath, [System.StringComparison]::OrdinalIgnoreCase) }
+        catch { $false }
+    }
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $procs = @(Get-Process -Name "endpoint-agent" -ErrorAction SilentlyContinue | Where-Object { & $isOurs $_ })
+        if ($procs.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 500
+    }
+    $stragglers = @(Get-Process -Name "endpoint-agent" -ErrorAction SilentlyContinue | Where-Object { & $isOurs $_ })
+    foreach ($p in $stragglers) {
+        Write-Step "force-killing residual agent process pid=$($p.Id)"
+        try { $p.Kill(); $p.WaitForExit(5000) | Out-Null } catch { }
+    }
+    Start-Sleep -Milliseconds 500
+}
+
 Assert-Administrator
 
 $targetBinary = Join-Path $InstallDir "endpoint-agent.exe"
@@ -168,6 +198,10 @@ if (Test-ServiceExists -Name $ServiceName) {
 } else {
     Write-Step "service not found: $ServiceName"
 }
+
+# Ensure the agent process has fully released the binary before removing the
+# install dir (avoids "Access denied" on a still-terminating process / watchdog).
+Wait-AgentProcessExit -InstallPath $InstallDir
 
 if (Test-Path -LiteralPath $InstallDir) {
     Write-Step "removing install directory: $InstallDir"
