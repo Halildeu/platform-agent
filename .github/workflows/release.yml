@@ -408,11 +408,31 @@ jobs:
       contents: write
       packages: write
     steps:
-      - name: Checkout (for repo path only)
-        # Tag push → default ref is the tag commit, so windows-package.sh,
-        # the Dockerfile and the source installers/windows/*.ps1 are the
-        # ones for THIS release.
+      - name: Checkout (resolved tag)
+        # Codex 019eac74 must-fix: pin to the classified tag. The publish job
+        # now packages repo files (windows-package.sh, installers/windows/*.ps1,
+        # README.md, deploy/artifact-host/{Dockerfile,nginx.conf}); on the
+        # workflow_dispatch path the default checkout would be the dispatch
+        # branch HEAD, not the tag — that would bake branch-HEAD scripts into a
+        # release built from a different commit. Pin + guard.
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.classify-release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify checkout is on classified tag
+        shell: bash
+        env:
+          TAG: ${{ needs.classify-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD)
+          expected=$(git rev-list -n1 "$TAG")
+          if [ "$head" != "$expected" ]; then
+            echo "::error::publish HEAD ($head) is not the tag commit ($expected) for $TAG"
+            exit 1
+          fi
+          echo "publish checkout verified — HEAD=$head matches tag=$TAG"
 
       - name: Download release dist
         uses: actions/download-artifact@v4
@@ -428,6 +448,8 @@ jobs:
       - name: Build canonical EndpointAgent.zip (signed binary)
         env:
           PREBUILT_EXE: dist/endpoint-agent.exe
+          TAG: ${{ needs.classify-release.outputs.tag }}
+          OWNER_RAW: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           test -f dist/endpoint-agent.exe
@@ -437,6 +459,22 @@ jobs:
           printf '%s  EndpointAgent.zip\n' "$ZIP_SHA" > dist/windows/EndpointAgent.zip.sha256
           echo "ZIP_SHA256=$ZIP_SHA" >> "$GITHUB_ENV"
           echo "EndpointAgent.zip sha256 = $ZIP_SHA"
+
+          # Codex 019eac74 must-fix: the EndpointAgent.zip is the artifact the
+          # one-command bootstrap actually downloads, but it is NOT in the loose
+          # release-manifest.json (built before the zip). Enrich the manifest so
+          # the GitHub release asset AND the copy baked into the artifact image
+          # honestly describe the zip + its served path + the host image ref.
+          OWNER=$(printf '%s' "$OWNER_RAW" | tr '[:upper:]' '[:lower:]')
+          jq --arg zs "$ZIP_SHA" --arg tag "$TAG" --arg owner "$OWNER" \
+             '.endpoint_agent_zip = "EndpointAgent.zip"
+              | .endpoint_agent_zip_sha256 = $zs
+              | .artifact_served_path = ("/artifacts/endpoint-agent/" + $tag + "/")
+              | .artifact_host_image = ("ghcr.io/" + $owner + "/platform-agent-artifacts:" + $tag)
+              | .assets += [{"name": "EndpointAgent.zip", "sha256": $zs}]' \
+             dist/release-manifest.json > dist/release-manifest.json.tmp
+          mv dist/release-manifest.json.tmp dist/release-manifest.json
+          echo "release-manifest.json enriched with EndpointAgent.zip fields"
 
       - name: Publish release
         env:
@@ -481,14 +519,18 @@ jobs:
           SHORT_SHA=$(git rev-parse --short HEAD)
           REVISION=$(git rev-parse HEAD)
 
-          # Stage the served assets (one version folder per image).
+          # Stage the SERVED assets (one version folder per image). Codex
+          # 019eac74 must-fix: do NOT serve the loose release SHA256SUMS — it
+          # hashes endpoint-agent.exe/install.ps1/uninstall.ps1 which are NOT at
+          # this path and omits EndpointAgent.zip. Generate an HONEST SHA256SUMS
+          # over exactly what this directory serves instead.
           ASSETS=deploy/artifact-host/build-assets
           rm -rf "$ASSETS"; mkdir -p "$ASSETS"
           cp dist/windows/EndpointAgent.zip          "$ASSETS/"
           cp dist/windows/EndpointAgent.zip.sha256   "$ASSETS/"
           cp dist/bootstrap-package.ps1              "$ASSETS/"
-          cp dist/SHA256SUMS                         "$ASSETS/"
           cp dist/release-manifest.json              "$ASSETS/"
+          ( cd "$ASSETS" && shasum -a 256 EndpointAgent.zip bootstrap-package.ps1 release-manifest.json > SHA256SUMS )
 
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
           docker build deploy/artifact-host \
@@ -502,7 +544,12 @@ jobs:
           docker push "$IMAGE:$TAG"
           docker push "$IMAGE:sha-$SHORT_SHA"
 
-          DIGEST=$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE:$TAG" | head -n1)
+          # Codex 019eac74 pipeline-fix: get the digest from the REGISTRY (truth),
+          # not local `docker inspect` RepoDigests (can be empty/stale). Emit the
+          # bare sha256:... for the kustomize `digest:` pin.
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE:$TAG" | awk '/^Digest:/ {print $2; exit}')
+          test -n "$DIGEST"
+          echo "IMAGE_DIGEST=$DIGEST" >> "$GITHUB_ENV"
           echo "artifact-host image: $IMAGE:$TAG"
           echo "artifact-host sha tag: $IMAGE:sha-$SHORT_SHA"
           echo "artifact-host digest: $DIGEST"
@@ -512,6 +559,7 @@ jobs:
             echo "- image: \`$IMAGE:$TAG\`"
             echo "- immutable: \`$IMAGE:sha-$SHORT_SHA\`"
             echo "- digest: \`$DIGEST\`"
+            echo "- pin (kustomize): \`newName: $IMAGE\` + \`digest: $DIGEST\`"
             echo "- EndpointAgent.zip sha256: \`${ZIP_SHA256:-unknown}\`"
             echo ""
             echo "Pin this digest in platform-k8s-gitops kustomize/overlays/test (artifact-host)."

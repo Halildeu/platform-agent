@@ -5,7 +5,7 @@
 #     ├─ bootstrap-package.ps1     (the one-command bootstrap client)
 #     ├─ EndpointAgent.zip         (signed exe + install/uninstall + SHA256SUMS)
 #     ├─ EndpointAgent.zip.sha256  (value for -ExpectedZipSha256)
-#     ├─ SHA256SUMS                (loose release hashes, manual verify)
+#     ├─ SHA256SUMS                (hashes of the SERVED files: zip+ps1+manifest)
 #     └─ release-manifest.json     (machine-readable release contract)
 #
 # Built + pushed by .github/workflows/release.yml (publish job) to
