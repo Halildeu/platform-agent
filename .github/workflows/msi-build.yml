@@ -1,0 +1,91 @@
+# Faz 22.5 M4 — Endpoint Agent MSI build (package-readiness, lab tier).
+#
+# Builds the ps1-wrapper WiX MSI on a Windows runner: go-build the windows/amd64
+# agent exe, install WiX v4 (dotnet tool), run build-msi.ps1 (lab self-sign), and
+# upload the MSI + signing-tier manifest. LAB-ONLY / NON-PROD — prod Authenticode
+# trusted-signing + AppLocker/WDAC preflight + GPO domain pilot are out of scope.
+name: M4 MSI build (lab)
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "installers/windows/msi/**"
+      - "installers/windows/install.ps1"
+      - "installers/windows/uninstall.ps1"
+      - "installers/windows/bootstrap-package.ps1"
+      - ".github/workflows/msi-build.yml"
+  pull_request:
+    paths:
+      - "installers/windows/msi/**"
+      - "installers/windows/install.ps1"
+      - ".github/workflows/msi-build.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "MSI ProductVersion (first 3 fields drive upgrade semantics)"
+        default: "0.1.1"
+
+permissions:
+  contents: read
+
+jobs:
+  build-msi:
+    name: Build lab MSI (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build windows/amd64 agent exe
+        shell: pwsh
+        run: |
+          $ver = "${{ github.event.inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($ver)) { $ver = "0.1.1" }
+          $bv = "$ver-lab.ci.$($env:GITHUB_RUN_NUMBER).g$($env:GITHUB_SHA.Substring(0,7))"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
+          go build -ldflags "-s -w -X platform-agent/internal/config.BuildVersion=$bv" `
+            -o out\endpoint-agent.exe .\cmd\endpoint-agent
+          "AGENT_BUILD_VERSION=$bv" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "MSI_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install WiX v4 toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix
+          wix --version
+          wix extension add -g WixToolset.Util.wixext
+
+      - name: Build MSI (lab self-signed)
+        shell: pwsh
+        run: |
+          .\installers\windows\msi\build-msi.ps1 `
+            -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
+            -Version "$env:MSI_VERSION" `
+            -OutputDir (Join-Path (Get-Location) "msi-out")
+
+      - name: MSI version-semantics guard (first 3 numeric fields)
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem msi-out\*.msi | Select-Object -First 1
+          if (-not $msi) { throw "no MSI produced" }
+          "Built: $($msi.Name)"
+          # ProductVersion must be strictly numeric a.b.c (MSI upgrade semantics).
+          if ($msi.Name -notmatch 'EndpointAgent-(\d+\.\d+\.\d+)-lab\.msi') {
+            throw "MSI name '$($msi.Name)' does not carry a numeric a.b.c ProductVersion"
+          }
+          "ProductVersion OK: $($Matches[1])"
+
+      - name: Upload MSI + manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-agent-msi-lab
+          path: |
+            msi-out/*.msi
+            msi-out/msi-build-manifest.json
+          if-no-files-found: error
