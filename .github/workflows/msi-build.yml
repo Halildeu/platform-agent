@@ -57,9 +57,12 @@ jobs:
       - name: Install WiX v4 toolset
         shell: pwsh
         run: |
-          dotnet tool install --global wix
+          # Pin to WiX v4 (free, pre-OSMF). WiX v7 (`wix` latest) requires the
+          # Open Source Maintenance Fee EULA (WIX7015) — a paid obligation for a
+          # commercial product. The .wxs uses the v4 schema + Wix4UtilCA_X64.
+          dotnet tool install --global wix --version 4.0.5
           wix --version
-          wix extension add -g WixToolset.Util.wixext
+          wix extension add -g WixToolset.Util.wixext/4.0.5
 
       - name: Build MSI (lab self-signed)
         shell: pwsh
