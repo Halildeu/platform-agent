@@ -154,8 +154,8 @@
                   Impersonate="no"
                   Return="check" />
 
-    <!-- Hide the response-file path defensively from the verbose log. -->
-    <Property Id="MsiHiddenProperties" Value="ENROLL_RESPONSE_FILE" />
+    <!-- NOTE: ENROLL_RESPONSE_FILE is a non-secret PATH (the token lives only in
+         the file content, which never enters the MSI), so it needs no hiding. -->
 
     <InstallExecuteSequence>
       <!-- Install/upgrade: after files are laid down (InstallFiles), before the
