@@ -10,7 +10,10 @@ secret values and rolls back service/config changes if installation fails.
 
 [CmdletBinding()]
 param(
-    [string]$BinaryPath = (Join-Path $PSScriptRoot "endpoint-agent.exe"),
+    # Default resolved in the body (see $EaScriptDir): $PSScriptRoot can be empty
+    # during param-default binding on some hosts, which made the old
+    # `Join-Path $PSScriptRoot ...` default THROW "empty Path" before the body ran.
+    [string]$BinaryPath = "",
     [string]$InstallDir = (Join-Path $env:ProgramFiles "EndpointAgent"),
     [string]$ServiceName = "EndpointAgent",
     [string]$DisplayName = "Endpoint Agent",
@@ -93,6 +96,18 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# Robust script-directory resolution. $PSScriptRoot is normally the script's
+# folder, but it was observed EMPTY during param-default binding on a real domain
+# device 2026-06-09 (install.ps1:13/564 threw "Join-Path: empty Path"). Resolve
+# once here with fallbacks so the installer works on any host; param defaults that
+# need the script dir stay empty above and are filled from this value.
+$EaScriptDir = if ($PSScriptRoot) { $PSScriptRoot }
+    elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath }
+    else { (Get-Location).Path }
+if ([string]::IsNullOrWhiteSpace($BinaryPath)) {
+    $BinaryPath = Join-Path $EaScriptDir "endpoint-agent.exe"
+}
 
 $configKeys = @(
     "ENDPOINT_AGENT_API_URL",
@@ -840,7 +855,7 @@ try {
         Write-Step "clearing stale service env regkey: $ServiceName\\Environment"
         Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" -Name 'Environment' -ErrorAction SilentlyContinue
         Write-Step "existing service found; uninstalling $ServiceName"
-        $uninstallScript = Join-Path $PSScriptRoot "uninstall.ps1"
+        $uninstallScript = Join-Path $EaScriptDir "uninstall.ps1"
         if (Test-Path -LiteralPath $uninstallScript) {
             # Live verify 2026-05-29 surfaced a latent issue: the
             # array-form splat with -Force failed to bind -LogDir to
