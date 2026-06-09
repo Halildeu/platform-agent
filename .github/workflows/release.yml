@@ -403,10 +403,15 @@ jobs:
     # Codex 019e8284 iter-2 medium #3: only the publish job actually
     # mutates the repo (creates the GitHub Release + uploads assets).
     # Build + sign run with the workflow default (contents: read).
+    # Faz 22.5 M1: also pushes the artifact-host image to GHCR → packages: write.
     permissions:
       contents: write
+      packages: write
     steps:
       - name: Checkout (for repo path only)
+        # Tag push → default ref is the tag commit, so windows-package.sh,
+        # the Dockerfile and the source installers/windows/*.ps1 are the
+        # ones for THIS release.
         uses: actions/checkout@v4
 
       - name: Download release dist
@@ -414,6 +419,24 @@ jobs:
         with:
           name: release-dist
           path: dist
+
+      # Faz 22.5 M1: assemble the canonical EndpointAgent.zip from the SIGNED
+      # binary (PREBUILT_EXE) + the source installer scripts, exactly as
+      # windows-package.sh does for local dev. The ZIP's internal SHA256SUMS is
+      # what bootstrap-package.ps1 verifies after extraction; the ZIP's own
+      # sha256 is what operators paste as -ExpectedZipSha256.
+      - name: Build canonical EndpointAgent.zip (signed binary)
+        env:
+          PREBUILT_EXE: dist/endpoint-agent.exe
+        run: |
+          set -euo pipefail
+          test -f dist/endpoint-agent.exe
+          ./scripts/build/windows-package.sh
+          test -f dist/windows/EndpointAgent.zip
+          ZIP_SHA=$(shasum -a 256 dist/windows/EndpointAgent.zip | awk '{print $1}')
+          printf '%s  EndpointAgent.zip\n' "$ZIP_SHA" > dist/windows/EndpointAgent.zip.sha256
+          echo "ZIP_SHA256=$ZIP_SHA" >> "$GITHUB_ENV"
+          echo "EndpointAgent.zip sha256 = $ZIP_SHA"
 
       - name: Publish release
         env:
@@ -427,7 +450,7 @@ jobs:
           # --verify-tag refuses to overwrite an existing release on the
           # same tag — re-publish is a deliberate operator action, not a
           # silent CI overwrite. (Codex 019e8284 must_fix-adjacent
-          # guardrail.)
+          # guardrail.) Faz 22.5 M1 adds EndpointAgent.zip + its sha256.
           gh release create "$TAG" $PRE_FLAG \
               --verify-tag \
               --title "platform-agent $TAG" \
@@ -437,4 +460,59 @@ jobs:
               dist/install.ps1 \
               dist/uninstall.ps1 \
               dist/SHA256SUMS \
-              dist/release-manifest.json
+              dist/release-manifest.json \
+              dist/windows/EndpointAgent.zip \
+              dist/windows/EndpointAgent.zip.sha256
+
+      # Faz 22.5 M1: build + push the artifact-host image. nginx serving the
+      # packaged assets at /artifacts/endpoint-agent/<tag>/. The cluster pulls
+      # this DIGEST-PINNED (platform-k8s-gitops) with the existing ghcr-pull
+      # secret — no runtime GitHub token / contents:read PAT needed.
+      - name: Build + push artifact-host image (GHCR)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.classify-release.outputs.tag }}
+          RUN_ID: ${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          OWNER=$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$OWNER/platform-agent-artifacts"
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          REVISION=$(git rev-parse HEAD)
+
+          # Stage the served assets (one version folder per image).
+          ASSETS=deploy/artifact-host/build-assets
+          rm -rf "$ASSETS"; mkdir -p "$ASSETS"
+          cp dist/windows/EndpointAgent.zip          "$ASSETS/"
+          cp dist/windows/EndpointAgent.zip.sha256   "$ASSETS/"
+          cp dist/bootstrap-package.ps1              "$ASSETS/"
+          cp dist/SHA256SUMS                         "$ASSETS/"
+          cp dist/release-manifest.json              "$ASSETS/"
+
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker build deploy/artifact-host \
+              --build-arg VERSION="$TAG" \
+              --build-arg REVISION="$REVISION" \
+              --build-arg RELEASE_TAG="$TAG" \
+              --build-arg ZIP_SHA256="${ZIP_SHA256:-unknown}" \
+              --build-arg SOURCE_RUN_ID="$RUN_ID" \
+              -t "$IMAGE:$TAG" \
+              -t "$IMAGE:sha-$SHORT_SHA"
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:sha-$SHORT_SHA"
+
+          DIGEST=$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE:$TAG" | head -n1)
+          echo "artifact-host image: $IMAGE:$TAG"
+          echo "artifact-host sha tag: $IMAGE:sha-$SHORT_SHA"
+          echo "artifact-host digest: $DIGEST"
+          {
+            echo "## Faz 22.5 M1 — artifact-host image"
+            echo ""
+            echo "- image: \`$IMAGE:$TAG\`"
+            echo "- immutable: \`$IMAGE:sha-$SHORT_SHA\`"
+            echo "- digest: \`$DIGEST\`"
+            echo "- EndpointAgent.zip sha256: \`${ZIP_SHA256:-unknown}\`"
+            echo ""
+            echo "Pin this digest in platform-k8s-gitops kustomize/overlays/test (artifact-host)."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -32,14 +32,29 @@ dist/windows/EndpointAgent/README.md
 dist/windows/EndpointAgent/SHA256SUMS
 ```
 
+### Artifact host + versiyon (Faz 22.5 M1)
+
+Tek-komut bootstrap artifact'leri `https://testai.acik.com/artifacts/endpoint-agent/<VERSION>/`
+altinda statik servis edilir (GitOps: platform-k8s-gitops `artifact-host` nginx +
+`ghcr.io/halildeu/platform-agent-artifacts` image). `<VERSION>` = release tag
+(orn. `v0.1.1-lab.2`). `-ExpectedZipSha256` degerini ya
+`.../EndpointAgent.zip.sha256` ya da release-asset `SHA256SUMS` icindeki
+`EndpointAgent.zip` satirindan alin (komut satirina yazmadan once dogrulayin).
+
+**Retention**: artifact host AYNI ANDA yalnizca pinli (current) release surumunu
+servis eder; image yeni surume rollover edince eski `/artifacts/<old-tag>/` URL'leri
+404 olabilir. Tum surumlerin kalici arsivi GitHub release asset'leridir
+(`EndpointAgent.zip`, `bootstrap-package.ps1`, loose dosyalar). Install komutu her
+zaman current pinli surumu kullanir.
+
 Pilot ZIP artifact kurulumu — domain/mTLS auto-enroll:
 
 ```powershell
-$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/EndpointAgent.zip"
+$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/v0.1.1-lab.2/EndpointAgent.zip"
 $ExpectedZipSha256 = "<zip-sha256>"
 
 iwr -UseBasicParsing `
-  "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/bootstrap-package.ps1" `
+  "https://testai.acik.com/artifacts/endpoint-agent/v0.1.1-lab.2/bootstrap-package.ps1" `
   -OutFile "$env:TEMP\endpoint-agent-bootstrap.ps1"
 
 powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
@@ -58,11 +73,11 @@ servis auto-enroll modunda bekler ve HMAC token fallback'e sessiz dusmez.
 Pilot ZIP artifact kurulumu — gecici HMAC token fallback:
 
 ```powershell
-$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/EndpointAgent.zip"
+$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/v0.1.1-lab.2/EndpointAgent.zip"
 $ExpectedZipSha256 = "<zip-sha256>"
 
 iwr -UseBasicParsing `
-  "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/bootstrap-package.ps1" `
+  "https://testai.acik.com/artifacts/endpoint-agent/v0.1.1-lab.2/bootstrap-package.ps1" `
   -OutFile "$env:TEMP\endpoint-agent-bootstrap.ps1"
 
 powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
