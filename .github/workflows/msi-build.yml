@@ -1,0 +1,258 @@
+# Faz 22.5 M4 — Endpoint Agent MSI build (package-readiness, lab tier).
+#
+# Builds the ps1-wrapper WiX MSI on a Windows runner: go-build the windows/amd64
+# agent exe, install WiX v4 (dotnet tool), run build-msi.ps1 (lab self-sign), and
+# upload the MSI + signing-tier manifest. LAB-ONLY / NON-PROD — prod Authenticode
+# trusted-signing + AppLocker/WDAC preflight + GPO domain pilot are out of scope.
+name: M4 MSI build (lab)
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "installers/windows/msi/**"
+      - "installers/windows/install.ps1"
+      - "installers/windows/uninstall.ps1"
+      - "installers/windows/bootstrap-package.ps1"
+      - ".github/workflows/msi-build.yml"
+  pull_request:
+    paths:
+      - "installers/windows/msi/**"
+      - "installers/windows/install.ps1"
+      - "installers/windows/uninstall.ps1"
+      - "installers/windows/bootstrap-package.ps1"
+      - ".github/workflows/msi-build.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "MSI ProductVersion (first 3 fields drive upgrade semantics)"
+        default: "0.1.1"
+
+permissions:
+  contents: read
+
+jobs:
+  build-msi:
+    name: Build lab MSI (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build windows/amd64 agent exe
+        shell: pwsh
+        run: |
+          $ver = "${{ github.event.inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($ver)) { $ver = "0.1.1" }
+          $bv = "$ver-lab.ci.$($env:GITHUB_RUN_NUMBER).g$($env:GITHUB_SHA.Substring(0,7))"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
+          go build -ldflags "-s -w -X platform-agent/internal/config.BuildVersion=$bv" `
+            -o out\endpoint-agent.exe .\cmd\endpoint-agent
+          "AGENT_BUILD_VERSION=$bv" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "MSI_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install WiX v4 toolset
+        shell: pwsh
+        run: |
+          # Pin to WiX v4 (free, pre-OSMF). WiX v7 (`wix` latest) requires the
+          # Open Source Maintenance Fee EULA (WIX7015) — a paid obligation for a
+          # commercial product. The .wxs uses the v4 schema + Wix4UtilCA_X64.
+          dotnet tool install --global wix --version 4.0.5
+          wix --version
+          wix extension add -g WixToolset.Util.wixext/4.0.5
+
+      - name: Build MSI (lab self-signed)
+        shell: pwsh
+        run: |
+          .\installers\windows\msi\build-msi.ps1 `
+            -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
+            -Version "$env:MSI_VERSION" `
+            -OutputDir (Join-Path (Get-Location) "msi-out")
+
+      - name: MSI version-semantics guard (first 3 numeric fields)
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem msi-out\*.msi | Select-Object -First 1
+          if (-not $msi) { throw "no MSI produced" }
+          "Built: $($msi.Name)"
+          # ProductVersion must be strictly numeric a.b.c (MSI upgrade semantics).
+          if ($msi.Name -notmatch 'EndpointAgent-(\d+\.\d+\.\d+)-lab\.msi') {
+            throw "MSI name '$($msi.Name)' does not carry a numeric a.b.c ProductVersion"
+          }
+          "ProductVersion OK: $($Matches[1])"
+
+      - name: Upload MSI + manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-agent-msi-lab
+          path: |
+            msi-out/*.msi
+            msi-out/msi-build-manifest.json
+          if-no-files-found: error
+
+      # ============================ SMOKE ============================
+      # Clean-runner mechanics smoke (no M2/VM entanglement). Verifies the
+      # MSI -> install.ps1 plumbing: install, redaction, upgrade credential-
+      # preserve, uninstall. Live enrolled heartbeat is covered separately.
+      - name: Smoke — install (HMAC + redaction canary)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $canary = "EASECRETCANARYdeadbeefdeadbeefdeadbeefdeadbeef00"   # 48 chars >= MinEnrollmentTokenLength
+          $respFile = Join-Path $env:RUNNER_TEMP "ea-enroll-canary.txt"
+          Set-Content -LiteralPath $respFile -Value $canary -NoNewline
+          $msi = (Get-ChildItem msi-out\EndpointAgent-0.1.1-lab.msi)[0].FullName
+          $log = Join-Path $env:RUNNER_TEMP "msi-install.log"
+          $p = Start-Process msiexec -ArgumentList @(
+              "/i", "`"$msi`"", "/qn", "/l*v", "`"$log`"",
+              "API_URL=https://testai.acik.com/api/v1/endpoint-agent",
+              "ENROLL_RESPONSE_FILE=`"$respFile`""
+              # NOTE: SERVICE_NAME intentionally omitted -> exercises the WiX
+              # default ("EndpointAgent"); uninstall step also passes none, so the
+              # default-property install+uninstall path is covered (Codex review).
+          ) -Wait -PassThru
+          Write-Host "msiexec exit=$($p.ExitCode)"
+          if ($p.ExitCode -ne 0) {
+            Write-Host "----- msiexec verbose (CA/errors) -----"
+            if (Test-Path $log) { (Get-Content $log) | Select-String -Pattern 'WixQuietExec|return value 3|Action ended|powershell|Error|1603|1721|1722' | Select-Object -Last 50 | ForEach-Object { $_.Line } }
+            Write-Host "----- install-msi wrapper log -----"
+            Get-ChildItem C:\ProgramData\EndpointAgent\logs\install-msi-*.log -EA SilentlyContinue | ForEach-Object { Get-Content $_.FullName }
+            Write-Host "----- agent log tail -----"
+            Get-Content C:\ProgramData\EndpointAgent\logs\endpoint-agent.log -EA SilentlyContinue -Tail 20
+            throw "install exit $($p.ExitCode)"
+          }
+          # service created
+          $svc = Get-Service EndpointAgent -ErrorAction SilentlyContinue
+          if (-not $svc) { throw "service EndpointAgent not created" }
+          Write-Host "service status=$($svc.Status)"
+          # staged payload present (separate from runtime dir)
+          $stage = "C:\Program Files\EndpointAgentInstaller\0.1.1\payload"
+          foreach ($f in 'endpoint-agent.exe','install.ps1','uninstall.ps1','run-agent-install.ps1') {
+            if (-not (Test-Path (Join-Path $stage $f))) { throw "staged $f missing" }
+          }
+          # runtime install dir is SEPARATE (MF1)
+          if (-not (Test-Path "C:\Program Files\EndpointAgent\endpoint-agent.exe")) { throw "runtime exe missing" }
+          # AG-026C service env regkey written by install.ps1 (sole writer)
+          $envv = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\EndpointAgent" -Name Environment -ErrorAction SilentlyContinue).Environment
+          if (-not ($envv -match 'ENDPOINT_AGENT_API_URL')) { throw "service env regkey missing API_URL" }
+          Write-Host "OK install mechanics"
+          # REDACTION (Codex cond.1): the canary MUST NOT appear in the msiexec
+          # verbose log (the MSI only ever saw the response-file PATH) nor the
+          # install-msi wrapper log.
+          $leaks = @()
+          if ((Get-Content $log -Raw) -match [regex]::Escape($canary)) { $leaks += "msiexec.log" }
+          Get-ChildItem "C:\ProgramData\EndpointAgent\logs\install-msi-*.log" -ErrorAction SilentlyContinue | ForEach-Object {
+            if ((Get-Content $_.FullName -Raw) -match [regex]::Escape($canary)) { $leaks += $_.Name }
+          }
+          if ($leaks.Count -gt 0) { throw "REDACTION FAIL: canary leaked into: $($leaks -join ', ')" }
+          Write-Host "OK redaction (canary absent from msiexec + install-msi logs)"
+
+      - name: Smoke — major upgrade preserves credential (MF4)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Seed the CANONICAL HMAC credential store (install.ps1 AG-026D path):
+          # ProgramData\EndpointAgent\config\hmac-credential.dpapi. The upgrade MUST
+          # preserve it AND (since a store exists) MUST NOT forward the token.
+          $cfgDir = "C:\ProgramData\EndpointAgent\config"
+          New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+          $cred = Join-Path $cfgDir "hmac-credential.dpapi"
+          Set-Content -LiteralPath $cred -Value "FAKE-DPAPI-CRED-MARKER" -NoNewline
+          $canary = "EASECRETCANARYupgrade000000000000000000000000000"   # >=32
+          $resp = Join-Path $env:RUNNER_TEMP "ea-enroll-upgrade.txt"
+          Set-Content -LiteralPath $resp -Value $canary -NoNewline
+          # Build a higher-version MSI from the same exe.
+          .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
+            -Version "0.1.2" -OutputDir (Join-Path (Get-Location) "msi-out-v2")
+          $msi2 = (Get-ChildItem msi-out-v2\EndpointAgent-0.1.2-lab.msi)[0].FullName
+          $log2 = Join-Path $env:RUNNER_TEMP "msi-upgrade.log"
+          # HMAC upgrade WITH a response file present + existing canonical store.
+          $p = Start-Process msiexec -ArgumentList @(
+              "/i", "`"$msi2`"", "/qn", "/l*v", "`"$log2`"",
+              "API_URL=https://testai.acik.com/api/v1/endpoint-agent",
+              "ENROLL_RESPONSE_FILE=`"$resp`"",
+              "SERVICE_NAME=EndpointAgent"
+          ) -Wait -PassThru
+          Write-Host "upgrade msiexec exit=$($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { if (Test-Path $log2) { Get-Content $log2 -Tail 80 }; throw "upgrade exit $($p.ExitCode)" }
+          # MF4: canonical credential store preserved + unchanged.
+          if (-not (Test-Path $cred)) { throw "MF4 FAIL: hmac-credential.dpapi wiped on upgrade" }
+          if ((Get-Content $cred -Raw).Trim() -ne "FAKE-DPAPI-CRED-MARKER") { throw "MF4 FAIL: hmac-credential.dpapi altered on upgrade" }
+          if (-not (Get-Service EndpointAgent -ErrorAction SilentlyContinue)) { throw "service missing after upgrade" }
+          if (-not (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.2\payload\endpoint-agent.exe")) { throw "0.1.2 payload missing" }
+          # token NOT forwarded (existing store): the wrapper log must say so.
+          $wlog = Get-ChildItem C:\ProgramData\EndpointAgent\logs\install-msi-*.log | Sort-Object LastWriteTime | Select-Object -Last 1
+          $wtext = if ($wlog) { Get-Content $wlog.FullName -Raw } else { "" }
+          if ($wtext -notmatch 'enrollment token NOT forwarded') { throw "MF4 FAIL: token-not-forwarded not logged on HMAC upgrade with existing store" }
+          # redaction: the canary must not appear in the msiexec verbose log.
+          if ((Get-Content $log2 -Raw) -match [regex]::Escape($canary)) { throw "REDACTION FAIL: upgrade canary leaked to msiexec log" }
+          Write-Host "OK upgrade preserved canonical credential + service; token NOT forwarded; canary redacted"
+
+      - name: Smoke — uninstall preserves config by default (Codex cond.6)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $msi2 = (Get-ChildItem msi-out-v2\EndpointAgent-0.1.2-lab.msi)[0].FullName
+          $log3 = Join-Path $env:RUNNER_TEMP "msi-uninstall.log"
+          $p = Start-Process msiexec -ArgumentList @("/x", "`"$msi2`"", "/qn", "/l*v", "`"$log3`"") -Wait -PassThru
+          Write-Host "uninstall msiexec exit=$($p.ExitCode)"
+          if ($p.ExitCode -ne 0) {
+            Write-Host "----- uninstall verbose (CA/errors) -----"
+            if (Test-Path $log3) { (Get-Content $log3) | Select-String -Pattern 'WixQuietExec|EaRunUninstall|return value 3|Error|powershell|uninstall.ps1|1603|0x80' | Select-Object -Last 50 | ForEach-Object { $_.Line } }
+            Write-Host "----- install-msi wrapper log (latest) -----"
+            Get-ChildItem C:\ProgramData\EndpointAgent\logs\install-msi-*.log -EA SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1 | ForEach-Object { Get-Content $_.FullName }
+            throw "uninstall exit $($p.ExitCode)"
+          }
+          $svc = Get-Service EndpointAgent -ErrorAction SilentlyContinue
+          Write-Host "post-uninstall service: $(if ($svc) { $svc.Status } else { 'absent' })"
+          Write-Host "ProgramData\EndpointAgent contents:"
+          Get-ChildItem C:\ProgramData\EndpointAgent -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
+          # A service with an open SCM handle lingers in 'marked for deletion' until
+          # the last handle closes; tolerate that (not Running) as effectively removed.
+          if ($svc -and $svc.Status -eq 'Running') { throw "service still RUNNING after uninstall" }
+          # default uninstall PRESERVES the canonical credential/config (Codex cond.6)
+          if (-not (Test-Path "C:\ProgramData\EndpointAgent\config\hmac-credential.dpapi")) { throw "uninstall wiped hmac-credential.dpapi (should preserve by default)" }
+          Write-Host "OK uninstall removed service + preserved canonical credential (default)"
+
+      - name: Smoke — failed upgrade preserves old version + recovers (Codex cond.4)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Clean slate: no canonical store => a too-short token IS forwarded (and
+          # rejected by install.ps1's length floor => the new-install CA fails).
+          Remove-Item "C:\ProgramData\EndpointAgent\config\hmac-credential.dpapi" -Force -ErrorAction SilentlyContinue
+          # 1) Install the "old" working version v0.1.3 (tokenless AutoEnroll).
+          .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) -Version "0.1.3" -OutputDir (Join-Path (Get-Location) "msi-out-v3")
+          $msi3 = (Get-ChildItem msi-out-v3\EndpointAgent-0.1.3-lab.msi)[0].FullName
+          $p = Start-Process msiexec -ArgumentList @("/i","`"$msi3`"","/qn","AUTO_ENROLL=1","SERVICE_NAME=EndpointAgentFU") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "v0.1.3 base install failed $($p.ExitCode)" }
+          if (-not (Get-Service EndpointAgentFU -ErrorAction SilentlyContinue)) { throw "v0.1.3 service missing" }
+          Write-Host "old v0.1.3 installed"
+          # 2) Attempt upgrade to v0.1.4 with a TOO-SHORT token => new-install CA throws.
+          $short = Join-Path $env:RUNNER_TEMP "ea-short.txt"; Set-Content $short -Value "SHORT" -NoNewline
+          .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) -Version "0.1.4" -OutputDir (Join-Path (Get-Location) "msi-out-v4")
+          $msi4 = (Get-ChildItem msi-out-v4\EndpointAgent-0.1.4-lab.msi)[0].FullName
+          $logF = Join-Path $env:RUNNER_TEMP "msi-failup.log"
+          $p = Start-Process msiexec -ArgumentList @("/i","`"$msi4`"","/qn","/l*v","`"$logF`"","API_URL=https://testai.acik.com/api/v1/endpoint-agent","ENROLL_RESPONSE_FILE=`"$short`"","SERVICE_NAME=EndpointAgentFU") -Wait -PassThru
+          Write-Host "failed-upgrade msiexec exit=$($p.ExitCode) (expected NON-zero)"
+          if ($p.ExitCode -eq 0) { throw "expected the short-token upgrade to FAIL, but it succeeded" }
+          # 3) INVARIANT (pre-mutation failure class): the short-token failure occurs in
+          #    install.ps1's preflight (Assert-EnrollmentTokenLength), BEFORE -Force touches
+          #    the existing service, and the old MSI's RemoveExistingProducts is deferred
+          #    (afterInstallExecute) => OLD v0.1.3 must remain. (A failure AFTER install.ps1
+          #    -Force's own old-service removal is a residual limitation, recovered by re-run.)
+          if (-not (Get-Service EndpointAgentFU -ErrorAction SilentlyContinue)) { throw "DEGRADED: old service gone after failed upgrade" }
+          if (-not (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.3\payload\endpoint-agent.exe")) { throw "DEGRADED: old v0.1.3 payload gone" }
+          if (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.4\payload\endpoint-agent.exe") { throw "rollback incomplete: v0.1.4 payload remains" }
+          Write-Host "OK failed upgrade preserved old v0.1.3 (no degraded state)"
+          # 4) RECOVERY: a valid re-run of the new MSI succeeds.
+          $p = Start-Process msiexec -ArgumentList @("/i","`"$msi4`"","/qn","AUTO_ENROLL=1","SERVICE_NAME=EndpointAgentFU") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "recovery re-run failed $($p.ExitCode)" }
+          if (-not (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.4\payload\endpoint-agent.exe")) { throw "recovery did not install v0.1.4" }
+          Write-Host "OK recovery: a valid re-run installed v0.1.4"
+          Start-Process msiexec -ArgumentList @("/x","`"$msi4`"","/qn") -Wait | Out-Null

@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Faz 22.5 M4 — Endpoint Agent WiX MSI (ps1-wrapper, package-readiness slice).
+
+  Design (Codex 019ead14 AGREE):
+    - The MSI owns PAYLOAD/CACHE, ARP identity, public-property capture, major-
+      upgrade orchestration and the deterministic MSI log.
+    - install.ps1 stays the installer SINGLE SOURCE OF TRUTH: service create,
+      AG-026C service Environment regkey (REG_MULTI_SZ), SDDL/tamper hardening,
+      credential preservation, auto-enroll/HMAC mode logic.
+    - This MSI writes NO ServiceInstall and NO service-config/env registry.
+
+  Secret hygiene:
+    - The MSI carries NO enrollment token. The prod/GPO path is TOKENLESS
+      (-AutoEnroll machine-cert/mTLS). The lab HMAC fallback reads its token from
+      a SYSTEM/Admins-only response file PRE-STAGED out-of-band (path passed via
+      the non-secret ENROLL_RESPONSE_FILE property) so no secret ever transits a
+      MSI property / CustomActionData / verbose log (Codex cond.1/2).
+
+  LAB-ONLY / NON-PROD: this package is self-signed (lab tier). Prod Authenticode
+  trusted-signing + AppLocker/WDAC/EDR signer preflight + GPO domain pilot are
+  operator/domain-gated follow-ups (see installers/windows/msi/README.md).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <?ifndef ProductVersion ?>
+    <?define ProductVersion = "0.1.1" ?>
+  <?endif?>
+  <?ifndef PayloadDir ?>
+    <?define PayloadDir = "payload" ?>
+  <?endif?>
+
+  <Package Name="Endpoint Agent (Lab)"
+           Manufacturer="Acik Platform"
+           Version="$(ProductVersion)"
+           UpgradeCode="6F3A1C5E-7B42-4E91-9D0A-2C8B5F4A1E37"
+           Scope="perMachine"
+           Compressed="yes"
+           InstallerVersion="500">
+
+    <SummaryInformation Description="Endpoint Agent (Lab) — Faz 22.5 M4 package-readiness MSI" />
+
+    <!-- 64-bit only. ProgramFiles64Folder + System64Folder CA host => System32
+         resolves WITHOUT WOW64 redirection (Codex cond.3). -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Major upgrade: uninstall-old then install-new in one session.
+         RemoveExistingProducts scheduled afterInstallExecute so the new payload
+         is laid down before the old is removed; downgrade denied; NO
+         AllowSameVersionUpgrades (fleet re-config = ProductVersion bump, MF4). -->
+    <MajorUpgrade Schedule="afterInstallExecute"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+
+    <!-- Add/Remove Programs: no repair surface in this slice (Codex gotcha). -->
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <!-- ======================= Public properties ======================= -->
+    <!-- All NON-SECRET. Uppercase => settable from msiexec/MST/GPO. -->
+    <Property Id="API_URL" Secure="yes" />
+    <Property Id="LOG_DIR" Secure="yes" />
+    <Property Id="INSTALL_ID" Secure="yes" />
+    <Property Id="MAINTENANCE_TOKEN_HASH" Secure="yes" />
+    <!-- Default service name so the uninstall CA never sends an empty
+         SERVICE_NAME (which would call uninstall.ps1 -ServiceName ""). A CUSTOM
+         install-time service name is NOT remembered at /x time (MSI does not
+         persist custom public properties) — uninstall then targets the default;
+         documented limitation, fine for the default deployment. -->
+    <Property Id="SERVICE_NAME" Value="EndpointAgent" Secure="yes" />
+    <!-- Tokenless domain/GPO path (ADR-0029 Katman 3). -->
+    <Property Id="AUTO_ENROLL" Secure="yes" />
+    <Property Id="AUTO_ENROLL_API_URL" Secure="yes" />
+    <Property Id="AUTO_ENROLL_CERT_SUBJECT_SUFFIX" Secure="yes" />
+    <Property Id="AUTO_ENROLL_CERT_SAN_URI_PREFIX" Secure="yes" />
+    <Property Id="AUTO_ENROLL_JITTER_SECONDS" Secure="yes" />
+    <!-- Path to a pre-staged SYSTEM/Admins-only file holding the LAB HMAC token
+         (non-secret PATH; the secret never enters the MSI). -->
+    <Property Id="ENROLL_RESPONSE_FILE" Secure="yes" />
+    <!-- Explicit purge gate for uninstall (default = preserve credential/config). -->
+    <Property Id="PURGE_CONFIG" Secure="yes" />
+
+    <!-- SERVICE_SDDL deliberately NOT exposed: the value contains ';' which would
+         break the ';'-delimited ConfigData blob, and install.ps1's default SDDL
+         is already the hardened default. -->
+
+    <!-- ===================== Staged payload layout ===================== -->
+    <!-- MSI payload lives in a VERSIONED staging dir, SEPARATE from the runtime
+         install dir C:\Program Files\EndpointAgent that install.ps1 manages (MF1).
+         This prevents the running script from deleting its own payload on
+         upgrade/uninstall. -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="STAGEROOT" Name="EndpointAgentInstaller">
+        <Directory Id="STAGEVER" Name="$(ProductVersion)">
+          <Directory Id="STAGEDIR" Name="payload">
+
+            <Component Id="cmpAgentExe" Bitness="always64">
+              <File Id="filAgentExe" Source="$(PayloadDir)\endpoint-agent.exe" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpInstallPs1" Bitness="always64">
+              <File Id="filInstallPs1" Source="$(PayloadDir)\install.ps1" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpUninstallPs1" Bitness="always64">
+              <File Id="filUninstallPs1" Source="$(PayloadDir)\uninstall.ps1" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpBootstrapPs1" Bitness="always64">
+              <File Id="filBootstrapPs1" Source="$(PayloadDir)\bootstrap-package.ps1" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpRunInstallPs1" Bitness="always64">
+              <File Id="filRunInstallPs1" Source="$(PayloadDir)\run-agent-install.ps1" KeyPath="yes" />
+            </Component>
+
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Endpoint Agent" Level="1">
+      <ComponentRef Id="cmpAgentExe" />
+      <ComponentRef Id="cmpInstallPs1" />
+      <ComponentRef Id="cmpUninstallPs1" />
+      <ComponentRef Id="cmpBootstrapPs1" />
+      <ComponentRef Id="cmpRunInstallPs1" />
+    </Feature>
+
+    <!-- ===================== Custom actions ===================== -->
+    <!-- Deferred + Impersonate=no => runs as SYSTEM (the GPO computer-assigned
+         context). Data flows via WixQuietExec64CmdLine resolved at SetProperty
+         (immediate) time; the deferred CA reads only the resolved cmdline. The
+         install/uninstall SetProperty actions are mutually exclusive by
+         condition, so they never both feed WixQuietExec64CmdLine in one session. -->
+
+    <!-- Both CAs run WixQuietExec64 (64-bit) but have DISTINCT Ids. WiX passes a
+         deferred CA the value of the property whose name == the CA Id, as its
+         CustomActionData; WixQuietExec64 reads that as its command line. So the
+         SetProperty Id MUST equal the CA Id (EaRunInstall / EaRunUninstall) — NOT
+         "WixQuietExec64CmdLine" (that mismatch => "Failed to get command line
+         data"). Distinct Ids also avoid the duplicate-symbol collision. 64-bit CA
+         host => [System64Folder] is the real System32 (no WOW64 redirect). -->
+
+    <!-- INSTALL / UPGRADE: fresh install AND major-upgrade install-new (NOT REMOVE). -->
+    <SetProperty Id="EaRunInstall"
+                 Before="EaRunInstall"
+                 Sequence="execute"
+                 Condition="NOT REMOVE"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode install -ConfigData &quot;API_URL=[API_URL];LOG_DIR=[LOG_DIR];INSTALL_ID=[INSTALL_ID];MAINTENANCE_TOKEN_HASH=[MAINTENANCE_TOKEN_HASH];SERVICE_NAME=[SERVICE_NAME];AUTO_ENROLL=[AUTO_ENROLL];AUTO_ENROLL_API_URL=[AUTO_ENROLL_API_URL];AUTO_ENROLL_CERT_SUBJECT_SUFFIX=[AUTO_ENROLL_CERT_SUBJECT_SUFFIX];AUTO_ENROLL_CERT_SAN_URI_PREFIX=[AUTO_ENROLL_CERT_SAN_URI_PREFIX];AUTO_ENROLL_JITTER_SECONDS=[AUTO_ENROLL_JITTER_SECONDS]&quot; -ResponseFile &quot;[ENROLL_RESPONSE_FILE]&quot;" />
+    <CustomAction Id="EaRunInstall"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!-- UNINSTALL: full removal of THIS product only (never on major-upgrade's
+         RemoveExistingProducts of the OLD code). Default preserves
+         credential/config; PURGE_CONFIG=1 purges. -->
+    <SetProperty Id="EaRunUninstall"
+                 Before="EaRunUninstall"
+                 Sequence="execute"
+                 Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode uninstall -ConfigData &quot;SERVICE_NAME=[SERVICE_NAME];PURGE_CONFIG=[PURGE_CONFIG]&quot;" />
+    <CustomAction Id="EaRunUninstall"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!-- NOTE: ENROLL_RESPONSE_FILE is a non-secret PATH (the token lives only in
+         the file content, which never enters the MSI), so it needs no hiding. -->
+
+    <InstallExecuteSequence>
+      <!-- Install/upgrade: after files are laid down (InstallFiles), before
+           RemoveExistingProducts (afterInstallExecute). -->
+      <Custom Action="EaRunInstall" After="InstallFiles" Condition="NOT REMOVE" />
+      <!-- Uninstall: before the staged payload files are removed, so
+           run-agent-install.ps1 + uninstall.ps1 still exist on disk. -->
+      <Custom Action="EaRunUninstall" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>
