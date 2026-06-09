@@ -227,26 +227,26 @@ jobs:
           # 1) Install the "old" working version v0.1.3 (tokenless AutoEnroll).
           .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) -Version "0.1.3" -OutputDir (Join-Path (Get-Location) "msi-out-v3")
           $msi3 = (Get-ChildItem msi-out-v3\EndpointAgent-0.1.3-lab.msi)[0].FullName
-          $p = Start-Process msiexec -ArgumentList @("/i","`"$msi3`"","/qn","AUTO_ENROLL=1","SERVICE_NAME=EndpointAgent") -Wait -PassThru
+          $p = Start-Process msiexec -ArgumentList @("/i","`"$msi3`"","/qn","AUTO_ENROLL=1","SERVICE_NAME=EndpointAgentFU") -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "v0.1.3 base install failed $($p.ExitCode)" }
-          if (-not (Get-Service EndpointAgent -ErrorAction SilentlyContinue)) { throw "v0.1.3 service missing" }
+          if (-not (Get-Service EndpointAgentFU -ErrorAction SilentlyContinue)) { throw "v0.1.3 service missing" }
           Write-Host "old v0.1.3 installed"
           # 2) Attempt upgrade to v0.1.4 with a TOO-SHORT token => new-install CA throws.
           $short = Join-Path $env:RUNNER_TEMP "ea-short.txt"; Set-Content $short -Value "SHORT" -NoNewline
           .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) -Version "0.1.4" -OutputDir (Join-Path (Get-Location) "msi-out-v4")
           $msi4 = (Get-ChildItem msi-out-v4\EndpointAgent-0.1.4-lab.msi)[0].FullName
           $logF = Join-Path $env:RUNNER_TEMP "msi-failup.log"
-          $p = Start-Process msiexec -ArgumentList @("/i","`"$msi4`"","/qn","/l*v","`"$logF`"","API_URL=https://testai.acik.com/api/v1/endpoint-agent","ENROLL_RESPONSE_FILE=`"$short`"","SERVICE_NAME=EndpointAgent") -Wait -PassThru
+          $p = Start-Process msiexec -ArgumentList @("/i","`"$msi4`"","/qn","/l*v","`"$logF`"","API_URL=https://testai.acik.com/api/v1/endpoint-agent","ENROLL_RESPONSE_FILE=`"$short`"","SERVICE_NAME=EndpointAgentFU") -Wait -PassThru
           Write-Host "failed-upgrade msiexec exit=$($p.ExitCode) (expected NON-zero)"
           if ($p.ExitCode -eq 0) { throw "expected the short-token upgrade to FAIL, but it succeeded" }
           # 3) INVARIANT: RemoveExistingProducts is afterInstallExecute, so a new-install
           #    CA failure happens BEFORE old removal => OLD v0.1.3 must remain (NOT degraded).
-          if (-not (Get-Service EndpointAgent -ErrorAction SilentlyContinue)) { throw "DEGRADED: old service gone after failed upgrade" }
+          if (-not (Get-Service EndpointAgentFU -ErrorAction SilentlyContinue)) { throw "DEGRADED: old service gone after failed upgrade" }
           if (-not (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.3\payload\endpoint-agent.exe")) { throw "DEGRADED: old v0.1.3 payload gone" }
           if (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.4\payload\endpoint-agent.exe") { throw "rollback incomplete: v0.1.4 payload remains" }
           Write-Host "OK failed upgrade preserved old v0.1.3 (no degraded state)"
           # 4) RECOVERY: a valid re-run of the new MSI succeeds.
-          $p = Start-Process msiexec -ArgumentList @("/i","`"$msi4`"","/qn","AUTO_ENROLL=1","SERVICE_NAME=EndpointAgent") -Wait -PassThru
+          $p = Start-Process msiexec -ArgumentList @("/i","`"$msi4`"","/qn","AUTO_ENROLL=1","SERVICE_NAME=EndpointAgentFU") -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "recovery re-run failed $($p.ExitCode)" }
           if (-not (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.4\payload\endpoint-agent.exe")) { throw "recovery did not install v0.1.4" }
           Write-Host "OK recovery: a valid re-run installed v0.1.4"
