@@ -87,6 +87,7 @@ function ConvertFrom-ConfigData {
 # own defaults. Switches map to [switch] = $true when the value is 1/true/yes.
 $keyMap = @{
     'API_URL'                        = @{ Param = 'ApiUrl';                     Kind = 'value'  }
+    'SERVICE_NAME'                   = @{ Param = 'ServiceName';                Kind = 'value'  }
     'LOG_DIR'                        = @{ Param = 'LogDir';                     Kind = 'value'  }
     'INSTALL_ID'                     = @{ Param = 'InstallId';                  Kind = 'value'  }
     'MAINTENANCE_TOKEN_HASH'         = @{ Param = 'MaintenanceTokenHash';       Kind = 'value'  }
