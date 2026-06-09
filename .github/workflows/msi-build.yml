@@ -186,7 +186,13 @@ jobs:
           $log3 = Join-Path $env:RUNNER_TEMP "msi-uninstall.log"
           $p = Start-Process msiexec -ArgumentList @("/x", "`"$msi2`"", "/qn", "/l*v", "`"$log3`"") -Wait -PassThru
           Write-Host "uninstall msiexec exit=$($p.ExitCode)"
-          if ($p.ExitCode -ne 0) { if (Test-Path $log3) { Get-Content $log3 -Tail 60 }; throw "uninstall exit $($p.ExitCode)" }
+          if ($p.ExitCode -ne 0) {
+            Write-Host "----- uninstall verbose (CA/errors) -----"
+            if (Test-Path $log3) { (Get-Content $log3) | Select-String -Pattern 'WixQuietExec|EaRunUninstall|return value 3|Error|powershell|uninstall.ps1|1603|0x80' | Select-Object -Last 50 | ForEach-Object { $_.Line } }
+            Write-Host "----- install-msi wrapper log (latest) -----"
+            Get-ChildItem C:\ProgramData\EndpointAgent\logs\install-msi-*.log -EA SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1 | ForEach-Object { Get-Content $_.FullName }
+            throw "uninstall exit $($p.ExitCode)"
+          }
           if (Get-Service EndpointAgent -ErrorAction SilentlyContinue) { throw "service still present after uninstall" }
           # default uninstall PRESERVES credential/config
           if (-not (Test-Path "C:\ProgramData\EndpointAgent\credential.dat")) { throw "uninstall wiped credential (should preserve by default)" }
