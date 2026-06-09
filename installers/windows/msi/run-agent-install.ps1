@@ -176,8 +176,11 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($ResponseFile) -and (Test-Path -LiteralPath $ResponseFile)) {
         $token = (Get-Content -LiteralPath $ResponseFile -Raw)
         if ($null -ne $token) { $token = $token.Trim() }
-        $credDir = Join-Path $env:ProgramData "EndpointAgent"
-        $hasCredStore = Test-Path -LiteralPath (Join-Path $credDir "credential.dat")
+        # Canonical HMAC credential store (install.ps1 AG-026D): the DPAPI blob at
+        # ProgramData\EndpointAgent\config\hmac-credential.dpapi. An existing store
+        # means install.ps1 would fail-fast on a new -EnrollmentToken without
+        # -ResetCredentialStore, so DON'T forward the token on upgrade.
+        $hasCredStore = Test-Path -LiteralPath (Join-Path $env:ProgramData "EndpointAgent\config\hmac-credential.dpapi")
         if ([string]::IsNullOrWhiteSpace($token)) {
             Write-MsiLog "enrollment token response file empty -> ignored"
         } elseif ($hasCredStore) {

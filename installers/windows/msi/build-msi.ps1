@@ -122,6 +122,26 @@ if ($SelfSign -and $cert) {
     Step "Lab self-sign MSI"
     $r = Set-AuthenticodeSignature -FilePath $msiPath -Certificate $cert -HashAlgorithm SHA256
     Step "MSI signature -> $($r.Status)"
+    $ok = @('Valid', 'UnknownError')
+    if ($r.Status -notin $ok) { throw "MSI signing failed status=$($r.Status)" }
+    if ($trusted -and $r.Status -ne 'Valid') { throw "lab signer trusted but MSI signature still $($r.Status)" }
+}
+
+# ---- verify every shipped artifact carries a (lab) signature ----
+$sigStatus = @{}
+foreach ($f in @($msiPath,
+                 (Join-Path $payloadDir "endpoint-agent.exe"),
+                 (Join-Path $payloadDir "install.ps1"),
+                 (Join-Path $payloadDir "uninstall.ps1"),
+                 (Join-Path $payloadDir "bootstrap-package.ps1"),
+                 (Join-Path $payloadDir "run-agent-install.ps1"))) {
+    $s = Get-AuthenticodeSignature -FilePath $f
+    $sigStatus[(Split-Path -Leaf $f)] = "$($s.Status)"
+    Step ("sig {0,-26} -> {1}" -f (Split-Path -Leaf $f), $s.Status)
+    if ($SelfSign) {
+        if ("$($s.Status)" -notin @('Valid', 'UnknownError')) { throw "bad signature on $f : $($s.Status)" }
+        if ($trusted -and "$($s.Status)" -ne 'Valid')         { throw "trusted signer but $f signature $($s.Status)" }
+    }
 }
 
 # ---- manifest (one manifest: MSI + EXE + PS1, lab tier) ----
@@ -132,6 +152,8 @@ $manifest = [ordered]@{
     product_version = $msiVersion
     source_version  = $Version
     built_at_utc  = (Get-Date).ToUniversalTime().ToString("o")
+    signer_thumbprint = if ($cert) { $cert.Thumbprint } else { $null }
+    signatures = $sigStatus
     files = @{}
 }
 foreach ($f in @($msiPath, (Join-Path $payloadDir "endpoint-agent.exe"),

@@ -143,10 +143,18 @@ function Wait-AgentProcessExit {
         [string]$InstallPath,
         [int]$TimeoutSeconds = 30
     )
+    # Directory-boundary prefix so "C:\Program Files\EndpointAgent" does NOT also
+    # match a sibling like "...\EndpointAgentSomething". Normalize + require the
+    # resolved process path to sit under "<InstallPath>\". Unreadable .Path
+    # (protected/unrelated process) => treated as not-ours (safer than fail-closed).
+    $normRoot = ([System.IO.Path]::GetFullPath($InstallPath)).TrimEnd('\') + '\'
     $isOurs = {
         param($p)
-        try { $p.Path -and $p.Path.StartsWith($InstallPath, [System.StringComparison]::OrdinalIgnoreCase) }
-        catch { $false }
+        try {
+            if ([string]::IsNullOrWhiteSpace($p.Path)) { return $false }
+            $full = [System.IO.Path]::GetFullPath($p.Path)
+            return $full.StartsWith($normRoot, [System.StringComparison]::OrdinalIgnoreCase)
+        } catch { return $false }
     }
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
