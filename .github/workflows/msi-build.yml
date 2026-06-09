@@ -213,9 +213,9 @@ jobs:
           # A service with an open SCM handle lingers in 'marked for deletion' until
           # the last handle closes; tolerate that (not Running) as effectively removed.
           if ($svc -and $svc.Status -eq 'Running') { throw "service still RUNNING after uninstall" }
-          # default uninstall PRESERVES credential/config (Codex cond.6)
-          if (-not (Test-Path "C:\ProgramData\EndpointAgent\credential.dat")) { throw "uninstall wiped credential.dat (should preserve by default)" }
-          Write-Host "OK uninstall removed service + preserved credential (default)"
+          # default uninstall PRESERVES the canonical credential/config (Codex cond.6)
+          if (-not (Test-Path "C:\ProgramData\EndpointAgent\config\hmac-credential.dpapi")) { throw "uninstall wiped hmac-credential.dpapi (should preserve by default)" }
+          Write-Host "OK uninstall removed service + preserved canonical credential (default)"
 
       - name: Smoke — failed upgrade preserves old version + recovers (Codex cond.4)
         shell: pwsh
