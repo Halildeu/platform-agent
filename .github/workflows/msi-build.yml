@@ -257,18 +257,19 @@ jobs:
           Write-Host "OK recovery: a valid re-run installed v0.1.4"
           Start-Process msiexec -ArgumentList @("/x","`"$msi4`"","/qn") -Wait | Out-Null
 
-      - name: Smoke — signing-mode guards (AG-018, no Azure needed)
+      - name: Smoke — signing-mode guards (AG-018 Linux pivot)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # FAIL-CLOSED: trusted (AD CS) mode WITHOUT ADCS_* env MUST throw
-          # (never ship unsigned-as-production). Runs on the lab runner; no AD CS.
+          # FAIL-CLOSED: -SigningMode trusted is REMOVED from this script (signing
+          # moved to the Linux pipeline, release-msi-signed.yml). It MUST throw —
+          # build-msi.ps1 never produces a production/in-Windows-signed MSI.
           $threw = $false
           try {
             .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
               -Version "0.1.5" -SigningMode trusted -OutputDir (Join-Path (Get-Location) "msi-out-tc")
-          } catch { $threw = $true; Write-Host "expected fail-closed throw: $($_.Exception.Message)" }
-          if (-not $threw) { throw "FAIL-CLOSED FAIL: trusted (AD CS) mode without ADCS_* did not throw" }
+          } catch { $threw = $true; Write-Host "expected removed-mode throw: $($_.Exception.Message)" }
+          if (-not $threw) { throw "FAIL-CLOSED FAIL: -SigningMode trusted did not throw (must be removed)" }
           # none mode: build unsigned, manifest production=false + signing_tier=unsigned
           .\installers\windows\msi\build-msi.ps1 -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
             -Version "0.1.6" -SigningMode none -OutputDir (Join-Path (Get-Location) "msi-out-none")

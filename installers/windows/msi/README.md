@@ -79,22 +79,25 @@ wix extension add -g WixToolset.Util.wixext
 # -> out\EndpointAgent-0.1.1-lab.msi + out\msi-build-manifest.json (production=false)
 ```
 
-`-SigningMode` selects the tier: `lab` (default, self-signed, `production=false`), `trusted` (**AD CS internal**, `production=true` — see below), or `none` (unsigned).
+`-SigningMode` selects the tier: `lab` (default, self-signed, `production=false`) or `none` (unsigned — what the release pipeline uses before Linux signing). `trusted` is **removed** here (signing moved to the Linux pipeline; passing it throws).
 
-## Trusted signing activation (Faz 22.2 / AG-018) — AD CS, FREE
+## Trusted signing activation (Faz 22.2 / AG-018) — Linux internal CA, FREE
 
-> **Owner decision: NO paid services → Azure Trusted Signing (pay-as-you-go) is EXCLUDED.** The production trust path is an **AD CS internal code-signing cert** — Windows Server Enterprise CA, **$0, built-in** (ADR-0029). The cert + private key live on a **self-hosted Windows signing runner** (PFX-in-GitHub FORBIDDEN). Trust is **internal/AD-domain** (the AD CS root reaches domain machines' Trusted Publisher via GPO — free); it is NOT public Windows trust.
+> **Owner decisions (2026-06-10): NO paid services AND NO Windows Server / AD CS.** The production trust path signs on a **self-hosted LINUX runner** with `osslsigncode` and an **internal 2-tier OpenSSL CA** — `$0`, no Windows Server, no Azure. The private key NEVER leaves that host and is NEVER a GitHub secret (PFX-in-GitHub FORBIDDEN): the runner user calls a **sudoers-pinned wrapper** (`codesign-sign`) that reads the `0400` leaf key as a dedicated `codesign` user. Trust is **internal** (the root reaches Windows machines via the agent installer importing it — TOFU — for domain-joined AND workgroup boxes alike); it is NOT public Windows trust.
 
-The `.github/workflows/release-msi-adcs.yml` workflow is a **ready-but-inert skeleton**: it stays skipped (visible `::notice::`) until the operator enables it, and `build-msi.ps1 -SigningMode trusted` is **fail-closed** (throws if `ADCS_*` is unset — never ships unsigned-as-production). No PFX / secret — the key never leaves the runner's machine store.
+The pipeline builds where Windows tools live, signs on Linux, verifies on Windows:
 
-**Operator activation** (free — no billing anywhere):
+- `.github/workflows/release-msi-signed.yml` — `config-check` (always; visible `::notice::` when unconfigured) → `build-unsigned` (windows-hosted, `-SigningMode none`) → `sign` (self-hosted `[linux,signing]`, `osslsigncode` via the pinned wrapper, RFC3161 timestamp, fail-closed) → `verify-windows` (windows-hosted, `signtool verify /pa` + **independent chain-to-pinned-root** + thumbprint allowlist → only then manifest `production=true`).
+- `scripts/codesign/generate-ca.sh` (2-tier CA: root `CA:TRUE,pathlen:0`, no EKU; leaf `codeSigning` EKU), `install-signing-host.sh` (osslsigncode + pinned wrapper + sudoers), `codesign-sign.sh` (the wrapper).
 
-1. **AD CS Code Signing cert** (duplicate the "Code Signing" template on the corp Enterprise CA, `CN=EndpointAgent CodeSign`) enrolled into the signing runner's `LocalMachine\My` with a **non-exportable** private key.
-2. A dedicated **self-hosted runner** labelled `[self-hosted, windows, signing]`, AD-joined, with the Windows SDK `signtool` + WiX.
-3. **Repo variables** (non-secret — thumbprints/URLs aren't secrets; the key is on the runner): `ADCS_SIGNING_ENABLED=true`, `ADCS_SIGNING_CERT_THUMBPRINT`, `ADCS_THUMBPRINT_ALLOWLIST` (CSV), `ADCS_TIMESTAMP_URL` (free public option `http://timestamp.digicert.com`).
+**Operator activation** (free — no billing, no Windows Server anywhere):
+
+1. Run `generate-ca.sh` + `install-signing-host.sh` on the Linux signing host (staging-sw) — creates the CA, the `codesign`/`gh-runner` users, the `0400` keys, and the sudoers-pinned wrapper.
+2. A dedicated **self-hosted runner** labelled `[self-hosted, linux, signing]`, running as `gh-runner`.
+3. **Repo variables** (non-secret — thumbprints/SHA256/URLs are public pins; the key is on the host): `CODESIGN_ENABLED=true`, `CODESIGN_LEAF_THUMBPRINT_ALLOWLIST` (SHA1 CSV), `CODESIGN_ROOT_CERT_SHA256` (pin), `CODESIGN_TIMESTAMP_URL` (free `http://timestamp.digicert.com`).
 4. **GitHub environment** `trusted-signing-prod` with **required reviewers** + a **protected-tag ruleset** (`v*.*.*`).
 
-Then a clean `v0.2.0` tag (no `-lab`/`-rc`, on `main`) → `release-msi-adcs.yml` runs on the self-hosted runner → `build-msi.ps1 -SigningMode trusted` **pre-flights the cert** (private key, validity, Code-Signing EKU, thumbprint allowlist, chain) → signs the MSI + the 5 staged files with `signtool /sm /sha1 <thumbprint> /tr <TSA> /td SHA256 /fd SHA256` → **verifies each with `signtool verify /pa`** (no import) + RFC3161 timestamp + signer-thumbprint allowlist → manifest `production=true` / `signing_tier=trusted-adcs` / `trust_scope=internal-ad-domain` / `publicly_trusted=false`. The lab `msi-build.yml` is untouched and a CI guard asserts the fail-closed behavior. AppLocker/WDAC/EDR signer preflight (the AD CS root in Trusted Publisher via GPO) + GPO domain pilot remain separate operator/domain gates.
+Then a clean `v0.2.0` tag (no `-lab`/`-rc`, on `main`) activates `release-msi-signed.yml` → manifest `production=true` / `signing_tier=trusted-internal-ca` / `trust_scope=installer-imported-internal-ca` / `publicly_trusted=false`. Key custody is **host-fs-restricted** (pre-prod exception, Codex 019eb0dd); Vault Transit/HSM is a follow-up phase (board platform-agent#132). Installer root import (TOFU) is a separate PR; AppLocker/WDAC/EDR signer preflight + GPO domain pilot remain separate operator/domain gates.
 
 ## Install / GPO
 
