@@ -1,0 +1,296 @@
+# =============================================================================
+# AG-018 — Trusted-signed MSI release (Linux osslsigncode + internal CA, FREE).
+#
+# Owner decisions (2026-06-10): NO paid services, NO Windows Server / AD CS.
+# Signing happens on a self-hosted LINUX runner (staging-sw) with osslsigncode
+# and an internal 2-tier OpenSSL CA. The private key NEVER leaves that host and
+# is NEVER a GitHub secret (PFX-in-GitHub FORBIDDEN): the runner user calls a
+# sudoers-pinned wrapper (`codesign-sign`) that reads the 0400 leaf key as a
+# dedicated `codesign` user. Trust reaches Windows via the agent installer
+# importing the internal root (TOFU) — domain-joined AND workgroup alike.
+#
+# Pipeline (build where Windows tools live, sign on Linux, verify on Windows):
+#   config-check   (ubuntu, always)        — make "not configured" VISIBLE
+#   build-unsigned (windows-hosted)        — ancestor-of-main guard + WiX MSI, -SigningMode none
+#   sign           (self-hosted linux)     — osslsigncode via pinned wrapper, RFC3161 ts, fail-closed
+#   verify-windows (windows-hosted)        — ephemeral root import + signtool /pa
+#                                            + INDEPENDENT chain-to-pinned-root + thumbprint allowlist
+#                                            → only then manifest production=true
+#
+# Key custody (Codex 019eb0dd, pre-prod exception): host-fs-restricted, NOT
+# Vault-backed yet — Vault Transit/HSM is a FOLLOW-UP phase (board platform-agent#132).
+#
+# Activation (operator):
+#   Repo VARIABLES (non-secret — thumbprints/SHA256/URLs are public pins; the key
+#   is on the runner): CODESIGN_ENABLED=true, CODESIGN_LEAF_THUMBPRINT_ALLOWLIST
+#   (SHA1 CSV), CODESIGN_ROOT_CERT_SHA256 (pin), CODESIGN_TIMESTAMP_URL
+#   (free: http://timestamp.digicert.com).
+#   A self-hosted runner labelled [self-hosted, linux, signing] on staging-sw,
+#   provisioned by scripts/codesign/install-signing-host.sh, running as gh-runner.
+#   GitHub environment `trusted-signing-prod` with required reviewers + protected
+#   v*.*.* tag ruleset.
+# =============================================================================
+name: AG-018 Trusted MSI release (Linux internal-CA)
+
+on:
+  push:
+    tags: ["v*.*.*"]          # semver; jobs reject any prerelease (-lab/-rc)
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build+sign (e.g. 0.2.0); must be a clean a.b.c"
+        required: true
+  # NO pull_request trigger — a PR must never reach the self-hosted signing runner.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trusted-msi-signed-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Always runs — makes "not configured" VISIBLE (no silent skip) and gates the rest.
+  config-check:
+    name: Code-signing config check
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.c.outputs.configured }}
+    steps:
+      - id: c
+        shell: bash
+        env:
+          ENABLED: ${{ vars.CODESIGN_ENABLED }}
+          ALLOW: ${{ vars.CODESIGN_LEAF_THUMBPRINT_ALLOWLIST }}
+          ROOT: ${{ vars.CODESIGN_ROOT_CERT_SHA256 }}
+          TSA: ${{ vars.CODESIGN_TIMESTAMP_URL }}
+        run: |
+          if [ "$ENABLED" = "true" ] && [ -n "$ALLOW" ] && [ -n "$ROOT" ] && [ -n "$TSA" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Code-signing enabled — sign job will run on the self-hosted [linux,signing] runner."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Code-signing NOT configured/enabled — set CODESIGN_ENABLED=true + CODESIGN_* vars and stand up the [self-hosted,linux,signing] runner (scripts/codesign/install-signing-host.sh). Skipping; no signed MSI produced. Paid services (Azure Trusted Signing) EXCLUDED by owner decision."
+          fi
+
+  build-unsigned:
+    name: Build unsigned MSI (windows-hosted)
+    needs: config-check
+    if: >-
+      needs.config-check.outputs.configured == 'true' &&
+      github.repository == 'Halildeu/platform-agent' &&
+      ((github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-')) ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Confused-deputy guard: build ref (tag push OR dispatch) must be on main —
+      # runs UNCONDITIONALLY so a dispatch from a feature branch can't get signed.
+      - name: Guard — build commit must be an ancestor of origin/main
+        shell: pwsh
+        run: |
+          git fetch origin main --quiet
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::ref $($env:GITHUB_REF_NAME) ($($env:GITHUB_SHA)) is not on origin/main — refusing to build a release for an off-main ref"
+            exit 1
+          }
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { $v = "${{ github.event.inputs.version }}" } else { $v = ($env:GITHUB_REF_NAME -replace '^v','') }
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { Write-Host "::error::version '$v' must be a clean a.b.c (no prerelease) for a trusted release"; exit 1 }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release agent exe
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
+          go build -ldflags "-s -w -X platform-agent/internal/config.BuildVersion=$v" -o out\endpoint-agent.exe .\cmd\endpoint-agent
+
+      - name: WiX v4 toolset (idempotent)
+        shell: pwsh
+        run: |
+          dotnet tool update --global wix --version 4.0.5
+          wix extension add -g WixToolset.Util.wixext/4.0.5
+
+      - name: Build UNSIGNED MSI (sign-last; Linux runner signs next)
+        shell: pwsh
+        run: |
+          .\installers\windows\msi\build-msi.ps1 `
+            -AgentExe (Resolve-Path .\out\endpoint-agent.exe) `
+            -Version "${{ steps.ver.outputs.version }}" `
+            -SigningMode none `
+            -OutputDir (Join-Path (Get-Location) "msi-out")
+
+      - name: Assert unsigned + production=false (sign happens on Linux)
+        shell: pwsh
+        run: |
+          $m = Get-Content msi-out\msi-build-manifest.json -Raw | ConvertFrom-Json
+          if ($m.production) { throw "unsigned build must not claim production=true" }
+          Write-Host "OK unsigned MSI staged for Linux signing: $($m.msi_file)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-agent-msi-unsigned
+          path: |
+            msi-out/*.msi
+            msi-out/msi-build-manifest.json
+          if-no-files-found: error
+
+  sign:
+    name: Sign MSI (self-hosted linux internal-CA)
+    needs: build-unsigned
+    runs-on: [self-hosted, linux, signing]
+    environment: trusted-signing-prod   # required-reviewers + protected-tags gate
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: endpoint-agent-msi-unsigned
+          path: incoming
+
+      - name: Sign via pinned wrapper (key never leaves host; RFC3161; fail-closed)
+        shell: bash
+        env:
+          CODESIGN_TIMESTAMP_URL: ${{ vars.CODESIGN_TIMESTAMP_URL }}
+        run: |
+          set -euo pipefail
+          WORK=/var/lib/codesign/work
+          # unique per-run subdir under the runner-writable work root
+          RUN_DIR="$WORK/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$RUN_DIR"
+          IN_MSI="$(ls incoming/*.msi | head -1)"
+          [ -n "$IN_MSI" ] || { echo "::error::no unsigned MSI in artifact"; exit 1; }
+          cp "$IN_MSI" "$RUN_DIR/in.msi"
+          OUT="$RUN_DIR/out.msi"
+          # the wrapper enforces arg/path/.msi/double-sign + fail-closed timestamp
+          sudo -n -u codesign /usr/local/bin/codesign-sign "$RUN_DIR/in.msi" "$OUT"
+          mkdir -p signed
+          cp "$OUT" "signed/$(basename "$IN_MSI")"
+          cp incoming/msi-build-manifest.json signed/msi-build-manifest.json
+          # clean the run dir: the wrapper output is codesign-owned, but the work
+          # dir is setgid root:codesign 2770 with NO sticky bit, and gh-runner is in
+          # the codesign group, so directory-write lets gh-runner remove it directly
+          # (the sudoers rule only permits the signing wrapper, never rm).
+          rm -f "$RUN_DIR/in.msi" "$OUT" || true
+          rmdir "$RUN_DIR" 2>/dev/null || true
+          echo "signed: signed/$(basename "$IN_MSI")"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-agent-msi-signed
+          path: signed/*
+          if-no-files-found: error
+
+  verify-windows:
+    name: Verify signature + emit production manifest (windows-hosted)
+    needs: [build-unsigned, sign]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4   # for the pinned root cert
+      - uses: actions/download-artifact@v4
+        with:
+          name: endpoint-agent-msi-signed
+          path: signed
+
+      - name: Verify (machine-gate) + independent chain-to-pinned-root
+        shell: pwsh
+        env:
+          ROOT_PIN: ${{ vars.CODESIGN_ROOT_CERT_SHA256 }}
+          ALLOW: ${{ vars.CODESIGN_LEAF_THUMBPRINT_ALLOWLIST }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = (Get-ChildItem signed\*.msi | Select-Object -First 1).FullName
+          $rootCer = "installers\windows\certs\acik-codesign-root.cer"
+
+          # --- independent pin (does NOT depend on import): repo root SHA256 must
+          #     equal the operator-set CODESIGN_ROOT_CERT_SHA256 variable ---
+          $repoRootSha = (Get-FileHash -Algorithm SHA256 $rootCer).Hash.ToUpper()
+          # the var pins the CERT fingerprint, not the file hash — compute cert sha256:
+          $rootCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $rootCer
+          $rootCertSha = ($rootCert.GetCertHashString('SHA256')).ToUpper()
+          if ($rootCertSha -ne $env:ROOT_PIN.ToUpper()) {
+            throw "pinned root mismatch: repo cert $rootCertSha != CODESIGN_ROOT_CERT_SHA256 $($env:ROOT_PIN)"
+          }
+          Write-Host "OK pinned root matches: $rootCertSha"
+
+          # --- ephemeral CI trust: import root to LocalMachine Root+TrustedPublisher
+          #     (this VM is thrown away; NOT a production-trust claim) ---
+          Import-Certificate -FilePath $rootCer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Import-Certificate -FilePath $rootCer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+
+          # --- signtool verify /pa (production trust policy) ---
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1).FullName
+          $out = & $signtool verify /pa /v $msi 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify /pa FAILED" }
+
+          # --- positive RFC3161 timestamp assertion (negative-phrase reject) ---
+          if ($out -notmatch '(?im)^\s*(The signature is timestamped:|Timestamp Verified by:)') {
+            throw "no positive RFC3161 timestamp evidence"
+          }
+          if ($out -match '(?i)\b(not timestamped|no timestamp)\b') { throw "negative timestamp phrase present" }
+
+          # --- Get-AuthenticodeSignature: Valid + signer thumbprint in allowlist
+          #     + signer chains to the pinned root ---
+          $sig = Get-AuthenticodeSignature $msi
+          if ($sig.Status -ne 'Valid') { throw "AuthenticodeSignature status = $($sig.Status)" }
+          if (-not $sig.TimeStamperCertificate) { throw "no TimeStamperCertificate" }
+          $signerSha1 = $sig.SignerCertificate.Thumbprint.ToUpper()
+          $allow = ($env:ALLOW -split '[,; ]+' | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ })
+          if ($allow -notcontains $signerSha1) { throw "signer thumbprint $signerSha1 not in allowlist" }
+          # independent chain build to the pinned root — Build() result IS checked
+          # (a false return means the chain did not build; don't trust the elements).
+          $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+          $chain.ChainPolicy.RevocationMode = 'NoCheck'
+          if (-not $chain.Build($sig.SignerCertificate)) {
+            $st = ($chain.ChainStatus | ForEach-Object { $_.StatusInformation.Trim() }) -join '; '
+            throw "signer chain did not build (status: $st)"
+          }
+          $chainRootSha = ($chain.ChainElements[$chain.ChainElements.Count-1].Certificate.GetCertHashString('SHA256')).ToUpper()
+          if ($chainRootSha -ne $env:ROOT_PIN.ToUpper()) { throw "signer chain root $chainRootSha != pinned root" }
+          Write-Host "OK signer=$signerSha1 chains to pinned root; timestamped; status Valid"
+
+          # --- emit production manifest (custody honest) ---
+          $m = Get-Content signed\msi-build-manifest.json -Raw | ConvertFrom-Json
+          # The manifest came from the UNSIGNED build; signing changed the MSI bytes,
+          # so its files[]/signatures[] entries are stale. Recompute the MSI hash and
+          # mark its signature Valid so the manifest describes the SHIPPED artifact.
+          $msiName = Split-Path $msi -Leaf
+          $msiHash = (Get-FileHash -Algorithm SHA256 $msi).Hash
+          if (-not $m.files)      { $m | Add-Member -Force NoteProperty files      ([pscustomobject]@{}) }
+          if (-not $m.signatures) { $m | Add-Member -Force NoteProperty signatures ([pscustomobject]@{}) }
+          $m.files      | Add-Member -Force NoteProperty $msiName $msiHash
+          $m.signatures | Add-Member -Force NoteProperty $msiName 'Valid'
+          $m | Add-Member -Force NoteProperty production       $true
+          $m | Add-Member -Force NoteProperty signing_tier     'trusted-internal-ca'
+          $m | Add-Member -Force NoteProperty trust_scope      'installer-imported-internal-ca'
+          $m | Add-Member -Force NoteProperty publicly_trusted $false
+          $m | Add-Member -Force NoteProperty timestamped      $true
+          $m | Add-Member -Force NoteProperty signer_thumbprint $signerSha1
+          $m | Add-Member -Force NoteProperty root_cert_sha256 $rootCertSha
+          $m | Add-Member -Force NoteProperty key_custody      'host-fs-restricted'
+          $m | Add-Member -Force NoteProperty vault_backed      $false
+          $m | Add-Member -Force NoteProperty wrapper_required  $true
+          $m | Add-Member -Force NoteProperty next_phase_plan  'vault-transit-or-hsm (platform-agent#132)'
+          $m | ConvertTo-Json -Depth 8 | Set-Content signed\msi-build-manifest.json -Encoding utf8
+          Write-Host "OK production manifest emitted (custody=host-fs-restricted, vault_backed=false)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-agent-msi-trusted
+          path: signed/*
+          if-no-files-found: error

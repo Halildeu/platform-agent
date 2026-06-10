@@ -1,45 +1,34 @@
 <#
 .SYNOPSIS
-  Build the Endpoint Agent MSI (Faz 22.5 M4) from a staged payload, with a tiered
-  signing model: lab self-signed (default), AD CS internal trusted (prod), or none.
+  Build the Endpoint Agent MSI (Faz 22.5 M4) from a staged payload. Two modes:
+  lab self-signed (non-prod, default) or none (unsigned, for the Linux pipeline).
 
 .DESCRIPTION
   Runs on a Windows host with the WiX v4 dotnet tool. Stages the payload (agent exe
-  + install/uninstall/bootstrap/run-agent-install ps1), signs per -SigningMode AFTER
-  any release patching (sign-last), builds the MSI via `wix build`, signs the MSI,
-  then verifies + emits a signing-tier manifest.
+  + install/uninstall/bootstrap/run-agent-install ps1), optionally lab-signs it
+  (sign-last), builds the MSI via `wix build`, lab-signs the MSI, then verifies +
+  emits a signing-tier manifest. This script NEVER produces a production build.
 
   SIGNING MODES (-SigningMode):
-    lab     (default) — ephemeral self-signed cert, imported to the local trust
-                        stores so Authenticode validates Valid. `production=false`.
-    trusted (Faz 22.2 / AG-018) — AD CS internal code-signing cert (Windows Server
-                        Enterprise CA, FREE; ADR-0029) on a self-hosted signing
-                        runner whose LocalMachine\My store holds the cert + private
-                        key (PFX-in-GitHub FORBIDDEN). FAIL-CLOSED: throws if any
-                        ADCS_* env is missing. The cert is PRE-FLIGHTED before
-                        signing (private key, validity, Code-Signing EKU, thumbprint
-                        allowlist, chain). Each artifact is signtool-verified with
-                        /pa (production trust policy, NO import) + RFC3161 timestamp
-                        + signer thumbprint allowlist; only then `production=true`.
-                        Trust is INTERNAL/AD-domain (not public Windows trust) — the
-                        AD CS root is distributed to domain machines' Trusted
-                        Publisher via GPO (free). Azure Trusted Signing (paid) is
-                        EXCLUDED by owner decision; see docs/22-2-trusted-signing-onboarding.md.
-    none    — build unsigned. `production=false`.
+    lab  (default) — ephemeral self-signed cert, imported to the local trust stores
+                     so Authenticode validates Valid. NON-PROD. `production=false`.
+    none           — build unsigned. The release pipeline uses this, then signs the
+                     built MSI on a self-hosted LINUX runner (osslsigncode + internal
+                     OpenSSL CA) and stamps `production=true` only after a windows-
+                     hosted `signtool verify /pa` + pinned-root chain gate.
+    trusted        — REMOVED (AG-018 Linux pivot, owner: no paid services / no AD CS
+                     / no Windows Server). Passing it throws with a pointer to
+                     release-msi-signed.yml + scripts/codesign.
 
-  Trusted (AD CS) mode env (set by the self-hosted release-msi-adcs workflow; NO
-  PFX/secret — the cert lives in the runner's machine store):
-    ADCS_SIGNING_CERT_THUMBPRINT   preferred — exact signer (signtool /sha1)
-    ADCS_SIGNING_CERT_SUBJECT      fallback CN (UNIQUE match only; the release-msi-adcs
-                                   workflow uses thumbprint — subject is for local/manual debug)
-    ADCS_THUMBPRINT_ALLOWLIST      CSV of allowed signer thumbprints (required)
-    ADCS_TIMESTAMP_URL             RFC3161 TSA (required; free public option:
-                                   http://timestamp.digicert.com)
+  Production signing lives entirely in the Linux pipeline; see
+  .github/workflows/release-msi-signed.yml, scripts/codesign/*, and
+  docs/22-2-trusted-signing-onboarding.md.
 
 .NOTES
   Codex 019ead14: sign-last (no post-sign mutation; manifest written AFTER signing),
-  one manifest for MSI+EXE+PS1, fail-closed trusted, cert preflight BEFORE signing,
-  /pa + timestamp + thumbprint allowlist = production gate, internal trust scope.
+  one manifest for MSI+EXE+PS1. AG-018 (Codex 019eb0dd): in-Windows AD CS signing
+  replaced by Linux osslsigncode + internal CA; production=true is stamped only by
+  the verify-windows gate, never here.
 #>
 [CmdletBinding()]
 param(
@@ -75,81 +64,18 @@ $parts = $msiVersion -split '\.'
 if ($parts.Count -lt 3) { throw "Version '$Version' must have at least 3 numeric fields" }
 $msiVersion = ("{0}.{1}.{2}" -f $parts[0], $parts[1], $parts[2])
 
-$tierTag = switch ($SigningMode) { 'lab' { 'lab' } 'trusted' { 'signed' } default { 'unsigned' } }
+$tierTag = switch ($SigningMode) { 'lab' { 'lab' } default { 'unsigned' } }
 Step "MSI ProductVersion = $msiVersion (from $Version); SigningMode=$SigningMode tierTag=$tierTag"
 
-$CODE_SIGNING_EKU = '1.3.6.1.5.5.7.3.3'
-
-# Resolve + PRE-FLIGHT the AD CS signing cert BEFORE any signing (Codex: don't sign
-# with a wrong cert then fail). Returns the validated X509Certificate2.
-function Resolve-AdcsSigningCert {
-    param([string]$Thumbprint, [string]$Subject, [string[]]$Allowlist)
-    $candidates = @()
-    if ($Thumbprint) {
-        $tp = ($Thumbprint -replace '\s', '').ToUpperInvariant()
-        $candidates = @(Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Thumbprint.ToUpperInvariant() -eq $tp })
-        if ($candidates.Count -ne 1) { throw "ADCS: exactly one LocalMachine\My cert must match thumbprint $tp (found $($candidates.Count))" }
-    } else {
-        $candidates = @(Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -like "*$Subject*" })
-        if ($candidates.Count -ne 1) { throw "ADCS: subject '$Subject' must match EXACTLY ONE LocalMachine\My cert (found $($candidates.Count)); use ADCS_SIGNING_CERT_THUMBPRINT" }
-    }
-    $c = $candidates[0]
-    if (-not $c.HasPrivateKey)                       { throw "ADCS: signer cert has no private key ($($c.Thumbprint))" }
-    if ($c.NotAfter -lt (Get-Date))                  { throw "ADCS: signer cert expired $($c.NotAfter) ($($c.Thumbprint))" }
-    if ($c.NotBefore -gt (Get-Date))                 { throw "ADCS: signer cert not yet valid $($c.NotBefore)" }
-    # Code Signing EKU REQUIRED — an EKU-less ("any purpose") cert must NOT pass.
-    $ekuExt = $c.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
-    if (-not $ekuExt) { throw "ADCS: signer cert has no EKU extension; Code Signing EKU ($CODE_SIGNING_EKU) is required" }
-    $ekuOids = @($ekuExt.EnhancedKeyUsages | ForEach-Object { $_.Value })
-    if ($ekuOids -notcontains $CODE_SIGNING_EKU) { throw "ADCS: signer cert EKU lacks Code Signing ($CODE_SIGNING_EKU); has: $($ekuOids -join ',')" }
-    if ($Allowlist -and ($Allowlist -notcontains $c.Thumbprint.ToUpperInvariant())) {
-        throw "ADCS: signer thumbprint $($c.Thumbprint) NOT in ADCS_THUMBPRINT_ALLOWLIST"
-    }
-    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-    if (-not $chain.Build($c)) { throw "ADCS: signer cert chain does not build: $(($chain.ChainStatus | ForEach-Object { $_.StatusInformation.Trim() }) -join '; ')" }
-    Step "ADCS preflight OK: thumbprint=$($c.Thumbprint) subject='$($c.Subject)' issuer='$($c.Issuer)' notAfter=$($c.NotAfter)"
-    return $c
-}
-
-# ---- trusted-mode config (fail-closed) ----
-$adcs = $null
+# ---- trusted signing moved OFF Windows (AG-018 Linux pivot, owner: no paid / no AD CS) ----
+# Authenticode signing no longer happens here. The release pipeline builds an
+# UNSIGNED MSI on the Windows runner (-SigningMode none) and signs it on a
+# self-hosted LINUX runner with osslsigncode + an internal OpenSSL CA, then a
+# windows-hosted gate runs `signtool verify /pa` and stamps the production
+# manifest. See .github/workflows/release-msi-signed.yml and
+# scripts/codesign/*. -SigningMode 'trusted' is therefore REMOVED here.
 if ($SigningMode -eq 'trusted') {
-    $tp   = $env:ADCS_SIGNING_CERT_THUMBPRINT
-    $subj = $env:ADCS_SIGNING_CERT_SUBJECT
-    $tsa  = $env:ADCS_TIMESTAMP_URL
-    $allowRaw = $env:ADCS_THUMBPRINT_ALLOWLIST
-    if ([string]::IsNullOrWhiteSpace($tp) -and [string]::IsNullOrWhiteSpace($subj)) {
-        throw "trusted (AD CS) NOT configured — set ADCS_SIGNING_CERT_THUMBPRINT (preferred) or ADCS_SIGNING_CERT_SUBJECT. See docs/22-2-trusted-signing-onboarding.md."
-    }
-    if ([string]::IsNullOrWhiteSpace($allowRaw)) { throw "trusted (AD CS) NOT configured — ADCS_THUMBPRINT_ALLOWLIST required" }
-    if ([string]::IsNullOrWhiteSpace($tsa))      { throw "trusted (AD CS) NOT configured — ADCS_TIMESTAMP_URL required (e.g. http://timestamp.digicert.com)" }
-    $allow = @($allowRaw -split '[,; ]+' | Where-Object { $_ } | ForEach-Object { ($_ -replace '\s', '').ToUpperInvariant() })
-    $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)?.Source
-    if (-not $signtool) {
-        $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
-            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
-    }
-    if (-not $signtool) { throw "signtool.exe not found (install the Windows SDK signing tools on the self-hosted runner)" }
-    $cert = Resolve-AdcsSigningCert -Thumbprint $tp -Subject $subj -Allowlist $allow
-    $adcs = @{ Signtool = $signtool; Thumbprint = $cert.Thumbprint; Tsa = $tsa; Allow = $allow; Cert = $cert }
-}
-
-# Sign + verify ONE artifact via the AD CS cert. Production gate: signtool verify /pa
-# (no import) + RFC3161 timestamp + signer thumbprint in the allowlist.
-function Invoke-AdcsSign {
-    param([string]$File, [hashtable]$Cfg)
-    & $Cfg.Signtool sign /v /sm /sha1 $Cfg.Thumbprint /fd SHA256 /tr $Cfg.Tsa /td SHA256 $File | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "AD CS sign failed (exit $LASTEXITCODE) for $File" }
-    $out = (& $Cfg.Signtool verify /pa /v $File 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) { throw "signtool verify /pa FAILED for $File`n$out" }
-    if ($out -match '(?i)\b(not timestamped|no timestamp)\b') { throw "signature is NOT timestamped for $File`n$out" }
-    if ($out -notmatch '(?im)^\s*(The signature is timestamped:|Timestamp Verified by:)') { throw "no positive RFC3161 timestamp evidence for $File`n$out" }
-    $auth = Get-AuthenticodeSignature -FilePath $File
-    if (-not $auth.TimeStamperCertificate) { throw "no timestamper certificate on $File" }
-    if (-not $auth.SignerCertificate -or ($Cfg.Allow -notcontains $auth.SignerCertificate.Thumbprint.ToUpperInvariant())) {
-        throw "signer thumbprint $($auth.SignerCertificate.Thumbprint) NOT in allowlist for $File"
-    }
-    Step ("AD CS-signed + /pa-verified + timestamped {0}" -f (Split-Path -Leaf $File))
+    throw "SigningMode 'trusted' (in-Windows AD CS signing) is REMOVED. Signing now runs on the Linux signing runner (release-msi-signed.yml + scripts/codesign). Build with -SigningMode none here; the pipeline signs afterwards."
 }
 
 # ---- stage payload ----
@@ -198,10 +124,8 @@ if ($SigningMode -eq 'lab') {
         if ("$($r.Status)" -notin @('Valid', 'UnknownError')) { throw "sign failed status=$($r.Status) for $f" }
         if ($labTrusted -and $r.Status -ne 'Valid') { throw "lab signer trusted but $f signature $($r.Status)" }
     }
-} elseif ($SigningMode -eq 'trusted') {
-    foreach ($f in $payloadToSign) { Invoke-AdcsSign -File $f -Cfg $adcs }
 } else {
-    Step "SigningMode=none — payload left unsigned"
+    Step "SigningMode=none — payload left unsigned (Linux pipeline signs the built MSI)"
 }
 
 # ---- build MSI ----
@@ -224,8 +148,6 @@ if ($SigningMode -eq 'lab' -and $labCert) {
     Step "MSI lab signature -> $($r.Status)"
     if ("$($r.Status)" -notin @('Valid', 'UnknownError')) { throw "MSI signing failed status=$($r.Status)" }
     if ($labTrusted -and $r.Status -ne 'Valid') { throw "lab signer trusted but MSI signature $($r.Status)" }
-} elseif ($SigningMode -eq 'trusted') {
-    Invoke-AdcsSign -File $msiPath -Cfg $adcs
 }
 
 # ---- verify every shipped artifact + collect signature status ----
@@ -243,26 +165,24 @@ foreach ($f in $allArtifacts) {
     if ($SigningMode -eq 'lab') {
         if ("$($s.Status)" -notin @('Valid', 'UnknownError')) { throw "bad signature on $f : $($s.Status)" }
         if ($labTrusted -and "$($s.Status)" -ne 'Valid')       { throw "trusted signer but $f signature $($s.Status)" }
-    } elseif ($SigningMode -eq 'trusted') {
-        if ("$($s.Status)" -ne 'Valid') { throw "trusted artifact $f Authenticode status $($s.Status) (expected Valid on the signing runner)" }
     }
 }
 
-# production=true ONLY for a fully verified AD CS trusted build.
-$isProduction = ($SigningMode -eq 'trusted')
-$signingTier  = switch ($SigningMode) { 'lab' { 'lab-self-signed' } 'trusted' { 'trusted-adcs' } default { 'unsigned' } }
+# This script never produces a production build: -SigningMode lab is non-prod and
+# none is unsigned. The Linux signing pipeline's verify-windows gate is the ONLY
+# place that stamps production=true (after signtool /pa + pinned-root chain).
+$isProduction = $false
+$signingTier  = switch ($SigningMode) { 'lab' { 'lab-self-signed' } default { 'unsigned' } }
 
 # ---- manifest (written AFTER all signing; signed artifacts NOT mutated after) ----
-$signerCert = if ($SigningMode -eq 'trusted') { $adcs.Cert } else { $labCert }
+$signerCert = $labCert
 $manifest = [ordered]@{
     artifact_kind   = "endpoint-agent-msi"
     signing_tier    = $signingTier
     production      = $isProduction
-    # AD CS = internal/AD-domain trust, NOT public Windows trust (Codex). The AD CS
-    # root must be distributed to domain machines' Trusted Publisher via GPO (free).
-    trust_scope     = if ($SigningMode -eq 'trusted') { 'internal-ad-domain' } else { 'lab-only' }
+    trust_scope     = if ($SigningMode -eq 'lab') { 'lab-only' } else { 'unsigned' }
     publicly_trusted = $false
-    requires_trusted_publisher_gpo = ($SigningMode -eq 'trusted')
+    requires_trusted_publisher_gpo = $false
     product_version = $msiVersion
     source_version  = $Version
     built_at_utc    = (Get-Date).ToUniversalTime().ToString("o")
@@ -271,8 +191,8 @@ $manifest = [ordered]@{
     signer_issuer   = if ($signerCert) { "$($signerCert.Issuer)" } else { $null }
     signer_not_after = if ($signerCert) { $signerCert.NotAfter.ToUniversalTime().ToString("o") } else { $null }
     signatures      = $sigStatus
-    timestamp_url   = if ($SigningMode -eq 'trusted') { $adcs.Tsa } else { $null }
-    timestamped     = ($SigningMode -eq 'trusted')
+    timestamp_url   = $null
+    timestamped     = $false
     files           = @{}
 }
 foreach ($f in $allArtifacts) { $manifest.files[(Split-Path -Leaf $f)] = (Get-FileHash $f -Algorithm SHA256).Hash }
