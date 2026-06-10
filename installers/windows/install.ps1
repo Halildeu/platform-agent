@@ -164,8 +164,8 @@ function Import-CodesignRoot {
     )
     if ($Tier -ne "trusted-internal-ca") { return }   # tier-gated; other tiers untouched
 
-    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
-        ,[Convert]::FromBase64String($script:CodesignRootCertB64))
+    $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        [Convert]::FromBase64String($script:CodesignRootCertB64))
     $actualSha = $cert.GetCertHashString("SHA256").ToUpperInvariant()
     $expectSha = ($ExpectedSha256 -replace '\s', '').ToUpperInvariant()
 
