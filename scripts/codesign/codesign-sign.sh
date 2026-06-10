@@ -5,13 +5,15 @@
 # The self-hosted runner user (`gh-runner`) can NEVER read the leaf private key.
 # It may only invoke THIS wrapper via a pinned sudoers rule:
 #   gh-runner ALL=(codesign) NOPASSWD: /usr/local/bin/codesign-sign
-# The wrapper signs ONE caller-provided MSI and writes ONE output MSI. The key
-# stays 0400 codesign:codesign and is read only inside this process.
+# The wrapper signs ONE caller-provided Windows binary (MSI or PE: .exe/.dll) and
+# writes ONE output of the same type. The key stays 0400 codesign:codesign and is
+# read only inside this process.
 #
-# Hardening (Codex 019eb0dd):
-#   - exactly two positional args: <in.msi> <out.msi>; nothing else accepted
+# Hardening (Codex 019eb0dd + 019eb20c):
+#   - exactly two positional args: <in> <out>; nothing else accepted
 #   - both paths confined to an allowed work root (no path traversal / abs escape)
-#   - input must be a regular file ending .msi; output dir must already exist
+#   - input is a regular file with a .msi/.exe/.dll extension AND a matching magic
+#     byte (PE "MZ" / MSI OLE2) so a misnamed input can't be signed; out matches ext
 #   - osslsigncode is the only signing binary; pinned absolute path
 #   - timestamp is REQUIRED (fail-closed: no TSA reply => no signature => exit!=0)
 #   - re-verify with osslsigncode before returning; refuse double-sign
@@ -36,7 +38,7 @@ umask 002
 die() { echo "codesign-sign: $*" >&2; exit 1; }
 
 # --- strict arg contract -----------------------------------------------------
-[ "$#" -eq 2 ] || die "usage: codesign-sign <in.msi> <out.msi> (got $# args)"
+[ "$#" -eq 2 ] || die "usage: codesign-sign <in.{msi,exe,dll}> <out.same-ext> (got $# args)"
 IN="$1"; OUT="$2"
 
 # --- path confinement (resolve, then assert under WORK_ROOT) ------------------
@@ -46,9 +48,17 @@ WORK_R="$(canon "$WORK_ROOT")"
 case "$IN_R/"  in "$WORK_R"/*) : ;; *) die "input escapes work root: $IN_R" ;; esac
 case "$OUT_R/" in "$WORK_R"/*) : ;; *) die "output escapes work root: $OUT_R" ;; esac
 [ "$IN_R" != "$OUT_R" ] || die "in and out must differ"
-case "$IN_R"  in *.msi) : ;; *) die "input must be .msi" ;; esac
-case "$OUT_R" in *.msi) : ;; *) die "output must be .msi" ;; esac
+# Accept Windows MSI or PE (.exe/.dll); in and out must share the extension.
+case "$IN_R"  in *.msi) EXT=msi ;; *.exe) EXT=exe ;; *.dll) EXT=dll ;; *) die "input must be .msi/.exe/.dll" ;; esac
+case "$OUT_R" in *."$EXT") : ;; *) die "output extension must match input (.$EXT)" ;; esac
 [ -f "$IN_R" ] || die "input not a regular file: $IN_R"
+# Magic-byte type check so a misnamed input can't be signed (Codex 019eb20c):
+#   PE (.exe/.dll) starts with "MZ" (4D5A); MSI is an OLE2 compound (D0CF11E0...).
+MAGIC="$(head -c 8 "$IN_R" | xxd -p 2>/dev/null | head -c 16)"
+case "$EXT" in
+  exe|dll) case "$MAGIC" in 4d5a*) : ;; *) die "input .$EXT is not a PE binary (magic=$MAGIC)" ;; esac ;;
+  msi)     case "$MAGIC" in d0cf11e0a1b11ae1) : ;; *) die "input .msi is not an OLE2/MSI (magic=$MAGIC)" ;; esac ;;
+esac
 [ -d "$(dirname "$OUT_R")" ] || die "output dir missing: $(dirname "$OUT_R")"
 [ ! -e "$OUT_R" ] || die "output already exists (refusing overwrite): $OUT_R"
 
