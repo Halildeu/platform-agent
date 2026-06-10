@@ -91,7 +91,27 @@ param(
     # environment). Parallels VMs and workgroup machines are the
     # explicit lab target. Override only when the lab itself is
     # domain-joined.
-    [switch]$AllowLabOnDomainJoined
+    [switch]$AllowLabOnDomainJoined,
+    # ------------------------------------------------------------------
+    # AG-018 internal-CA root trust (TOFU for the domain-less fleet).
+    # SigningTier=trusted-internal-ca releases chain to an internal
+    # OpenSSL root that public Windows trust does NOT know. The agent
+    # installer imports that root (LocalMachine\Root + TrustedPublisher)
+    # so the binary signature validates AND future signed updates verify
+    #  -  domain-joined AND workgroup machines alike (GPO can't reach the
+    # latter). The root .cer ships in the payload next to this script;
+    # before import its SHA256 must equal $ExpectedRootCertSha256 (the
+    # release-patched pin)  -  a mismatch ABORTS (never import an
+    # unexpected root). -SkipRootTrust opts out (audited): the install
+    # logs ROOT_TRUST_SKIPPED and the signature check then requires the
+    # root to be pre-trusted by other means (GPO). (Codex 019eb0dd:
+    # default-ON managed deployment + pin-match-before-import.)
+    # Real value (the internal root is public + stable, NOT release-specific  - 
+    # unlike the binary URL/hash/thumbprint which ARE release-patched). Pinned
+    # here so both the URL-download and MSI-payload paths self-verify the embedded
+    # root before importing it. If the CA rotates, regenerate this + $script:CodesignRootCertB64.
+    [string]$ExpectedRootCertSha256 = "078494D03E2FB51EA35DB71FFC04B5C5230EE9F52E0D5A057B6F35B8F7E0B59E",
+    [switch]$SkipRootTrust
 )
 
 Set-StrictMode -Version Latest
@@ -125,6 +145,56 @@ $configKeys = @(
 function Write-Step {
     param([string]$Message)
     Write-Host "[endpoint-agent] $Message"
+}
+
+# ---------------------------------------------------------------------------
+# AG-018 internal-CA root trust (TOFU). The internal OpenSSL root that signs
+# trusted-internal-ca releases is embedded here (public cert, DER base64) so
+# both the URL-download and MSI-payload install paths can self-verify + import
+# it WITHOUT relying on a sidecar file that the URL path may not fetch. Importing
+# it makes the agent's Authenticode signature validate (Valid) on domain-joined
+# AND workgroup machines alike (GPO can't reach the latter). Codex 019eb0dd.
+$script:CodesignRootCertB64 = "MIIFdTCCA12gAwIBAgIUa+TQkGyCIVU0wGWGlmsb+8RNwj0wDQYJKoZIhvcNAQELBQAwUTErMCkGA1UEAwwiQUNJSyBJbnRlcm5hbCBDb2RlIFNpZ25pbmcgUm9vdCBDQTENMAsGA1UECgwEQUNJSzETMBEGA1UECwwKQUNJSyBCdWlsZDAeFw0yNjA2MTAwOTM3MTBaFw0zNjA2MDcwOTM3MTBaMFExKzApBgNVBAMMIkFDSUsgSW50ZXJuYWwgQ29kZSBTaWduaW5nIFJvb3QgQ0ExDTALBgNVBAoMBEFDSUsxEzARBgNVBAsMCkFDSUsgQnVpbGQwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQC/b1e9q87a6ngOI0YponEHQxfyP1Fu13LMVmfBsCTaiqpWphpWig05PiChf7HFEGZe+PLXtCPOgyKlvWX4DL6fMGaLL0vLoFmMSC7mEkUvOBLhY6YiCw9U4ddjDDewNk3OcJkjgq9QmposA+FmhZbp1to6vXep8dNXmo/loCbNDuAusj/APmqPWpJ5k9buOZzTrSSdUB38HDv1QgtihPXSS5baGXT2Yu5z0euRcU+RHWkfV6WveD4CEYi2JXWr6WVYWGCpdkFkzvaaG1MOzXrIYBfejwZSdr3K2sCmEzwhnzM4Lipf/Ga6Pl5IDuwoj8WI0Sc6sXlt0wdt6t/YMF4AXIkLHchPKdPWqKGURHYImYfArayQL+LQs4Ye4R956F3unWpvBQ00c6sPNioRTC3Pc0T1hfg3Phd/kL45g+sDvAh2dBwvnNZ/bywBb9eWpkjD4f7eKv8uYwEO0o7gJacF0JozIuIbxFrdEPLn4GYjGrYI280cPe3uX9gmjZS0cc9eNLRnwVm/3BlouNiR3BML7/PiI5qqan7zynyT+pzUoCZ0AndygeFd1zU8k+2LnmJ45748STc2siVSBgVANu7SFH1uNiJsWn3zC00KDlyAu+9G3OObf4rHHZ92n/B9si1P2b6ppJm0bl9u4/Rxu2PEkxaQn2gSVMJ0+6v/JYxnowIDAQABo0UwQzASBgNVHRMBAf8ECDAGAQH/AgEAMA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUQIGX/iGYy0xN9c0z5kqVJ6BZeQkwDQYJKoZIhvcNAQELBQADggIBAHfzeNVzWnu9YJsI3i4sPJxeOhJYw3efUtH2Hp+vDSB2Pgz2Rbr6xsFypjsaTv6kNWkiXG39lvew0jH3S0J2mflc0rAR9vVMWBHF71FPLyrKoFqQmbgjq+yb6IZAFAuoNQSSRD3KGeo5BkHl2K/diNxEX/dpqByz5U5/FqUwBnTLqjS56kuDfiYcv9UzgMijXgknR0OdEUnQSQijMQhICVNSoYOo3ORHyU089REop1vbEMrMIrNjROCOe0Uf/46s6Fm8raW2QEnzrM2WK/S6ppznQZ8rq3ZSsWxDma3mn+QII5iOczpWXU5o3GxZd+EKJCZOHcfZj0oL3VnUF0NMO7W8I73l+mrV4m0+aBq1mPx189SqmsDSTWxtKz9sEuXy7uaLT/2oMtYoahrWq9SZRVSmZ7E7iyksdYkBZesQvrQKmEZqyZGZyvordsoIYlrxBjGfTXeORiBnvvxR+keTImc8Asuvypno+49s1DItvuhcxD/C8JG39tmlJ9K9PAVgC5F6oeQnRI2hSOOwXGx5LbEmS3uIM7HSJcwlOtV81Qsypu71f9erYbvMqU51VIJFdsfJgX/PVbpNdj8AdGOBSIZ6hCz+ND1cLlZgaQLQni0+juXrh/SqydQUEhragT2Jp9N5QpD9VVbsxwychrLT971d6wD+g4BF1BNGfnJct4CT"
+
+function Import-CodesignRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Tier,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+        [switch]$Skip
+    )
+    if ($Tier -ne "trusted-internal-ca") { return }   # tier-gated; other tiers untouched
+
+    $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        [Convert]::FromBase64String($script:CodesignRootCertB64))
+    $actualSha = $cert.GetCertHashString("SHA256").ToUpperInvariant()
+    $expectSha = ($ExpectedSha256 -replace '\s', '').ToUpperInvariant()
+
+    # pin-match BEFORE any import  -  never import an unexpected root.
+    if ([string]::IsNullOrWhiteSpace($expectSha) -or $expectSha -eq "__INJECTED_ROOT_CERT_SHA256__") {
+        throw "trusted-internal-ca: -ExpectedRootCertSha256 is unset/sentinel; refusing to import an unpinned root"
+    }
+    if ($actualSha -ne $expectSha) {
+        throw "trusted-internal-ca: embedded root SHA256 $actualSha != expected pin $expectSha (refusing import)"
+    }
+    if ($cert.NotAfter -lt (Get-Date)) {
+        throw "trusted-internal-ca: embedded root expired $($cert.NotAfter.ToUniversalTime().ToString('o'))"
+    }
+
+    if ($Skip) {
+        Write-Step "ROOT_TRUST_SKIPPED tier=$Tier thumbprint=$($cert.Thumbprint) sha256=$actualSha host=$env:COMPUTERNAME user=$env:USERNAME (operator opted out; root must be pre-trusted via GPO; signature still required Valid below)"
+        return
+    }
+
+    foreach ($store in @("Root", "TrustedPublisher")) {
+        $s = New-Object System.Security.Cryptography.X509Certificates.X509Store($store, "LocalMachine")
+        $s.Open("ReadWrite")
+        try {
+            if (-not $s.Certificates.Find("FindByThumbprint", $cert.Thumbprint, $false).Count) {
+                $s.Add($cert)   # idempotent: only add when absent
+            }
+        } finally { $s.Close() }
+    }
+    Write-Step "ROOT_TRUSTED tier=$Tier thumbprint=$($cert.Thumbprint) sha256=$actualSha notAfter=$($cert.NotAfter.ToUniversalTime().ToString('o')) (imported LocalMachine Root+TrustedPublisher)"
 }
 
 function Assert-Administrator {
@@ -627,6 +697,11 @@ function Assert-EnrollmentTokenLength {
 
 Assert-Administrator
 
+# AG-018: import the internal-CA root BEFORE any binary signature check, so a
+# trusted-internal-ca release validates as Valid on this machine (domain-joined
+# or workgroup). Tier-gated + pin-matched + audited; no-op for other tiers.
+Import-CodesignRoot -Tier $SigningTier -ExpectedSha256 $ExpectedRootCertSha256 -Skip:$SkipRootTrust
+
 if ($AutoEnroll) {
     if (-not [string]::IsNullOrWhiteSpace($EnrollmentToken) -or
         -not [string]::IsNullOrWhiteSpace($AgentId) -or
@@ -733,11 +808,20 @@ function Invoke-VerifyDownloadedBinary {
                 }
             }
             "trusted" {
-                # Trusted tier (Faz 22.2+ Azure Trusted Signing) MUST
-                # chain to a trusted root on the endpoint at install
-                # time. Anything but Valid is rejected.
+                # Legacy trusted tier MUST chain to a trusted root on the
+                # endpoint at install time. Anything but Valid is rejected.
                 if ($sig.Status -ne "Valid") {
                     throw "trusted-signing tier requires Authenticode Status=Valid (got $($sig.Status): $($sig.StatusMessage))"
+                }
+            }
+            "trusted-internal-ca" {
+                # AG-018 internal-CA tier: the internal root was imported by
+                # Import-CodesignRoot before this check (unless -SkipRootTrust,
+                # which requires the root pre-trusted via GPO). Either way the
+                # signature MUST be Valid here  -  the internal CA is a real trust
+                # anchor on this machine, so NotTrusted is a genuine failure.
+                if ($sig.Status -ne "Valid") {
+                    throw "trusted-internal-ca tier requires Authenticode Status=Valid (got $($sig.Status): $($sig.StatusMessage)). The internal root must be trusted (Import-CodesignRoot, or GPO when -SkipRootTrust)."
                 }
             }
             default {
