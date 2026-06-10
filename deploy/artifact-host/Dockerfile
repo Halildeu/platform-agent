@@ -37,3 +37,12 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Packaged release assets staged by CI into build-assets/ — one version folder.
 COPY build-assets/ /usr/share/nginx/html/artifacts/endpoint-agent/${VERSION}/
+
+# Stable MUTABLE alias serving the SAME bytes at a version-independent URL.
+# Lets the endpoint-admin UI render a copy-paste one-command install AND
+# discover the current package hash (/current/EndpointAgent.zip.sha256) without
+# a per-release frontend edit. Re-points to THIS image's version on every
+# release. nginx serves /current/ with no-store (see nginx.conf) precisely
+# because — unlike the versioned path above — it is NOT immutable; pinning the
+# 1y immutable cache here would hand clients a stale bootstrap after a bump.
+COPY build-assets/ /usr/share/nginx/html/artifacts/endpoint-agent/current/
