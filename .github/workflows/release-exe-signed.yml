@@ -331,34 +331,11 @@ jobs:
               | .assets += [{"name": "EndpointAgent.zip", "sha256": $zs}]' \
              dist/release-manifest.json > dist/release-manifest.json.tmp
           mv dist/release-manifest.json.tmp dist/release-manifest.json
-      - name: Publish GitHub release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          ASSETS=(
-            dist/endpoint-agent.exe dist/bootstrap-package.ps1 dist/install.ps1
-            dist/uninstall.ps1 dist/SHA256SUMS dist/release-manifest.json
-            dist/windows/EndpointAgent.zip dist/windows/EndpointAgent.zip.sha256
-          )
-          # Create the release WITHOUT assets first (api.github.com), then upload
-          # via gh release upload with a retry loop: uploads.github.com
-          # intermittently returns HTTP 401 even when the token has contents:write
-          # (the release-create proves the scope). --clobber makes the retry
-          # idempotent. If the release already exists from a partial prior run,
-          # create is skipped and upload --clobber reconciles. (v0.2.2 hardening.)
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" \
-              --verify-tag --title "platform-agent $TAG (trusted-internal-ca)" \
-              --notes-file dist/RELEASE_NOTES.md
-          ok=0
-          for attempt in 1 2 3 4 5; do
-            if gh release upload "$TAG" "${ASSETS[@]}" --clobber; then ok=1; break; fi
-            echo "::warning::asset upload attempt $attempt failed — retrying in $((attempt*10))s"
-            sleep $((attempt*10))
-          done
-          [ "$ok" = "1" ] || { echo "::error::asset upload failed after 5 attempts"; exit 1; }
+      # The artifact-host image is the GOAL (it serves the one-command install);
+      # the GitHub release is the secondary durable archive. Build + push the
+      # image FIRST so the goal completes even if the release API has a transient
+      # blip, and so we learn packages:write works independently of the release's
+      # contents:write path.
       - name: Build + push artifact-host image (GHCR)
         shell: bash
         env:
@@ -389,3 +366,31 @@ jobs:
           echo "## Artifact-host image" >> "$GITHUB_STEP_SUMMARY"
           echo "\`$IMAGE:$TAG@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
           echo "gitops digest pin: kustomize/base/apps/artifact-host → \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish GitHub release (durable archive)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          ASSETS=(
+            dist/endpoint-agent.exe dist/bootstrap-package.ps1 dist/install.ps1
+            dist/uninstall.ps1 dist/SHA256SUMS dist/release-manifest.json
+            dist/windows/EndpointAgent.zip dist/windows/EndpointAgent.zip.sha256
+          )
+          # Whole-operation retry: the release API (api + uploads.github.com)
+          # intermittently returns 401 even though the GHCR push above proves the
+          # job token is fine. Retry create+upload as a unit; delete a partial
+          # release between attempts (keep the protected tag) so create is clean.
+          publish_once() {
+            gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes --cleanup-tag=false >/dev/null 2>&1 || true
+            gh release create "$TAG" --verify-tag \
+              --title "platform-agent $TAG (trusted-internal-ca)" \
+              --notes-file dist/RELEASE_NOTES.md "${ASSETS[@]}"
+          }
+          ok=0
+          for attempt in 1 2 3 4 5 6; do
+            if publish_once; then ok=1; break; fi
+            echo "::warning::release attempt $attempt failed — retrying in $((attempt*15))s"
+            sleep $((attempt*15))
+          done
+          [ "$ok" = "1" ] || { echo "::error::GitHub release failed after 6 attempts (artifact-host image already pushed; release is the secondary archive)"; exit 1; }
