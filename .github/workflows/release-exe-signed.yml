@@ -171,6 +171,9 @@ jobs:
     name: Verify exe signature (windows-hosted machine-gate)
     needs: sign-exe
     runs-on: windows-2022
+    outputs:
+      signer_thumbprint: ${{ steps.v.outputs.signer_thumbprint }}
+      binary_sha256: ${{ steps.v.outputs.binary_sha256 }}
     steps:
       - uses: actions/checkout@v4   # for the pinned root cert
       - uses: actions/download-artifact@v4
@@ -178,6 +181,7 @@ jobs:
           name: endpoint-agent-exe-signed
           path: signed
       - name: signtool /pa + independent chain-to-pinned-root
+        id: v
         shell: pwsh
         env:
           ROOT_PIN: ${{ vars.CODESIGN_ROOT_CERT_SHA256 }}
@@ -210,7 +214,13 @@ jobs:
           }
           $chainRootSha = ($chain.ChainElements[$chain.ChainElements.Count-1].Certificate.GetCertHashString('SHA256')).ToUpper()
           if ($chainRootSha -ne $env:ROOT_PIN.ToUpper()) { throw "signer chain root $chainRootSha != pinned root" }
-          Write-Host "OK signer=$signerSha1 chains to pinned root; timestamped; Valid"
+          # Emit the VERIFIED signer thumbprint (single SHA1) + the exact bytes hash
+          # so publish uses the real signer (not the CSV allowlist) and can assert it
+          # is publishing the SAME artifact that was verified here (Codex 019eb20c).
+          $binSha = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
+          "signer_thumbprint=$signerSha1" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+          "binary_sha256=$binSha"          | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+          Write-Host "OK signer=$signerSha1 chains to pinned root; timestamped; Valid; sha256=$binSha"
 
   publish:
     name: Package + publish release + artifact-host image
@@ -222,7 +232,10 @@ jobs:
     env:
       TAG: ${{ needs.classify.outputs.tag }}
       TIER: trusted-internal-ca
-      THUMB: ${{ vars.CODESIGN_LEAF_THUMBPRINT_ALLOWLIST }}
+      # the VERIFIED single signer thumbprint (not the CSV allowlist — install.ps1
+      # pins ONE thumbprint). verify-exe extracted it from the signed exe.
+      THUMB: ${{ needs.verify-exe.outputs.signer_thumbprint }}
+      VERIFIED_SHA256: ${{ needs.verify-exe.outputs.binary_sha256 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -239,8 +252,13 @@ jobs:
           set -euo pipefail
           test -f dist/endpoint-agent.exe
           SHA256=$(shasum -a 256 dist/endpoint-agent.exe | awk '{print $1}')
+          # same-artifact chain: the exe we publish MUST be the one verify-exe
+          # passed signtool /pa on (Codex 019eb20c hardening).
+          if [ "$SHA256" != "$VERIFIED_SHA256" ]; then
+            echo "::error::published exe sha256 $SHA256 != verify-exe sha256 $VERIFIED_SHA256"; exit 1
+          fi
           echo "SHA256=$SHA256" >> "$GITHUB_ENV"
-          echo "binary sha256 = $SHA256"
+          echo "binary sha256 = $SHA256 (matches verify-exe)"
       - name: Patch installer manifest (install.ps1)
         shell: pwsh
         env:
@@ -289,6 +307,8 @@ jobs:
           ($manifest | ConvertTo-Json -Depth 6) | Out-File -Encoding utf8 dist/release-manifest.json
       - name: Emit RELEASE_NOTES.md
         shell: pwsh
+        env:
+          REPO: ${{ github.repository }}
         run: pwsh scripts/release/emit-release-notes.ps1 -OutFile dist/RELEASE_NOTES.md
       - name: Build canonical EndpointAgent.zip (signed binary)
         shell: bash
