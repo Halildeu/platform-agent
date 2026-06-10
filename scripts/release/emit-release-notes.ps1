@@ -42,19 +42,26 @@ foreach ($required in @("TAG", "TIER", "SHA256", "REPO")) {
     }
 }
 
+if ($env:TIER -eq "trusted-internal-ca") {
+    $tierBlurb = "``$env:TIER`` — signed by the internal OpenSSL code-signing CA on the self-hosted Linux runner (AG-018; ``osslsigncode`` + RFC3161 timestamp). The installer imports the internal root (TOFU) so Authenticode validates **Valid** on domain-joined AND workgroup machines. **NOT publicly trusted** — trust is internal (``installer-imported-internal-ca``); no paid/public CA, no Azure."
+    $installTail = "    -Start"
+} else {
+    $tierBlurb = "``$env:TIER`` — lab-only-evidence releases use an ephemeral self-signed certificate generated on the release runner. They are **not** trusted by Windows out of the box; the install path requires explicit ``-AcceptLabOnlySigning`` opt-in. **Do not install on production endpoints**. Trusted (``v*.*.*`` without ``-lab.N``) releases are produced by release-exe-signed.yml (internal-CA Linux signing)."
+    $installTail = "    -AcceptLabOnlySigning ```n    -Start"
+}
+
 $notes = @"
 # platform-agent $env:TAG
 
-> **Signing tier**: ``$env:TIER`` — lab-only-evidence releases use an ephemeral self-signed certificate generated on the release runner. They are **not** trusted by Windows out of the box; the install path requires explicit ``-AcceptLabOnlySigning`` opt-in. **Do not install on production endpoints**. Trusted-signing releases (``v*.*.*`` without ``-lab.N``) are parked until Faz 22.2 Azure Trusted Signing.
+> **Signing tier**: $tierBlurb
 
-## One-line lab install
+## One-line install
 
 ``````powershell
 & ([scriptblock]::Create((iwr -useb "https://github.com/$env:REPO/releases/download/$env:TAG/install.ps1").Content)) ``
     -ApiUrl "https://api.acik.com" ``
     -EnrollmentToken `$env:ENROLLMENT_TOKEN ``
-    -AcceptLabOnlySigning ``
-    -Start
+$installTail
 ``````
 
 ## Artifacts

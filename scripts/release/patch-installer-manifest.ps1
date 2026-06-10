@@ -57,7 +57,9 @@ param(
     [Parameter(Mandatory)] [string]$ExpectedSha256,
     [Parameter(Mandatory)] [string]$ExpectedSignerThumbprint,
     [Parameter(Mandatory)]
-    [ValidateSet("lab-only-evidence","trusted")]
+    # lab-only-evidence (release.yml lab tier) + trusted-internal-ca (AG-018
+    # Part 2 Linux internal-CA signing). "trusted" is the legacy/parked name.
+    [ValidateSet("lab-only-evidence","trusted","trusted-internal-ca")]
     [string]$SigningTier,
     [Parameter(Mandatory)] [string]$ReleaseTag
 )

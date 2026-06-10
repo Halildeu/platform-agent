@@ -3,11 +3,9 @@
 # Tag-driven release pipeline that produces a one-line-install GitHub
 # Release for the Windows endpoint agent. Faz 22.1 stays on lab-only
 # ephemeral signing (per ADR-0012-EA §22.1 Lab); the trusted-signing tier
-# is gated to `v*.*.*` (no `-lab.N` suffix) and stays parked until Faz 22.2
-# internal-CA Linux signing is wired here (Azure Trusted Signing EXCLUDED —
-# owner: no paid services). NOTE: the MSI trusted path already exists at
-# `.github/workflows/release-msi-signed.yml` (self-hosted Linux signing runner); this
-# EXE-release trusted tier is NOT wired here yet.
+# is handled by release-exe-signed.yml (AG-018 Part 2 — internal-CA Linux signing,
+# Azure EXCLUDED, owner: no paid). The MSI trusted path is release-msi-signed.yml.
+# This workflow now owns the LAB tier (v*.*.*-lab.N) only.
 #
 # Tag conventions:
 #   v0.1.0-lab.1   — Faz 22.1 lab-only-evidence (this PR's target)
@@ -34,7 +32,9 @@ name: Release (Faz 22.1 lab / 22.2 trusted)
 on:
   push:
     tags:
-      - 'v*.*.*'
+      # LAB tier only. Clean v*.*.* (no -lab) trusted releases are handled by
+      # release-exe-signed.yml (AG-018 Part 2). Removing the bare 'v*.*.*' here
+      # stops the old "trusted parked" failure from double-firing on real tags.
       - 'v*.*.*-lab.*'
   workflow_dispatch:
     inputs:
@@ -94,11 +94,11 @@ jobs:
             PRE="false"
           fi
           if [ "$TIER" = "trusted" ]; then
-            # Faz 22.1 boundary guard — do NOT publish a "trusted" EXE
-            # release until internal-CA Linux signing is wired here (Faz 22.2;
-            # Azure EXCLUDED — owner: no paid). The MSI trusted path already
-            # exists in release-msi-signed.yml. The lab branch can still ship.
-            echo "::error::trusted-signing tier is parked until Faz 22.2 — use a -lab.N tag for now"
+            # Trusted EXE/one-command releases are handled by
+            # release-exe-signed.yml (AG-018 Part 2: internal-CA Linux signing).
+            # This LAB workflow no longer triggers on bare v*.*.* tags; a
+            # workflow_dispatch with a non-lab tag lands here, so redirect.
+            echo "::error::clean v*.*.* is a TRUSTED release — handled by release-exe-signed.yml. Push the tag (it triggers that workflow) or dispatch release-exe-signed.yml. Use a -lab.N tag for the lab one-command."
             exit 1
           fi
           echo "tag=$TAG"           >> "$GITHUB_OUTPUT"

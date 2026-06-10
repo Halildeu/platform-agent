@@ -1,0 +1,375 @@
+# =============================================================================
+# AG-018 Part 2 — Trusted EXE/one-command release (Linux osslsigncode + internal CA).
+#
+# Mirrors release-msi-signed.yml for the EXE/ZIP one-command bootstrap channel:
+# build the agent exe UNSIGNED on a hosted Windows runner, sign it on the
+# self-hosted LINUX runner (osslsigncode + internal CA, key host-fs custody),
+# verify on hosted Windows (signtool /pa + pinned-root chain), then package the
+# canonical EndpointAgent.zip + bootstrap + manifest (reusing the SAME repo
+# scripts release.yml uses), publish the GitHub release, and build + push the
+# artifact-host image so testai.acik.com/artifacts/endpoint-agent/<tag>/ serves
+# the TRUSTED one-command install.
+#
+# Tier split (Codex 019eb20c): this workflow owns TRUSTED (clean v*.*.*).
+# release.yml owns the LAB tier (v*.*.*-lab.*). A -lab tag here is skipped.
+#
+# Activation: same as the MSI path — CODESIGN_ENABLED=true + CODESIGN_* vars +
+# the [self-hosted,linux,signing] runner + trusted-signing-prod environment +
+# protected v*.*.* ruleset. Inert (visible notice) until configured.
+# =============================================================================
+name: Release EXE trusted (one-command, internal CA)
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to release (clean a.b.c, no -lab)"
+        required: true
+  # NO pull_request trigger — the self-hosted signing runner must never run on a PR.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-exe-signed-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    name: Classify tag + signing config check
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.c.outputs.tag }}
+      proceed: ${{ steps.c.outputs.proceed }}
+    steps:
+      - id: c
+        shell: bash
+        env:
+          ENABLED: ${{ vars.CODESIGN_ENABLED }}
+          ALLOW: ${{ vars.CODESIGN_LEAF_THUMBPRINT_ALLOWLIST }}
+          ROOT: ${{ vars.CODESIGN_ROOT_CERT_SHA256 }}
+          TSA: ${{ vars.CODESIGN_TIMESTAMP_URL }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then TAG="$DISPATCH_TAG"; else TAG="$GITHUB_REF_NAME"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # this workflow is TRUSTED-only; -lab.N belongs to release.yml — skip cleanly
+          if printf '%s' "$TAG" | grep -Eq -- '-lab\.[0-9]+$'; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG is a -lab tag — handled by release.yml (lab tier). Skipping trusted EXE workflow."
+            exit 0
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag '$TAG' is not a clean v a.b.c (no -lab) — refusing trusted release"; exit 1
+          fi
+          if [ "$ENABLED" = "true" ] && [ -n "$ALLOW" ] && [ -n "$ROOT" ] && [ -n "$TSA" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Trusted EXE signing enabled — building + signing $TAG on the self-hosted runner."
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Code-signing NOT configured — set CODESIGN_ENABLED=true + CODESIGN_* vars and stand up the [self-hosted,linux,signing] runner. Skipping; no trusted EXE release produced."
+          fi
+
+  build-unsigned-exe:
+    name: Build UNSIGNED agent exe (windows-hosted)
+    needs: classify
+    if: >-
+      needs.classify.outputs.proceed == 'true' &&
+      github.repository == 'Halildeu/platform-agent'
+    runs-on: windows-2022
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.classify.outputs.tag }}
+          fetch-depth: 0
+      - name: Verify checkout is on classified tag
+        shell: bash
+        env:
+          TAG: ${{ needs.classify.outputs.tag }}
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD); expected=$(git rev-list -n1 "$TAG")
+          [ "$head" = "$expected" ] || { echo "::error::HEAD $head != tag commit $expected for $TAG"; exit 1; }
+          git fetch origin main --quiet
+          git merge-base --is-ancestor "$head" origin/main || { echo "::error::$TAG ($head) is not an ancestor of origin/main — refusing to sign an off-main ref"; exit 1; }
+      - id: ver
+        shell: bash
+        env:
+          TAG: ${{ needs.classify.outputs.tag }}
+        run: |
+          v="${TAG#v}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version '$v' not a.b.c"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Go test (pre-release regression)
+        run: go test ./...
+      - name: Build Windows amd64 binary (UNSIGNED)
+        shell: pwsh
+        env:
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: amd64
+          TAG: ${{ needs.classify.outputs.tag }}
+        run: |
+          bash scripts/build/windows-versioninfo.sh "$env:TAG" cmd/endpoint-agent/endpoint_agent_version
+          $LDFLAGS = "-s -w -X platform-agent/internal/config.BuildVersion=$env:TAG"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          go build -trimpath -ldflags "$LDFLAGS" -o dist/endpoint-agent.exe ./cmd/endpoint-agent
+          if (-not (Test-Path dist/endpoint-agent.exe)) { throw "build did not produce dist/endpoint-agent.exe" }
+          Remove-Item -LiteralPath "cmd/endpoint-agent/endpoint_agent_version_windows_amd64.syso" -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-agent-exe-unsigned
+          path: dist/endpoint-agent.exe
+          if-no-files-found: error
+
+  sign-exe:
+    name: Sign agent exe (self-hosted linux internal-CA)
+    needs: build-unsigned-exe
+    runs-on: [self-hosted, linux, signing]
+    environment: trusted-signing-prod
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: endpoint-agent-exe-unsigned
+          path: incoming
+      - name: Sign via pinned wrapper (key never leaves host; RFC3161; fail-closed)
+        shell: bash
+        env:
+          CODESIGN_TIMESTAMP_URL: ${{ vars.CODESIGN_TIMESTAMP_URL }}
+        run: |
+          set -euo pipefail
+          WORK=/var/lib/codesign/work
+          RUN_DIR="$WORK/run-exe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$RUN_DIR"
+          chmod 2770 "$RUN_DIR"
+          perms="$(stat -c '%a' "$RUN_DIR")"
+          [ "$perms" = "2770" ] || { echo "::error::RUN_DIR perms $perms != 2770"; exit 1; }
+          [ -f incoming/endpoint-agent.exe ] || { echo "::error::no unsigned exe in artifact"; exit 1; }
+          cp incoming/endpoint-agent.exe "$RUN_DIR/in.exe"
+          OUT="$RUN_DIR/out.exe"
+          # the generalized wrapper enforces ext/magic/path/double-sign + fail-closed timestamp
+          sudo -n -u codesign /usr/local/bin/codesign-sign "$RUN_DIR/in.exe" "$OUT"
+          mkdir -p signed
+          cp "$OUT" signed/endpoint-agent.exe
+          rm -f "$RUN_DIR/in.exe" "$OUT" || true
+          rmdir "$RUN_DIR" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-agent-exe-signed
+          path: signed/endpoint-agent.exe
+          if-no-files-found: error
+
+  verify-exe:
+    name: Verify exe signature (windows-hosted machine-gate)
+    needs: sign-exe
+    runs-on: windows-2022
+    outputs:
+      signer_thumbprint: ${{ steps.v.outputs.signer_thumbprint }}
+      binary_sha256: ${{ steps.v.outputs.binary_sha256 }}
+    steps:
+      - uses: actions/checkout@v4   # for the pinned root cert
+      - uses: actions/download-artifact@v4
+        with:
+          name: endpoint-agent-exe-signed
+          path: signed
+      - name: signtool /pa + independent chain-to-pinned-root
+        id: v
+        shell: pwsh
+        env:
+          ROOT_PIN: ${{ vars.CODESIGN_ROOT_CERT_SHA256 }}
+          ALLOW: ${{ vars.CODESIGN_LEAF_THUMBPRINT_ALLOWLIST }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = "signed\endpoint-agent.exe"
+          $rootCer = "installers\windows\certs\acik-codesign-root.cer"
+          $rootCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $rootCer
+          $rootCertSha = ($rootCert.GetCertHashString('SHA256')).ToUpper()
+          if ($rootCertSha -ne $env:ROOT_PIN.ToUpper()) { throw "pinned root mismatch: repo $rootCertSha != var $($env:ROOT_PIN)" }
+          Import-Certificate -FilePath $rootCer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Import-Certificate -FilePath $rootCer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1).FullName
+          $out = & $signtool verify /pa /v $exe 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify /pa FAILED" }
+          if ($out -notmatch '(?im)^\s*(The signature is timestamped:|Timestamp Verified by:)') { throw "no RFC3161 timestamp evidence" }
+          if ($out -match '(?i)\b(not timestamped|no timestamp)\b') { throw "negative timestamp phrase" }
+          $sig = Get-AuthenticodeSignature $exe
+          if ($sig.Status -ne 'Valid') { throw "AuthenticodeSignature status = $($sig.Status)" }
+          if (-not $sig.TimeStamperCertificate) { throw "no TimeStamperCertificate" }
+          $signerSha1 = $sig.SignerCertificate.Thumbprint.ToUpper()
+          $allow = ($env:ALLOW -split '[,; ]+' | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ })
+          if ($allow -notcontains $signerSha1) { throw "signer thumbprint $signerSha1 not in allowlist" }
+          $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+          $chain.ChainPolicy.RevocationMode = 'NoCheck'
+          if (-not $chain.Build($sig.SignerCertificate)) {
+            throw "signer chain did not build: $(($chain.ChainStatus | ForEach-Object { $_.StatusInformation.Trim() }) -join '; ')"
+          }
+          $chainRootSha = ($chain.ChainElements[$chain.ChainElements.Count-1].Certificate.GetCertHashString('SHA256')).ToUpper()
+          if ($chainRootSha -ne $env:ROOT_PIN.ToUpper()) { throw "signer chain root $chainRootSha != pinned root" }
+          # Emit the VERIFIED signer thumbprint (single SHA1) + the exact bytes hash
+          # so publish uses the real signer (not the CSV allowlist) and can assert it
+          # is publishing the SAME artifact that was verified here (Codex 019eb20c).
+          $binSha = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
+          "signer_thumbprint=$signerSha1" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+          "binary_sha256=$binSha"          | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+          Write-Host "OK signer=$signerSha1 chains to pinned root; timestamped; Valid; sha256=$binSha"
+
+  publish:
+    name: Package + publish release + artifact-host image
+    needs: [classify, build-unsigned-exe, verify-exe]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      TAG: ${{ needs.classify.outputs.tag }}
+      TIER: trusted-internal-ca
+      # the VERIFIED single signer thumbprint (not the CSV allowlist — install.ps1
+      # pins ONE thumbprint). verify-exe extracted it from the signed exe.
+      THUMB: ${{ needs.verify-exe.outputs.signer_thumbprint }}
+      VERIFIED_SHA256: ${{ needs.verify-exe.outputs.binary_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.classify.outputs.tag }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: endpoint-agent-exe-signed
+          path: dist
+      - name: Stage signed exe + post-sign hash
+        id: hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/endpoint-agent.exe
+          SHA256=$(shasum -a 256 dist/endpoint-agent.exe | awk '{print $1}')
+          # same-artifact chain: the exe we publish MUST be the one verify-exe
+          # passed signtool /pa on (Codex 019eb20c hardening).
+          if [ "$SHA256" != "$VERIFIED_SHA256" ]; then
+            echo "::error::published exe sha256 $SHA256 != verify-exe sha256 $VERIFIED_SHA256"; exit 1
+          fi
+          echo "SHA256=$SHA256" >> "$GITHUB_ENV"
+          echo "binary sha256 = $SHA256 (matches verify-exe)"
+      - name: Patch installer manifest (install.ps1)
+        shell: pwsh
+        env:
+          BINARY_URL: "https://github.com/${{ github.repository }}/releases/download/${{ needs.classify.outputs.tag }}/endpoint-agent.exe"
+        run: |
+          pwsh scripts/release/patch-installer-manifest.ps1 `
+            -InputPath installers/windows/install.ps1 `
+            -OutputPath dist/install.ps1 `
+            -BinaryUrl $env:BINARY_URL `
+            -ExpectedSha256 $env:SHA256 `
+            -ExpectedSignerThumbprint $env:THUMB `
+            -SigningTier "trusted-internal-ca" `
+            -ReleaseTag $env:TAG
+          Copy-Item installers/windows/uninstall.ps1 dist/uninstall.ps1 -Force
+          Copy-Item installers/windows/bootstrap-package.ps1 dist/bootstrap-package.ps1 -Force
+      - name: Validate patched install.ps1 parses (PowerShell)
+        shell: pwsh
+        run: |
+          $errs = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path dist/install.ps1), [ref]$null, [ref]$errs) | Out-Null
+          if ($errs) { $errs | ForEach-Object { Write-Host $_.Message }; throw "patched install.ps1 has parser errors" }
+          Write-Host "patched install.ps1 parse OK"
+      - name: SHA256SUMS + release-manifest.json
+        shell: pwsh
+        run: |
+          $assets = @("endpoint-agent.exe","bootstrap-package.ps1","install.ps1","uninstall.ps1")
+          $sumLines = @()
+          foreach ($a in $assets) { $h = (Get-FileHash -Algorithm SHA256 "dist/$a").Hash.ToLowerInvariant(); $sumLines += "$h  $a" }
+          $sumLines -join "`n" | Out-File -Encoding ascii dist/SHA256SUMS
+          $manifest = [ordered]@{
+            schema_version = 1
+            release_tag    = $env:TAG
+            signing_tier   = "trusted-internal-ca"
+            trust_scope    = "installer-imported-internal-ca"
+            publicly_trusted = $false
+            signer_thumbprint = $env:THUMB
+            endpoint_agent_sha256 = $env:SHA256
+            phase = "22.5-M1"
+            assets = @(
+              [ordered]@{ name = "endpoint-agent.exe"; sha256 = $env:SHA256 }
+              [ordered]@{ name = "bootstrap-package.ps1"; sha256 = (Get-FileHash -Algorithm SHA256 dist/bootstrap-package.ps1).Hash.ToLowerInvariant() }
+              [ordered]@{ name = "install.ps1"; sha256 = (Get-FileHash -Algorithm SHA256 dist/install.ps1).Hash.ToLowerInvariant() }
+              [ordered]@{ name = "uninstall.ps1"; sha256 = (Get-FileHash -Algorithm SHA256 dist/uninstall.ps1).Hash.ToLowerInvariant() }
+            )
+          }
+          ($manifest | ConvertTo-Json -Depth 6) | Out-File -Encoding utf8 dist/release-manifest.json
+      - name: Emit RELEASE_NOTES.md
+        shell: pwsh
+        env:
+          REPO: ${{ github.repository }}
+        run: pwsh scripts/release/emit-release-notes.ps1 -OutFile dist/RELEASE_NOTES.md
+      - name: Build canonical EndpointAgent.zip (signed binary)
+        shell: bash
+        env:
+          PREBUILT_EXE: dist/endpoint-agent.exe
+          OWNER_RAW: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          ./scripts/build/windows-package.sh
+          test -f dist/windows/EndpointAgent.zip
+          ZIP_SHA=$(shasum -a 256 dist/windows/EndpointAgent.zip | awk '{print $1}')
+          printf '%s  EndpointAgent.zip\n' "$ZIP_SHA" > dist/windows/EndpointAgent.zip.sha256
+          echo "ZIP_SHA256=$ZIP_SHA" >> "$GITHUB_ENV"
+          OWNER=$(printf '%s' "$OWNER_RAW" | tr '[:upper:]' '[:lower:]')
+          jq --arg zs "$ZIP_SHA" --arg tag "$TAG" --arg owner "$OWNER" \
+             '.endpoint_agent_zip = "EndpointAgent.zip"
+              | .endpoint_agent_zip_sha256 = $zs
+              | .artifact_served_path = ("/artifacts/endpoint-agent/" + $tag + "/")
+              | .artifact_host_image = ("ghcr.io/" + $owner + "/platform-agent-artifacts:" + $tag)
+              | .assets += [{"name": "EndpointAgent.zip", "sha256": $zs}]' \
+             dist/release-manifest.json > dist/release-manifest.json.tmp
+          mv dist/release-manifest.json.tmp dist/release-manifest.json
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --verify-tag --title "platform-agent $TAG (trusted-internal-ca)" \
+            --notes-file dist/RELEASE_NOTES.md \
+            dist/endpoint-agent.exe dist/bootstrap-package.ps1 dist/install.ps1 \
+            dist/uninstall.ps1 dist/SHA256SUMS dist/release-manifest.json \
+            dist/windows/EndpointAgent.zip dist/windows/EndpointAgent.zip.sha256
+      - name: Build + push artifact-host image (GHCR)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          OWNER=$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$OWNER/platform-agent-artifacts"
+          SHORT_SHA=$(git rev-parse --short HEAD); REVISION=$(git rev-parse HEAD)
+          ASSETS=deploy/artifact-host/build-assets
+          rm -rf "$ASSETS"; mkdir -p "$ASSETS"
+          cp dist/windows/EndpointAgent.zip "$ASSETS/"
+          cp dist/windows/EndpointAgent.zip.sha256 "$ASSETS/"
+          cp dist/bootstrap-package.ps1 "$ASSETS/"
+          cp dist/release-manifest.json "$ASSETS/"
+          ( cd "$ASSETS" && shasum -a 256 EndpointAgent.zip bootstrap-package.ps1 release-manifest.json > SHA256SUMS )
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker build deploy/artifact-host \
+            --build-arg VERSION="$TAG" --build-arg REVISION="$REVISION" \
+            --build-arg RELEASE_TAG="$TAG" --build-arg ZIP_SHA256="${ZIP_SHA256:-unknown}" \
+            --build-arg SOURCE_RUN_ID="$RUN_ID" \
+            -t "$IMAGE:$TAG" -t "$IMAGE:sha-$SHORT_SHA"
+          docker push "$IMAGE:$TAG"; docker push "$IMAGE:sha-$SHORT_SHA"
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE:$TAG" | awk '/^Digest:/ {print $2; exit}')
+          test -n "$DIGEST"
+          echo "## Artifact-host image" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$IMAGE:$TAG@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "gitops digest pin: kustomize/base/apps/artifact-host → \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
