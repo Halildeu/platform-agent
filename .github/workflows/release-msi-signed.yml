@@ -166,8 +166,16 @@ jobs:
         shell: bash
         env:
           CODESIGN_TIMESTAMP_URL: ${{ vars.CODESIGN_TIMESTAMP_URL }}
+          # authoritative version resolved from the tag/dispatch in build-unsigned;
+          # passed via env (not inline ${{ }}) to avoid shell injection. The SIGNED
+          # artifact is named from THIS, so its filename can never drift from the
+          # resolved release version.
+          VERSION: ${{ needs.build-unsigned.outputs.version }}
         run: |
           set -euo pipefail
+          # version is already constrained to a.b.c by build-unsigned's Resolve step;
+          # re-assert here so a malformed value can't reach the output filename.
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::resolved version '$VERSION' is not a clean a.b.c"; exit 1; }
           WORK=/var/lib/codesign/work
           # unique per-run subdir under the runner-writable work root.
           # gh-runner creates it; the setgid work root gives it group=codesign,
@@ -183,12 +191,24 @@ jobs:
           [ "$perms" = "2770" ] || { echo "::error::RUN_DIR perms $perms != 2770 (codesign group cannot write out.msi)"; exit 1; }
           IN_MSI="$(ls incoming/*.msi | head -1)"
           [ -n "$IN_MSI" ] || { echo "::error::no unsigned MSI in artifact"; exit 1; }
+          # integrity: build-unsigned named the unsigned MSI after the SAME resolved
+          # version (build-msi.ps1 -Version). If it doesn't, the build is inconsistent
+          # — fail LOUD rather than ship a mislabeled signed MSI.
+          in_base="$(basename "$IN_MSI")"
+          case "$in_base" in
+            *"$VERSION"*) : ;;
+            *) echo "::error::unsigned MSI '$in_base' does not embed resolved version '$VERSION'"; exit 1 ;;
+          esac
           cp "$IN_MSI" "$RUN_DIR/in.msi"
           OUT="$RUN_DIR/out.msi"
           # the wrapper enforces arg/path/.msi/double-sign + fail-closed timestamp
           sudo -n -u codesign /usr/local/bin/codesign-sign "$RUN_DIR/in.msi" "$OUT"
           mkdir -p signed
-          cp "$OUT" "signed/$(basename "$IN_MSI")"
+          # the build runs with -SigningMode none, so the unsigned MSI is named
+          # 'EndpointAgent-<ver>-unsigned.msi'. This job has now signed it, so ship it
+          # under an honest, version-pinned name instead of the misleading 'unsigned'.
+          SIGNED_NAME="EndpointAgent-${VERSION}-signed.msi"
+          cp "$OUT" "signed/${SIGNED_NAME}"
           cp incoming/msi-build-manifest.json signed/msi-build-manifest.json
           # clean the run dir: the wrapper output is codesign-owned, but the work
           # dir is setgid root:codesign 2770 with NO sticky bit, and gh-runner is in
@@ -196,7 +216,7 @@ jobs:
           # (the sudoers rule only permits the signing wrapper, never rm).
           rm -f "$RUN_DIR/in.msi" "$OUT" || true
           rmdir "$RUN_DIR" 2>/dev/null || true
-          echo "signed: signed/$(basename "$IN_MSI")"
+          echo "signed: signed/${SIGNED_NAME}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -282,6 +302,11 @@ jobs:
           $msiHash = (Get-FileHash -Algorithm SHA256 $msi).Hash
           if (-not $m.files)      { $m | Add-Member -Force NoteProperty files      ([pscustomobject]@{}) }
           if (-not $m.signatures) { $m | Add-Member -Force NoteProperty signatures ([pscustomobject]@{}) }
+          # The sign job renamed the MSI to 'EndpointAgent-<ver>-signed.msi'; the build
+          # manifest still keys the old '...-unsigned.msi'. Drop any stale .msi key so
+          # the production manifest references ONLY the shipped signed artifact.
+          foreach ($p in @($m.files.PSObject.Properties.Name      | Where-Object { $_ -like '*.msi' -and $_ -ne $msiName })) { $m.files.PSObject.Properties.Remove($p) }
+          foreach ($p in @($m.signatures.PSObject.Properties.Name | Where-Object { $_ -like '*.msi' -and $_ -ne $msiName })) { $m.signatures.PSObject.Properties.Remove($p) }
           $m.files      | Add-Member -Force NoteProperty $msiName $msiHash
           $m.signatures | Add-Member -Force NoteProperty $msiName 'Valid'
           $m | Add-Member -Force NoteProperty production       $true
