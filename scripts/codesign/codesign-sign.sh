@@ -85,7 +85,7 @@ case "$TSA_URL" in http://*|https://*) : ;; *) die "bad TSA url: $TSA_URL" ;; es
   -h sha256 \
   -ts "$TSA_URL" \
   -in "$IN_R" -out "$OUT_R" \
-  || die "osslsigncode sign failed (TSA unreachable? => fail-closed, no output)"
+  || die "osslsigncode sign failed (TSA unreachable, leaf key/cert unreadable, or output dir not group-writable => fail-closed, no output)"
 
 # --- self-verify before returning -------------------------------------------
 # Verify the leaf chain against OUR root (exit 0) and assert the RFC3161 timestamp

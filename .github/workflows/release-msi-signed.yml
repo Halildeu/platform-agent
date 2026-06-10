@@ -169,9 +169,18 @@ jobs:
         run: |
           set -euo pipefail
           WORK=/var/lib/codesign/work
-          # unique per-run subdir under the runner-writable work root
+          # unique per-run subdir under the runner-writable work root.
+          # gh-runner creates it; the setgid work root gives it group=codesign,
+          # but gh-runner's umask (022) drops group-write, so the codesign user
+          # (group member) could NOT write out.msi into it -> "Permission denied"
+          # on fopen(out.msi). Force group-write + setgid so codesign can write.
           RUN_DIR="$WORK/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$RUN_DIR"
+          chmod 2770 "$RUN_DIR"
+          # defensive: confirm group-write actually took, else fail LOUD here
+          # rather than as a confusing "Permission denied" inside osslsigncode.
+          perms="$(stat -c '%a' "$RUN_DIR")"
+          [ "$perms" = "2770" ] || { echo "::error::RUN_DIR perms $perms != 2770 (codesign group cannot write out.msi)"; exit 1; }
           IN_MSI="$(ls incoming/*.msi | head -1)"
           [ -n "$IN_MSI" ] || { echo "::error::no unsigned MSI in artifact"; exit 1; }
           cp "$IN_MSI" "$RUN_DIR/in.msi"
