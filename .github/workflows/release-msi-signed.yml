@@ -181,8 +181,11 @@ jobs:
           mkdir -p signed
           cp "$OUT" "signed/$(basename "$IN_MSI")"
           cp incoming/msi-build-manifest.json signed/msi-build-manifest.json
-          # clean the run dir (wrapper output is codesign-owned; remove via sudo)
-          sudo -n -u codesign rm -f "$RUN_DIR/in.msi" "$OUT" || true
+          # clean the run dir: the wrapper output is codesign-owned, but the work
+          # dir is setgid root:codesign 2770 with NO sticky bit, and gh-runner is in
+          # the codesign group, so directory-write lets gh-runner remove it directly
+          # (the sudoers rule only permits the signing wrapper, never rm).
+          rm -f "$RUN_DIR/in.msi" "$OUT" || true
           rmdir "$RUN_DIR" 2>/dev/null || true
           echo "signed: signed/$(basename "$IN_MSI")"
 
@@ -249,16 +252,29 @@ jobs:
           $signerSha1 = $sig.SignerCertificate.Thumbprint.ToUpper()
           $allow = ($env:ALLOW -split '[,; ]+' | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ })
           if ($allow -notcontains $signerSha1) { throw "signer thumbprint $signerSha1 not in allowlist" }
-          # independent chain build to the pinned root
+          # independent chain build to the pinned root — Build() result IS checked
+          # (a false return means the chain did not build; don't trust the elements).
           $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
           $chain.ChainPolicy.RevocationMode = 'NoCheck'
-          [void]$chain.Build($sig.SignerCertificate)
+          if (-not $chain.Build($sig.SignerCertificate)) {
+            $st = ($chain.ChainStatus | ForEach-Object { $_.StatusInformation.Trim() }) -join '; '
+            throw "signer chain did not build (status: $st)"
+          }
           $chainRootSha = ($chain.ChainElements[$chain.ChainElements.Count-1].Certificate.GetCertHashString('SHA256')).ToUpper()
           if ($chainRootSha -ne $env:ROOT_PIN.ToUpper()) { throw "signer chain root $chainRootSha != pinned root" }
           Write-Host "OK signer=$signerSha1 chains to pinned root; timestamped; status Valid"
 
           # --- emit production manifest (custody honest) ---
           $m = Get-Content signed\msi-build-manifest.json -Raw | ConvertFrom-Json
+          # The manifest came from the UNSIGNED build; signing changed the MSI bytes,
+          # so its files[]/signatures[] entries are stale. Recompute the MSI hash and
+          # mark its signature Valid so the manifest describes the SHIPPED artifact.
+          $msiName = Split-Path $msi -Leaf
+          $msiHash = (Get-FileHash -Algorithm SHA256 $msi).Hash
+          if (-not $m.files)      { $m | Add-Member -Force NoteProperty files      ([pscustomobject]@{}) }
+          if (-not $m.signatures) { $m | Add-Member -Force NoteProperty signatures ([pscustomobject]@{}) }
+          $m.files      | Add-Member -Force NoteProperty $msiName $msiHash
+          $m.signatures | Add-Member -Force NoteProperty $msiName 'Valid'
           $m | Add-Member -Force NoteProperty production       $true
           $m | Add-Member -Force NoteProperty signing_tier     'trusted-internal-ca'
           $m | Add-Member -Force NoteProperty trust_scope      'installer-imported-internal-ca'
