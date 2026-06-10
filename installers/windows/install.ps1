@@ -177,11 +177,11 @@ function Import-CodesignRoot {
         throw "trusted-internal-ca: embedded root SHA256 $actualSha != expected pin $expectSha (refusing import)"
     }
     if ($cert.NotAfter -lt (Get-Date)) {
-        throw "trusted-internal-ca: embedded root expired $(.NotAfter.ToUniversalTime().ToString('o'))"
+        throw "trusted-internal-ca: embedded root expired $($cert.NotAfter.ToUniversalTime().ToString('o'))"
     }
 
     if ($Skip) {
-        Write-Step "ROOT_TRUST_SKIPPED tier=$Tier thumbprint=$(.Thumbprint) sha256=$actualSha host=$env:COMPUTERNAME user=$env:USERNAME (operator opted out; root must be pre-trusted via GPO — signature still required Valid below)"
+        Write-Step "ROOT_TRUST_SKIPPED tier=$Tier thumbprint=$($cert.Thumbprint) sha256=$actualSha host=$env:COMPUTERNAME user=$env:USERNAME (operator opted out; root must be pre-trusted via GPO; signature still required Valid below)"
         return
     }
 
@@ -194,7 +194,7 @@ function Import-CodesignRoot {
             }
         } finally { $s.Close() }
     }
-    Write-Step "ROOT_TRUSTED tier=$Tier thumbprint=$(.Thumbprint) sha256=$actualSha notAfter=$(.NotAfter.ToUniversalTime().ToString('o')) (imported LocalMachine Root+TrustedPublisher)"
+    Write-Step "ROOT_TRUSTED tier=$Tier thumbprint=$($cert.Thumbprint) sha256=$actualSha notAfter=$($cert.NotAfter.ToUniversalTime().ToString('o')) (imported LocalMachine Root+TrustedPublisher)"
 }
 
 function Assert-Administrator {
