@@ -337,12 +337,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" \
-            --verify-tag --title "platform-agent $TAG (trusted-internal-ca)" \
-            --notes-file dist/RELEASE_NOTES.md \
-            dist/endpoint-agent.exe dist/bootstrap-package.ps1 dist/install.ps1 \
-            dist/uninstall.ps1 dist/SHA256SUMS dist/release-manifest.json \
+          ASSETS=(
+            dist/endpoint-agent.exe dist/bootstrap-package.ps1 dist/install.ps1
+            dist/uninstall.ps1 dist/SHA256SUMS dist/release-manifest.json
             dist/windows/EndpointAgent.zip dist/windows/EndpointAgent.zip.sha256
+          )
+          # Create the release WITHOUT assets first (api.github.com), then upload
+          # via gh release upload with a retry loop: uploads.github.com
+          # intermittently returns HTTP 401 even when the token has contents:write
+          # (the release-create proves the scope). --clobber makes the retry
+          # idempotent. If the release already exists from a partial prior run,
+          # create is skipped and upload --clobber reconciles. (v0.2.2 hardening.)
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" \
+              --verify-tag --title "platform-agent $TAG (trusted-internal-ca)" \
+              --notes-file dist/RELEASE_NOTES.md
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if gh release upload "$TAG" "${ASSETS[@]}" --clobber; then ok=1; break; fi
+            echo "::warning::asset upload attempt $attempt failed — retrying in $((attempt*10))s"
+            sleep $((attempt*10))
+          done
+          [ "$ok" = "1" ] || { echo "::error::asset upload failed after 5 attempts"; exit 1; }
       - name: Build + push artifact-host image (GHCR)
         shell: bash
         env:
