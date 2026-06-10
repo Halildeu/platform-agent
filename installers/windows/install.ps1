@@ -98,15 +98,15 @@ param(
     # OpenSSL root that public Windows trust does NOT know. The agent
     # installer imports that root (LocalMachine\Root + TrustedPublisher)
     # so the binary signature validates AND future signed updates verify
-    # — domain-joined AND workgroup machines alike (GPO can't reach the
+    #  -  domain-joined AND workgroup machines alike (GPO can't reach the
     # latter). The root .cer ships in the payload next to this script;
     # before import its SHA256 must equal $ExpectedRootCertSha256 (the
-    # release-patched pin) — a mismatch ABORTS (never import an
+    # release-patched pin)  -  a mismatch ABORTS (never import an
     # unexpected root). -SkipRootTrust opts out (audited): the install
     # logs ROOT_TRUST_SKIPPED and the signature check then requires the
     # root to be pre-trusted by other means (GPO). (Codex 019eb0dd:
     # default-ON managed deployment + pin-match-before-import.)
-    # Real value (the internal root is public + stable, NOT release-specific —
+    # Real value (the internal root is public + stable, NOT release-specific  - 
     # unlike the binary URL/hash/thumbprint which ARE release-patched). Pinned
     # here so both the URL-download and MSI-payload paths self-verify the embedded
     # root before importing it. If the CA rotates, regenerate this + $script:CodesignRootCertB64.
@@ -169,7 +169,7 @@ function Import-CodesignRoot {
     $actualSha = $cert.GetCertHashString("SHA256").ToUpperInvariant()
     $expectSha = ($ExpectedSha256 -replace '\s', '').ToUpperInvariant()
 
-    # pin-match BEFORE any import — never import an unexpected root.
+    # pin-match BEFORE any import  -  never import an unexpected root.
     if ([string]::IsNullOrWhiteSpace($expectSha) -or $expectSha -eq "__INJECTED_ROOT_CERT_SHA256__") {
         throw "trusted-internal-ca: -ExpectedRootCertSha256 is unset/sentinel; refusing to import an unpinned root"
     }
@@ -818,7 +818,7 @@ function Invoke-VerifyDownloadedBinary {
                 # AG-018 internal-CA tier: the internal root was imported by
                 # Import-CodesignRoot before this check (unless -SkipRootTrust,
                 # which requires the root pre-trusted via GPO). Either way the
-                # signature MUST be Valid here — the internal CA is a real trust
+                # signature MUST be Valid here  -  the internal CA is a real trust
                 # anchor on this machine, so NotTrusted is a genuine failure.
                 if ($sig.Status -ne "Valid") {
                     throw "trusted-internal-ca tier requires Authenticode Status=Valid (got $($sig.Status): $($sig.StatusMessage)). The internal root must be trusted (Import-CodesignRoot, or GPO when -SkipRootTrust)."
