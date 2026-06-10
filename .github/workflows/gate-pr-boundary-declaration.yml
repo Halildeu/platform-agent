@@ -33,20 +33,80 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
           # Required heading (ADR-0011 §2.3 analog)
           HEADING="## Boundary declaration (ADR-0011 §2.3)"
 
-          # Fetch PR body via gh CLI (env transfer drops newlines; gh API preserves)
           PR_BODY_FILE=$(mktemp)
-          gh pr view "${PR_NUMBER}" --json body --jq .body > "${PR_BODY_FILE}"
+          trap 'rm -f "${PR_BODY_FILE}"' EXIT
 
-          if [ ! -s "${PR_BODY_FILE}" ]; then
-            echo "::error::PR body is empty — boundary declaration block missing"
-            echo "Required: '${HEADING}' block with 6 checkboxes"
-            echo "Reference: ADR-0012-EA BG-EA-1 governance guard"
+          # has_content <file>: true only when the file holds a real PR body —
+          # not empty, not whitespace-only, and not the literal "null" that
+          # `--jq .body` emits when the API returns a not-yet-populated body.
+          # ('-s' alone is insufficient: "null\n" and "  \n" are non-empty files
+          #  that would otherwise end the retry early and defeat the fix.)
+          has_content() {
+            [ -s "$1" ] || return 1
+            local stripped
+            stripped="$(tr -d '[:space:]' < "$1")"
+            [ -n "${stripped}" ] && [ "${stripped}" != "null" ]
+          }
+
+          # Fetch PR body via gh CLI. The API source is kept deliberately: it
+          # preserves the newlines the downstream '^- [x]' line-anchored count
+          # depends on, and avoids the script-injection risk of interpolating
+          # PR-author-controlled body text into the shell.
+          #
+          # Retry/backoff: on the 'opened' event GitHub's PR-body API can briefly
+          # return an empty / null body right after PR creation (read-after-write
+          # race), causing intermittent false-fails (PRs #137, #139, each needing
+          # a wasteful empty-commit re-trigger). Re-fetch until the body has real
+          # content before validating; only declare it empty if it is still empty
+          # after the retries. The body is already settled on synchronize / edited
+          # / reopened, so retry is scoped to 'opened' (other events do a single
+          # fetch). The happy path breaks on attempt 1, adding 0s everywhere.
+          if [ "${GH_EVENT_NAME}" = "opened" ]; then
+            MAX_ATTEMPTS=5
+          else
+            MAX_ATTEMPTS=1
+          fi
+          RETRY_DELAY=3
+          attempt=1
+          while [ "${attempt}" -le "${MAX_ATTEMPTS}" ]; do
+            # Capture gh's own failure (rc) separately from an empty-but-successful
+            # body so a transient API/network error is reported distinctly. The
+            # '|| rc=$?' also keeps 'set -e' from aborting mid-retry.
+            rc=0
+            gh pr view "${PR_NUMBER}" --json body --jq .body > "${PR_BODY_FILE}" 2>/dev/null || rc=$?
+            if has_content "${PR_BODY_FILE}"; then
+              [ "${attempt}" -gt 1 ] && echo "DEBUG: PR body resolved on attempt ${attempt}/${MAX_ATTEMPTS}"
+              break
+            fi
+            if [ "${rc}" -ne 0 ]; then
+              echo "DEBUG: gh pr view failed (rc=${rc}) on attempt ${attempt}/${MAX_ATTEMPTS}"
+            else
+              echo "DEBUG: PR body empty/null on attempt ${attempt}/${MAX_ATTEMPTS} — likely API race on '${GH_EVENT_NAME}' event"
+            fi
+            attempt=$((attempt + 1))
+            if [ "${attempt}" -le "${MAX_ATTEMPTS}" ]; then
+              sleep "${RETRY_DELAY}"
+            fi
+          done
+
+          if ! has_content "${PR_BODY_FILE}"; then
+            # 'rc' holds the final attempt's gh exit status. rc != 0 here means the
+            # last fetch failed at the API/CLI level (transient infra) rather than
+            # the contributor genuinely omitting the block — distinct remediation.
+            if [ "${rc}" -ne 0 ]; then
+              echo "::error::PR body could not be fetched after ${MAX_ATTEMPTS} attempt(s) (gh pr view rc=${rc}) — transient API/CI failure; re-run this check"
+            else
+              echo "::error::PR body is empty after ${MAX_ATTEMPTS} attempt(s) — boundary declaration block missing"
+              echo "Required: '${HEADING}' block with 6 checkboxes"
+              echo "Reference: ADR-0012-EA BG-EA-1 governance guard"
+            fi
             exit 1
           fi
 
@@ -100,8 +160,7 @@ jobs:
 
           echo "✓ Boundary declaration block valid (${MARKED} class(es) marked)"
 
-          # Cleanup
-          rm -f "${PR_BODY_FILE}"
+          # Temp file cleaned up by the EXIT trap registered above.
 
           # Note: 'none of the above' exclusivity check, user-approval-required label
           # check (for credential-write / state-mutation production / boundary-cross)
