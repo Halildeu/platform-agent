@@ -191,14 +191,13 @@ jobs:
           [ "$perms" = "2770" ] || { echo "::error::RUN_DIR perms $perms != 2770 (codesign group cannot write out.msi)"; exit 1; }
           IN_MSI="$(ls incoming/*.msi | head -1)"
           [ -n "$IN_MSI" ] || { echo "::error::no unsigned MSI in artifact"; exit 1; }
-          # integrity: build-unsigned named the unsigned MSI after the SAME resolved
-          # version (build-msi.ps1 -Version). If it doesn't, the build is inconsistent
-          # — fail LOUD rather than ship a mislabeled signed MSI.
+          # integrity: build-unsigned (-SigningMode none) names the MSI EXACTLY
+          # 'EndpointAgent-<ver>-unsigned.msi'. Require the FULL name (not a substring,
+          # which would let 0.2.1 match a 0.2.10 build) so a wrong-version MSI can't be
+          # re-signed under a correct-version name. Fail LOUD on any inconsistency.
           in_base="$(basename "$IN_MSI")"
-          case "$in_base" in
-            *"$VERSION"*) : ;;
-            *) echo "::error::unsigned MSI '$in_base' does not embed resolved version '$VERSION'"; exit 1 ;;
-          esac
+          expected_unsigned="EndpointAgent-${VERSION}-unsigned.msi"
+          [ "$in_base" = "$expected_unsigned" ] || { echo "::error::unsigned MSI '$in_base' != expected '$expected_unsigned'"; exit 1; }
           cp "$IN_MSI" "$RUN_DIR/in.msi"
           OUT="$RUN_DIR/out.msi"
           # the wrapper enforces arg/path/.msi/double-sign + fail-closed timestamp
