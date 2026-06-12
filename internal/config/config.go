@@ -85,6 +85,33 @@ type Config struct {
 	SelfUpdateAutoActivate      bool
 	SelfUpdateActivationTimeout time.Duration
 	SelfUpdateServiceName       string
+
+	// Faz 22.6 T-3 remote-bridge idle transport harness (ADR-0038). All of
+	// this is INERT unless RemoteBridgeEnabled is explicitly set — the agent
+	// never auto-connects on start (disabled-by-default until the
+	// owner-gated pilot, ADR-0034 §13/D10). T-3 carries NO capture/PTY: the
+	// harness only maintains the outbound CONTROL stream (AgentHello +
+	// heartbeat-obey + KILL-obey).
+	RemoteBridgeEnabled bool
+	// RemoteBridgeBrokerAddr is the broker gRPC target (host:port).
+	RemoteBridgeBrokerAddr string
+	// RemoteBridgeInsecurePlaintext dials without TLS — lab/loopback only;
+	// default is TLS with system roots (real mTLS identity lands in T-4).
+	RemoteBridgeInsecurePlaintext bool
+	// RemoteBridgeFirstHeartbeatDeadline bounds initial stream silence;
+	// RemoteBridgeHeartbeatMissFactor × the server-announced interval is the
+	// steady-state watchdog timeout (the agent-side missed-heartbeat policy
+	// T-2b deliberately left to T-3).
+	RemoteBridgeFirstHeartbeatDeadline time.Duration
+	RemoteBridgeHeartbeatMissFactor    int
+	// RemoteBridgeBackoffMin/Max bound the jittered exponential reconnect.
+	RemoteBridgeBackoffMin time.Duration
+	RemoteBridgeBackoffMax time.Duration
+	// RemoteBridgeIdentityPollInterval is the wait cadence while the device
+	// identity is not yet enrolled (the harness never dials without it).
+	RemoteBridgeIdentityPollInterval time.Duration
+	// RemoteBridgeDialTimeout caps a single transport connect attempt.
+	RemoteBridgeDialTimeout time.Duration
 }
 
 // BuildVersion is overridden at build time via
@@ -120,6 +147,15 @@ func Default() Config {
 		SelfUpdateMaxRedirects:      5,
 		SelfUpdateActivationTimeout: 2 * time.Minute,
 		SelfUpdateServiceName:       "EndpointAgent",
+
+		// Remote-bridge harness (T-3): disabled by default, no broker addr.
+		RemoteBridgeEnabled:                false,
+		RemoteBridgeFirstHeartbeatDeadline: 15 * time.Second,
+		RemoteBridgeHeartbeatMissFactor:    3,
+		RemoteBridgeBackoffMin:             time.Second,
+		RemoteBridgeBackoffMax:             5 * time.Minute,
+		RemoteBridgeIdentityPollInterval:   5 * time.Second,
+		RemoteBridgeDialTimeout:            10 * time.Second,
 	}
 }
 
@@ -158,6 +194,15 @@ func LoadFromEnv() Config {
 	cfg.SelfUpdateAutoActivate = envBool("ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE", cfg.SelfUpdateAutoActivate)
 	cfg.SelfUpdateActivationTimeout = envDuration("ENDPOINT_AGENT_SELF_UPDATE_ACTIVATION_TIMEOUT", cfg.SelfUpdateActivationTimeout)
 	cfg.SelfUpdateServiceName = envString("ENDPOINT_AGENT_SELF_UPDATE_SERVICE_NAME", cfg.SelfUpdateServiceName)
+	cfg.RemoteBridgeEnabled = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED", cfg.RemoteBridgeEnabled)
+	cfg.RemoteBridgeBrokerAddr = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR", cfg.RemoteBridgeBrokerAddr)
+	cfg.RemoteBridgeInsecurePlaintext = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT", cfg.RemoteBridgeInsecurePlaintext)
+	cfg.RemoteBridgeFirstHeartbeatDeadline = envDuration("ENDPOINT_AGENT_REMOTE_BRIDGE_FIRST_HEARTBEAT_DEADLINE", cfg.RemoteBridgeFirstHeartbeatDeadline)
+	cfg.RemoteBridgeHeartbeatMissFactor = envInt("ENDPOINT_AGENT_REMOTE_BRIDGE_HEARTBEAT_MISS_FACTOR", cfg.RemoteBridgeHeartbeatMissFactor)
+	cfg.RemoteBridgeBackoffMin = envDuration("ENDPOINT_AGENT_REMOTE_BRIDGE_BACKOFF_MIN", cfg.RemoteBridgeBackoffMin)
+	cfg.RemoteBridgeBackoffMax = envDuration("ENDPOINT_AGENT_REMOTE_BRIDGE_BACKOFF_MAX", cfg.RemoteBridgeBackoffMax)
+	cfg.RemoteBridgeIdentityPollInterval = envDuration("ENDPOINT_AGENT_REMOTE_BRIDGE_IDENTITY_POLL_INTERVAL", cfg.RemoteBridgeIdentityPollInterval)
+	cfg.RemoteBridgeDialTimeout = envDuration("ENDPOINT_AGENT_REMOTE_BRIDGE_DIAL_TIMEOUT", cfg.RemoteBridgeDialTimeout)
 	return cfg
 }
 

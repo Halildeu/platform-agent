@@ -1,0 +1,515 @@
+package harness
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log"
+	"net"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
+
+	pb "platform-agent/internal/remotebridge/pb"
+)
+
+// fakeBroker scripts the server side of the CONTROL stream over bufconn —
+// in-process, no listening socket on any real interface.
+type fakeBroker struct {
+	pb.UnimplementedRemoteBridgeServer
+	script func(stream pb.RemoteBridge_ConnectServer) error
+}
+
+func (f *fakeBroker) Connect(stream pb.RemoteBridge_ConnectServer) error {
+	return f.script(stream)
+}
+
+type fixture struct {
+	h     *Harness
+	dials *atomic.Int64
+}
+
+// start spins a bufconn broker + a running harness. The returned dials
+// counter counts harness connect ATTEMPTS (the Dialer seam), which is the
+// reconnect observable.
+func start(t *testing.T, script func(stream pb.RemoteBridge_ConnectServer) error, mutate func(*Config)) fixture {
+	t.Helper()
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	pb.RegisterRemoteBridgeServer(srv, &fakeBroker{script: script})
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	dials := &atomic.Int64{}
+	cfg := Config{
+		DeviceIDProvider:       func() string { return "device-test" },
+		AgentVersion:           "0.0.0-test",
+		FirstHeartbeatDeadline: 2 * time.Second,
+		BackoffMin:             10 * time.Millisecond,
+		BackoffMax:             50 * time.Millisecond,
+		IdentityPollInterval:   10 * time.Millisecond,
+		Dialer: func(ctx context.Context) (*grpc.ClientConn, error) {
+			dials.Add(1)
+			return grpc.NewClient("passthrough:///bufnet",
+				grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+					return lis.DialContext(ctx)
+				}),
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+			)
+		},
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	h, err := New(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go h.Run(ctx)
+	return fixture{h: h, dials: dials}
+}
+
+func heartbeatEnv(intervalMillis, frameSeq int64) *pb.Envelope {
+	return &pb.Envelope{
+		ChannelType: pb.ChannelType_CONTROL,
+		FrameSeq:    frameSeq,
+		Payload: &pb.Envelope_Heartbeat{Heartbeat: &pb.Heartbeat{
+			HeartbeatIntervalMillis: intervalMillis,
+			ProtocolVersion:         ProtocolVersion,
+		}},
+	}
+}
+
+func killEnv(sessionID, reason string) *pb.Envelope {
+	return &pb.Envelope{
+		ChannelType: pb.ChannelType_CONTROL,
+		SessionId:   sessionID,
+		Payload: &pb.Envelope_Kill{Kill: &pb.Kill{
+			SessionId:           sessionID,
+			KillReason:          reason,
+			IssuedAtEpochMillis: time.Now().UnixMilli(),
+		}},
+	}
+}
+
+func consentPromptEnv() *pb.Envelope {
+	return &pb.Envelope{
+		ChannelType: pb.ChannelType_CONTROL,
+		Payload: &pb.Envelope_ConsentPrompt{ConsentPrompt: &pb.ConsentPrompt{
+			SessionId:           "sess-early",
+			OperatorDisplayName: "op",
+		}},
+	}
+}
+
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// TestHelloFirstSeqContiguousAndDefectClose covers the contract test: the
+// FIRST outbound frame is AgentHello at frameSeq 0 on CONTROL with the
+// advisory fields populated and capabilities empty; a broker-authoritative
+// payload (consent_prompt) while idle triggers an ErrorFrame at the NEXT
+// contiguous seq (1) and a stream close (Codex T-3 revision #3).
+func TestHelloFirstSeqContiguousAndDefectClose(t *testing.T) {
+	hellos := make(chan *pb.Envelope, 16)
+	agentFrames := make(chan *pb.Envelope, 16)
+	closes := make(chan error, 16)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		env, err := s.Recv()
+		if err != nil {
+			return err
+		}
+		hellos <- env
+		_ = s.Send(heartbeatEnv(60_000, 0))
+		_ = s.Send(consentPromptEnv())
+		for {
+			frame, err := s.Recv()
+			if err != nil {
+				closes <- err
+				return nil
+			}
+			agentFrames <- frame
+		}
+	}
+	fx := start(t, script, nil)
+
+	var hello *pb.Envelope
+	select {
+	case hello = <-hellos:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no AgentHello within 3s")
+	}
+	if hello.GetAgentHello() == nil {
+		t.Fatalf("first frame is %T, want AgentHello", hello.GetPayload())
+	}
+	if hello.GetChannelType() != pb.ChannelType_CONTROL {
+		t.Errorf("hello channel %v, want CONTROL", hello.GetChannelType())
+	}
+	if hello.GetFrameSeq() != 0 {
+		t.Errorf("hello frameSeq %d, want 0", hello.GetFrameSeq())
+	}
+	ah := hello.GetAgentHello()
+	if ah.GetDeviceId() != "device-test" {
+		t.Errorf("hello deviceId %q", ah.GetDeviceId())
+	}
+	if ah.GetProtocolVersion() != ProtocolVersion {
+		t.Errorf("hello protocolVersion %q, want %q", ah.GetProtocolVersion(), ProtocolVersion)
+	}
+	if ah.GetAgentVersion() == "" || ah.GetCertFingerprint() == "" || ah.GetAttestationEvidenceB64() == "" {
+		t.Error("advisory hello text fields must be non-blank (broker decode requires them)")
+	}
+	if len(ah.GetAdvertisedCapabilities()) != 0 {
+		t.Errorf("idle harness advertised %v, want none", ah.GetAdvertisedCapabilities())
+	}
+
+	var errFrame *pb.Envelope
+	select {
+	case errFrame = <-agentFrames:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no defect ErrorFrame within 3s")
+	}
+	if errFrame.GetError() == nil {
+		t.Fatalf("agent frame is %T, want ErrorFrame", errFrame.GetPayload())
+	}
+	if got := errFrame.GetError().GetCode(); got != "unsupported-payload-in-idle" {
+		t.Errorf("defect code %q", got)
+	}
+	if errFrame.GetFrameSeq() != 1 {
+		t.Errorf("error frameSeq %d, want 1 (contiguous after hello)", errFrame.GetFrameSeq())
+	}
+	if errFrame.GetChannelType() != pb.ChannelType_CONTROL {
+		t.Errorf("error channel %v, want CONTROL", errFrame.GetChannelType())
+	}
+	select {
+	case err := <-closes:
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("agent close err %v, want io.EOF (CloseSend)", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent did not close the defective stream")
+	}
+	waitFor(t, time.Second, "defect counter", func() bool {
+		_, _, _, defects := fx.h.Counters()
+		return defects >= 1
+	})
+}
+
+// TestKillObeySubSecond: a session-scoped kill mutates local session state
+// in well under a second and does NOT tear down the transport.
+func TestKillObeySubSecond(t *testing.T) {
+	killSent := make(chan time.Time, 16)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		_ = s.Send(heartbeatEnv(60_000, 0))
+		killSent <- time.Now()
+		_ = s.Send(killEnv("sess-x", "policy-revoked"))
+		<-s.Context().Done() // hold the stream open: session kill ≠ stream end
+		return nil
+	}
+	fx := start(t, script, nil)
+
+	var sentAt time.Time
+	select {
+	case sentAt = <-killSent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("broker never sent the kill")
+	}
+	waitFor(t, time.Second, "session killed", func() bool {
+		st, ok := fx.h.Session("sess-x")
+		return ok && st.Killed
+	})
+	elapsed := time.Since(sentAt)
+	if elapsed >= time.Second {
+		t.Fatalf("kill obeyed in %s, want sub-second", elapsed)
+	}
+	st, _ := fx.h.Session("sess-x")
+	if st.KillReason != "policy-revoked" {
+		t.Errorf("kill reason %q", st.KillReason)
+	}
+	// Transport must stay up after a session-scoped kill.
+	time.Sleep(100 * time.Millisecond)
+	if got := fx.dials.Load(); got != 1 {
+		t.Errorf("dials after session kill = %d, want 1 (no reconnect)", got)
+	}
+	_, _, kills, _ := fx.h.Counters()
+	if kills < 1 {
+		t.Error("kill counter not incremented")
+	}
+}
+
+// TestTransportKillClosesStreamAndReconnects: the "transport-kill" sentinel
+// terminates the whole connection; the harness reconnects on the NORMAL
+// backoff path (Codex T-3 Q2).
+func TestTransportKillClosesStreamAndReconnects(t *testing.T) {
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		_ = s.Send(killEnv(TransportKillSessionID, "rotation"))
+		return nil // broker completes after kill (sendAndClose semantics)
+	}
+	fx := start(t, script, nil)
+	waitFor(t, 3*time.Second, "transport kill obeyed", func() bool {
+		st, ok := fx.h.Session(TransportKillSessionID)
+		return ok && st.Killed
+	})
+	waitFor(t, 3*time.Second, "reconnect after transport kill", func() bool {
+		return fx.dials.Load() >= 2
+	})
+}
+
+// TestMissedFirstHeartbeatReconnects: a silent fresh stream trips the
+// FirstHeartbeatDeadline watchdog and the harness redials with backoff —
+// the agent-side idle policy T-2b deliberately left to T-3.
+func TestMissedFirstHeartbeatReconnects(t *testing.T) {
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		<-s.Context().Done() // never send a heartbeat
+		return nil
+	}
+	fx := start(t, script, func(c *Config) { c.FirstHeartbeatDeadline = 80 * time.Millisecond })
+	waitFor(t, 5*time.Second, "watchdog-driven reconnects", func() bool {
+		return fx.dials.Load() >= 3
+	})
+	_, healthy, _, _ := fx.h.Counters()
+	if healthy != 0 {
+		t.Errorf("healthy counter %d, want 0 (no heartbeat ever)", healthy)
+	}
+}
+
+// TestSteadyStateMissedHeartbeatReconnects: after a valid heartbeat the
+// watchdog re-arms at interval×missFactor; broker silence then forces a
+// reconnect. Uses the minimum legal interval (1s clamp), so this test takes
+// ~3s wall-clock by design.
+func TestSteadyStateMissedHeartbeatReconnects(t *testing.T) {
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		_ = s.Send(heartbeatEnv(1_000, 0)) // 1s interval → watchdog 3s
+		<-s.Context().Done()               // then silence
+		return nil
+	}
+	fx := start(t, script, nil)
+	waitFor(t, 2*time.Second, "stream healthy", func() bool {
+		_, healthy, _, _ := fx.h.Counters()
+		return healthy >= 1
+	})
+	waitFor(t, 6*time.Second, "steady-state watchdog reconnect", func() bool {
+		return fx.dials.Load() >= 2
+	})
+}
+
+// TestInboundSeqReplayDefectCloses: the broker today pushes unsequenced
+// frames (seq 0, always accepted); once a POSITIVE seq appears it must
+// strictly increase — a repeat is a replayed frame and closes the stream
+// (Codex T-3 revision #4, forward-compatible form).
+func TestInboundSeqReplayDefectCloses(t *testing.T) {
+	codes := make(chan string, 16)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		_ = s.Send(heartbeatEnv(60_000, 5))
+		_ = s.Send(heartbeatEnv(60_000, 5)) // replay
+		for {
+			frame, err := s.Recv()
+			if err != nil {
+				return nil
+			}
+			if frame.GetError() != nil {
+				codes <- frame.GetError().GetCode()
+			}
+		}
+	}
+	fx := start(t, script, nil)
+	select {
+	case code := <-codes:
+		if code != "frame-seq-replay" {
+			t.Errorf("defect code %q, want frame-seq-replay", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no replay defect ErrorFrame")
+	}
+	waitFor(t, 3*time.Second, "reconnect after replay defect", func() bool {
+		return fx.dials.Load() >= 2
+	})
+}
+
+// TestHeartbeatInvalidIntervalDefectCloses: a heartbeat without a positive
+// interval cannot drive the watchdog — protocol defect.
+func TestHeartbeatInvalidIntervalDefectCloses(t *testing.T) {
+	codes := make(chan string, 16)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		_ = s.Send(&pb.Envelope{
+			ChannelType: pb.ChannelType_CONTROL,
+			Payload:     &pb.Envelope_Heartbeat{Heartbeat: &pb.Heartbeat{}}, // interval 0
+		})
+		for {
+			frame, err := s.Recv()
+			if err != nil {
+				return nil
+			}
+			if frame.GetError() != nil {
+				codes <- frame.GetError().GetCode()
+			}
+		}
+	}
+	start(t, script, nil)
+	select {
+	case code := <-codes:
+		if code != "heartbeat-invalid-interval" {
+			t.Errorf("defect code %q", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no invalid-interval defect ErrorFrame")
+	}
+}
+
+// TestNeverDialsWithoutDeviceID: an enabled harness with no enrolled
+// identity must not produce a single dial (Codex T-3 revision #2); once the
+// identity appears it connects and the hello carries it.
+func TestNeverDialsWithoutDeviceID(t *testing.T) {
+	var deviceID atomic.Value
+	deviceID.Store("")
+	hellos := make(chan *pb.Envelope, 16)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		env, err := s.Recv()
+		if err != nil {
+			return err
+		}
+		hellos <- env
+		_ = s.Send(heartbeatEnv(60_000, 0))
+		<-s.Context().Done()
+		return nil
+	}
+	fx := start(t, script, func(c *Config) {
+		c.DeviceIDProvider = func() string { return deviceID.Load().(string) }
+	})
+	time.Sleep(150 * time.Millisecond)
+	if got := fx.dials.Load(); got != 0 {
+		t.Fatalf("harness dialed %d times without a device identity", got)
+	}
+	deviceID.Store("device-late")
+	select {
+	case hello := <-hellos:
+		if hello.GetAgentHello().GetDeviceId() != "device-late" {
+			t.Errorf("hello deviceId %q, want device-late", hello.GetAgentHello().GetDeviceId())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no hello after identity became available")
+	}
+}
+
+// --- pure-function and sender unit tests ---
+
+func TestNextBackoff(t *testing.T) {
+	lo, hi := time.Second, 5*time.Minute
+	cases := []struct{ cur, want time.Duration }{
+		{time.Second, 2 * time.Second},
+		{2 * time.Second, 4 * time.Second},
+		{4 * time.Minute, 5 * time.Minute}, // capped
+		{5 * time.Minute, 5 * time.Minute}, // stays capped
+		{0, lo},                            // floor
+	}
+	for _, c := range cases {
+		if got := nextBackoff(c.cur, lo, hi); got != c.want {
+			t.Errorf("nextBackoff(%s) = %s, want %s", c.cur, got, c.want)
+		}
+	}
+}
+
+func TestJitterBounds(t *testing.T) {
+	d := 100 * time.Millisecond
+	for i := 0; i < 1000; i++ {
+		j := jitter(d)
+		if j < 80*time.Millisecond || j > 120*time.Millisecond {
+			t.Fatalf("jitter(%s) = %s outside ±20%%", d, j)
+		}
+	}
+}
+
+func TestClampInterval(t *testing.T) {
+	if got := clampInterval(10 * time.Millisecond); got != minHeartbeatInterval {
+		t.Errorf("clamp low: %s", got)
+	}
+	if got := clampInterval(time.Hour); got != maxHeartbeatInterval {
+		t.Errorf("clamp high: %s", got)
+	}
+	if got := clampInterval(30 * time.Second); got != 30*time.Second {
+		t.Errorf("clamp passthrough: %s", got)
+	}
+}
+
+// fakeClientStream records sends; the embedded nil ClientStream would panic
+// if any unexpected method were touched.
+type fakeClientStream struct {
+	grpc.ClientStream
+	mu   sync.Mutex
+	sent []*pb.Envelope
+}
+
+func (f *fakeClientStream) Send(e *pb.Envelope) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent = append(f.sent, e)
+	return nil
+}
+
+func (f *fakeClientStream) Recv() (*pb.Envelope, error) { return nil, io.EOF }
+
+// TestOutboundAllowlistRefusesBrokerAuthority: the sender locally refuses
+// payloads outside the agent-allowed CONTROL set — a kill (broker authority)
+// can never even be attempted from the endpoint.
+func TestOutboundAllowlistRefusesBrokerAuthority(t *testing.T) {
+	fs := &fakeClientStream{}
+	s := &controlSender{stream: fs}
+	err := s.send(&pb.Envelope{Payload: &pb.Envelope_Kill{Kill: &pb.Kill{SessionId: "x"}}})
+	if err == nil {
+		t.Fatal("sender accepted a broker-authority payload")
+	}
+	if len(fs.sent) != 0 {
+		t.Fatal("refused payload still reached the stream")
+	}
+	// Allowed frames pass and the seq stays contiguous.
+	if err := s.sendError("e1", false); err != nil {
+		t.Fatalf("sendError: %v", err)
+	}
+	if err := s.sendError("e2", true); err != nil {
+		t.Fatalf("sendError: %v", err)
+	}
+	if len(fs.sent) != 2 || fs.sent[0].GetFrameSeq() != 0 || fs.sent[1].GetFrameSeq() != 1 {
+		t.Fatalf("outbound seq not contiguous: %v", fs.sent)
+	}
+	for _, e := range fs.sent {
+		if e.GetChannelType() != pb.ChannelType_CONTROL {
+			t.Errorf("outbound channel %v, want CONTROL", e.GetChannelType())
+		}
+		if e.GetSentAtEpochMillis() <= 0 {
+			t.Error("sentAt not stamped")
+		}
+	}
+}
