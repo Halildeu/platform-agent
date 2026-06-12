@@ -1,0 +1,34 @@
+# gitleaks configuration for platform-agent.
+#
+# Extends the upstream default ruleset and adds a narrow, DOCUMENTED allowlist
+# for the redaction-test fixtures. Those tests (internal/security/redact_*_test.go)
+# MUST contain secret-SHAPED strings — that is precisely what they assert gets
+# masked — so the default rules legitimately fire on them. The strings are
+# self-evidently fake placeholders (MASKME, sk_test_placeholder, ABC-DEF-123-XYZ,
+# sk_live_abc123, rt-abcdef-0123); none is a real credential.
+#
+# Pre-publication audit (2026-06-12): `gitleaks detect --log-opts=origin/main`
+# (main's linear history) = ZERO findings. The only matches live in archived
+# pre-squash feature-branch commits (archive/* tags) and are all the fixtures
+# above. This allowlist makes EVERY scan mode (incl. `--log-opts=--all`)
+# deterministically clean and records the intent for public reviewers, rather
+# than relying on commit-pinned `.gitleaksignore` fingerprints (fragile).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Redaction-test fixtures: intentional secret-shaped placeholders, never real credentials."
+paths = [
+  '''internal/security/redact_installer_test\.go''',
+  '''internal/security/redact_text_test\.go''',
+  '''internal/security/redact_pii_test\.go''',
+  '''internal/security/redact_test\.go''',
+]
+regexes = [
+  '''MASKME''',
+  '''sk_test_placeholder''',
+  '''sk_live_abc123''',
+  '''ABC-DEF-123-XYZ''',
+  '''rt-abcdef-0123''',
+]
