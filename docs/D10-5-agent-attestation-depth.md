@@ -36,9 +36,12 @@ same source on a pinned toolchain and asserts byte-identical SHA-256. Determinis
 - **no `.syso`** resource (the proof is resourceless/unsigned; the versioninfo `.syso`
   belongs to the signed release path only)
 
-Local proof (darwin/arm64 cross-compile, go1.26.2): two builds →
-`954d0633978039ed019eab62ca4e6f9039a728fb386ea5015e93aa0978575555` (identical). CI repeats
-this on a `go.mod`-pinned toolchain.
+**Local smoke** (darwin/arm64 cross-compile, go**1.26.2**): two builds →
+`954d0633978039ed019eab62ca4e6f9039a728fb386ea5015e93aa0978575555` (byte-identical). This is a
+SMOKE only — the **authoritative** proof is the CI job summary, which builds on the
+`go.mod`-pinned toolchain (go **1.25.0**). The CI absolute hash MAY differ from the local one
+(different toolchain) — what both prove is the SAME invariant: two builds of one source on ONE
+fixed toolchain are byte-identical. The absolute hash is not the artifact; the equality is.
 
 ## Remaining (NOT in this slice)
 

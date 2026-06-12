@@ -74,9 +74,12 @@ jobs:
           go build -trimpath -buildvcs=false -mod=readonly \
             -ldflags "-s -w -buildid= -X platform-agent/internal/config.BuildVersion=${REPRO_BUILD_VERSION}" \
             -o "${RUNNER_TEMP}/agent-1.exe" ./cmd/endpoint-agent
-          # No .syso must leak into a reproducible build (resourceless/unsigned).
-          if ls ./cmd/endpoint-agent/*.syso >/dev/null 2>&1 || ls *.syso >/dev/null 2>&1; then
-            echo "::error::a .syso resource is present — the reproducible proof must be resourceless"
+          # No .syso may be LINKED into a reproducible build (resourceless/unsigned).
+          # Build-tag-aware: ask the linker's own dependency graph for SysoFiles
+          # (catches a .syso anywhere on the import path, not just two dirs — Codex P2).
+          SYSO=$(go list -deps -f '{{if .SysoFiles}}{{.ImportPath}} {{.SysoFiles}}{{end}}' ./cmd/endpoint-agent)
+          if [ -n "${SYSO}" ]; then
+            echo "::error::a .syso resource is linked — the reproducible proof must be resourceless: ${SYSO}"
             exit 1
           fi
 
