@@ -157,6 +157,11 @@ func main() {
 			if err != nil {
 				return err
 			}
+			// Faz 22.6 T-3: inert unless ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED
+			// is explicitly set; never dials before enrollment populates the
+			// device identity. Auto-enroll mode wiring waits for T-4 (its
+			// mTLS identity IS the T-4 transport credential).
+			app.StartRemoteBridge(ctx, cfg, runner.Client.DeviceID, logger)
 			return runner.RunLoop(ctx)
 		}); err != nil {
 			logger.Fatalf("service run failed: %v", err)
@@ -171,11 +176,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if *once {
+		// --once is a one-shot diagnostic pass; the long-lived remote-bridge
+		// harness is loop-mode only.
 		if err := runner.RunOnce(ctx); err != nil {
 			logger.Fatalf("agent run failed: %v", err)
 		}
 		return
 	}
+	app.StartRemoteBridge(ctx, cfg, runner.Client.DeviceID, logger)
 	if err := runner.RunLoop(ctx); err != nil && err != context.Canceled {
 		logger.Fatalf("agent loop failed: %v", err)
 	}

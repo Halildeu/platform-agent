@@ -1,0 +1,227 @@
+// VENDORED COPY (T-3) — source of truth: platform-backend
+// endpoint-admin-service/src/main/proto/remote_bridge.proto. Field numbers,
+// package and message shapes are FROZEN by the shadow wire spec; the ONLY
+// local addition is the go_package option for Go codegen. Regenerate with
+// scripts/proto/generate.sh; never edit field numbers here.
+// Faz 22.6 T-2a — remote-bridge wire contract (protobuf encoding of the T-1 domain records).
+//
+// Decided by ADR-0038 (gRPC bidi over mTLS, broker-authoritative ALLOW / agent-authoritative DENY);
+// field numbers are FIXED by the shadow wire spec written in T-1a:
+//   endpoint-admin-service/docs/remote-bridge-wire-contract.md
+// Codex architecture thread 019eb9fb (T-2a iter: Connect=CONTROL + Data=DATA streams; KILL is a
+// CONTROL envelope payload, NOT a separate RPC, so it can never be queued behind DATA backpressure).
+//
+// T-1 owns MEANING (records, canonicalisation, validation in
+// com.example.endpointadmin.remoteaccess.bridge.contract); this file owns BYTES. The adapters in
+// ...bridge.wire re-validate EVERYTHING on decode (WireContract.isValidId, pilot-capability
+// default-deny) — a generated proto class never reaches the broker directly.
+//
+// T-2a is contract + codegen + adapters ONLY: no server, no Spring wiring, no TLS, no port.
+// Stream runtime semantics (heartbeat scheduling, backpressure, KILL latency) are T-2b; real
+// screen/PTY DATA payloads are T-4 (owner-pilot-gated, ADR-0034 §13/D10).
+
+syntax = "proto3";
+
+package endpointadmin.remotebridge.v1;
+
+option java_package = "com.example.endpointadmin.remoteaccess.bridge.proto";
+option java_multiple_files = true;
+option java_outer_classname = "RemoteBridgeProto";
+option go_package = "platform-agent/internal/remotebridge/pb;remotebridgepb";
+
+// ---------------------------------------------------------------------------
+// Service — two agent-initiated (outbound-only) bidi streams.
+//
+//   Connect : the long-lived CONTROL stream. Session control, consent, permits,
+//             KILL, heartbeats, control-plane audit events. Never-drop.
+//   Data    : the DATA stream for high-volume / backpressure-prone payloads
+//             (screen frames, PTY output). Drop-tolerant. Declared in T-2a;
+//             semantically inert until T-2b/T-4.
+//
+// KILL travels on CONTROL (Envelope.kill). CONTROL and DATA are separate HTTP/2
+// streams (T-2b may put them on separate connections) so DATA backpressure can
+// never delay a KILL.
+// ---------------------------------------------------------------------------
+service RemoteBridge {
+  rpc Connect(stream Envelope) returns (stream Envelope);
+  rpc Data(stream Envelope) returns (stream Envelope);
+}
+
+// Pilot capability set (ADR-0034 D8). 0 is default-deny: an unset/unknown
+// capability MUST be refused by the decoder, never mapped to a pilot value.
+// The non-pilot RemoteSessionCapability values (FULL_RDP, FILE_TRANSFER,
+// CLIPBOARD_SYNC, PORT_FORWARD, CREDENTIAL_ENTRY, ELEVATION) stay OFF-wire.
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+  VIEW_ONLY = 1;
+  CONSTRAINED_PTY = 2;
+  reserved 3 to 15;
+}
+
+// Pilot operation set — only the operations the pilot broker allowlists
+// (RemoteBridgeBroker: SCREEN_VIEW + PTY_COMMAND) exist on the wire at all.
+// 0 is default-deny.
+enum WireOperation {
+  WIRE_OPERATION_UNSPECIFIED = 0;
+  SCREEN_VIEW = 1;
+  PTY_COMMAND = 2;
+  reserved 3 to 15;
+}
+
+// Logical channel (ADR-0038 §4). 0 is default-deny: every envelope must
+// declare its channel explicitly; decoders reject UNSPECIFIED.
+enum ChannelType {
+  CHANNEL_TYPE_UNSPECIFIED = 0;
+  CONTROL = 1;
+  DATA = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Envelope — the single frame type on both streams.
+//
+// Channel/payload compatibility (enforced by the T-2a adapter, tested):
+//   CONTROL : agent_hello, session_request, consent_prompt, consent_result,
+//             operation_request, operation_permit, kill, audit_event,
+//             heartbeat, error
+//   DATA    : data_frame, heartbeat, error
+// ---------------------------------------------------------------------------
+message Envelope {
+  // Optional routing headers — empty until a session exists (e.g. AgentHello),
+  // but when set they MUST pass the wire-id allowlist.
+  string session_id = 1;
+  string device_id = 2;
+  ChannelType channel_type = 3;
+  int64 frame_seq = 4;
+  string stream_id = 5;
+  int64 sent_at_epoch_millis = 6;
+
+  oneof payload {
+    AgentHello agent_hello = 10;
+    SessionRequest session_request = 11;
+    ConsentPrompt consent_prompt = 12;
+    ConsentResult consent_result = 13;
+    OperationRequest operation_request = 14;
+    OperationPermit operation_permit = 15;
+    Kill kill = 16;
+    AuditEvent audit_event = 17;
+    Heartbeat heartbeat = 18;
+    DataFrame data_frame = 19;
+    ErrorFrame error = 20;
+  }
+}
+
+// Agent → broker on connect. ADVISORY ONLY — never an authorization input.
+// The broker re-derives every authoritative fact through the B1.4 verifiers
+// into RemoteBridgeTrustEvidence; nothing here is trusted as a boolean.
+message AgentHello {
+  string agent_version = 1;
+  string device_id = 2;            // broker re-derives device trust (B1.4d)
+  string cert_fingerprint = 3;     // advisory; the broker uses the real mTLS peer cert
+  string attestation_evidence_b64 = 4;
+  string protocol_version = 5;
+  repeated Capability advertised_capabilities = 6;
+}
+
+// Operator console → broker (the operator never talks to the agent directly).
+message SessionRequest {
+  string session_id = 1;
+  string device_id = 2;
+  string operator_subject = 3;
+  string reason = 4;
+  repeated Capability requested_capabilities = 5; // non-empty, all-pilot (WireContract)
+}
+
+// Broker → agent: prompt the endpoint user for attended consent.
+message ConsentPrompt {
+  string session_id = 1;
+  string operator_display_name = 2;
+  string reason = 3;
+  repeated Capability capabilities = 4;
+  int64 expiry_epoch_millis = 5;
+}
+
+// Agent → broker: the endpoint user's consent outcome (becomes a ConsentLease).
+message ConsentResult {
+  string session_id = 1;
+  bool granted = 2;
+  string windows_interactive_session = 3;
+  int64 granted_at_epoch_millis = 4;
+  int64 expiry_epoch_millis = 5;
+}
+
+// Operator console → broker: one attempted operation. command_line is empty
+// for a non-PTY operation (the adapter normalises empty → null; the raw
+// command travels ONLY here — a permit carries the canonical hash, never the
+// raw command).
+message OperationRequest {
+  string session_id = 1;
+  string operation_id = 2;
+  WireOperation operation = 3;
+  string command_line = 4;
+}
+
+// Broker-signed (T-1b ECDSA P-256 signer), agent-verified. The signature
+// covers OperationPermit.canonicalPayload() — the T-1 length-prefixed byte
+// sequence over fields 1-14, independent of this protobuf encoding. The
+// adapters MUST reproduce those exact bytes after a round-trip (tested
+// byte-for-byte). Field 15 (signature) is NOT signed.
+message OperationPermit {
+  string alg = 1;
+  string kid = 2;
+  int32 permit_version = 3;
+  string policy_version = 4;
+  string decision_id = 5;
+  string session_id = 6;
+  string operation_id = 7;
+  string device_id = 8;
+  string operator_subject = 9;
+  Capability capability = 10;
+  string command_hash = 11;          // CanonicalCommand.hash(); empty for non-command op
+  int64 issued_at_epoch_millis = 12;
+  int64 expires_at_epoch_millis = 13;
+  int64 seq = 14;                    // monotonic per-session (replay guard)
+  string signature_b64 = 15;         // broker signature over fields 1-14
+}
+
+// Broker → agent (CONTROL): terminate the session now. Sub-second delivery is
+// the T-2b latency requirement; the contract guarantee here is that Kill is a
+// CONTROL payload and can never sit behind DATA backpressure.
+message Kill {
+  string session_id = 1;
+  string kill_reason = 2;
+  int64 issued_at_epoch_millis = 3;
+}
+
+// Control-plane audit event — metadata + content hash, NEVER raw payload.
+message AuditEvent {
+  string session_id = 1;
+  string event_type = 2;
+  string content_hash = 3;
+  int64 epoch_millis = 4;
+}
+
+// Liveness + lease propagation (both channels). Scheduling semantics are T-2b.
+message Heartbeat {
+  int64 heartbeat_interval_millis = 1;
+  int64 lease_expires_at_epoch_millis = 2;
+  string protocol_version = 3;
+}
+
+// DATA-plane frame. Declared in T-2a (field numbers finalized); carries no
+// business semantics until T-2b/T-4. T-2b enforces a max frame byte size at
+// the stream layer (no decode-time size guard exists in T-2a — no config yet).
+message DataFrame {
+  string stream_id = 1;
+  int64 frame_seq = 2;
+  string content_type = 3;
+  bytes payload = 4;
+  bool end_stream = 5;
+}
+
+// Structured error (both channels) — avoids ad-hoc status strings later.
+// detail is internal/debug only; never secrets, never raw session content.
+message ErrorFrame {
+  string code = 1;
+  string detail = 2;
+  bool retryable = 3;
+}

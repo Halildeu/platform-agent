@@ -1,0 +1,47 @@
+package config
+
+import (
+	"testing"
+	"time"
+)
+
+func TestRemoteBridgeDefaultsDisabled(t *testing.T) {
+	cfg := Default()
+	if cfg.RemoteBridgeEnabled {
+		t.Fatal("RemoteBridgeEnabled must default to false (disabled-by-default)")
+	}
+	if cfg.RemoteBridgeBrokerAddr != "" {
+		t.Fatalf("RemoteBridgeBrokerAddr default %q, want empty", cfg.RemoteBridgeBrokerAddr)
+	}
+	if cfg.RemoteBridgeInsecurePlaintext {
+		t.Fatal("RemoteBridgeInsecurePlaintext must default to false (TLS default)")
+	}
+	if cfg.RemoteBridgeFirstHeartbeatDeadline != 15*time.Second {
+		t.Errorf("FirstHeartbeatDeadline default %s", cfg.RemoteBridgeFirstHeartbeatDeadline)
+	}
+	if cfg.RemoteBridgeHeartbeatMissFactor != 3 {
+		t.Errorf("HeartbeatMissFactor default %d", cfg.RemoteBridgeHeartbeatMissFactor)
+	}
+	if cfg.RemoteBridgeBackoffMin != time.Second || cfg.RemoteBridgeBackoffMax != 5*time.Minute {
+		t.Errorf("backoff defaults %s/%s", cfg.RemoteBridgeBackoffMin, cfg.RemoteBridgeBackoffMax)
+	}
+}
+
+func TestRemoteBridgeEnvOverrides(t *testing.T) {
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED", "true")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR", "broker.example:8443")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT", "true")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_FIRST_HEARTBEAT_DEADLINE", "20s")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_HEARTBEAT_MISS_FACTOR", "5")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_BACKOFF_MIN", "2s")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_BACKOFF_MAX", "10m")
+	cfg := LoadFromEnv()
+	if !cfg.RemoteBridgeEnabled || cfg.RemoteBridgeBrokerAddr != "broker.example:8443" ||
+		!cfg.RemoteBridgeInsecurePlaintext ||
+		cfg.RemoteBridgeFirstHeartbeatDeadline != 20*time.Second ||
+		cfg.RemoteBridgeHeartbeatMissFactor != 5 ||
+		cfg.RemoteBridgeBackoffMin != 2*time.Second ||
+		cfg.RemoteBridgeBackoffMax != 10*time.Minute {
+		t.Fatalf("env overrides not applied: %+v", cfg)
+	}
+}
