@@ -2,7 +2,6 @@ package harness
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log"
 	"net"
@@ -198,8 +197,12 @@ func TestHelloFirstSeqContiguousAndDefectClose(t *testing.T) {
 	}
 	select {
 	case err := <-closes:
-		if !errors.Is(err, io.EOF) {
-			t.Errorf("agent close err %v, want io.EOF (CloseSend)", err)
+		// The agent half-closes (CloseSend) and then tears the conn down;
+		// depending on which the server observes first this surfaces as
+		// io.EOF or a Canceled status — both prove the defective stream
+		// ENDED, which is the invariant under test.
+		if err == nil {
+			t.Error("agent close err nil, want a terminal stream error")
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("agent did not close the defective stream")
@@ -421,6 +424,101 @@ func TestNeverDialsWithoutDeviceID(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no hello after identity became available")
+	}
+}
+
+// TestInboundSeqModeRegressionDefectCloses: once the broker has spoken in
+// sequenced mode (a positive seq), a later unsequenced frame (seq 0) is a
+// mode regression and closes the stream (Codex mixed-mode tightening).
+func TestInboundSeqModeRegressionDefectCloses(t *testing.T) {
+	codes := make(chan string, 16)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		_ = s.Send(heartbeatEnv(60_000, 5)) // sequenced mode
+		_ = s.Send(heartbeatEnv(60_000, 0)) // regression to unsequenced
+		for {
+			frame, err := s.Recv()
+			if err != nil {
+				return nil
+			}
+			if frame.GetError() != nil {
+				codes <- frame.GetError().GetCode()
+			}
+		}
+	}
+	start(t, script, nil)
+	select {
+	case code := <-codes:
+		if code != "frame-seq-mode-regression" {
+			t.Errorf("defect code %q, want frame-seq-mode-regression", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no mode-regression defect ErrorFrame")
+	}
+}
+
+// TestDialPhaseBoundedByDialTimeout: an unreachable/wedged broker (the
+// transport never reaches Ready) must not park the harness outside its
+// backoff loop — the connect phase is capped by DialTimeout (Codex 019ebb18
+// P2) and redial continues.
+func TestDialPhaseBoundedByDialTimeout(t *testing.T) {
+	dials := &atomic.Int64{}
+	blackHole := func(ctx context.Context) (*grpc.ClientConn, error) {
+		dials.Add(1)
+		return grpc.NewClient("passthrough:///black-hole",
+			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+				<-ctx.Done() // never produces a connection
+				return nil, ctx.Err()
+			}),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+	}
+	h, err := New(Config{
+		DeviceIDProvider:     func() string { return "device-test" },
+		DialTimeout:          50 * time.Millisecond,
+		BackoffMin:           10 * time.Millisecond,
+		BackoffMax:           30 * time.Millisecond,
+		IdentityPollInterval: 10 * time.Millisecond,
+		Dialer:               blackHole,
+	}, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go h.Run(ctx)
+	waitFor(t, 5*time.Second, "redials despite a wedged broker", func() bool {
+		return dials.Load() >= 3
+	})
+	_, healthy, _, _ := h.Counters()
+	if healthy != 0 {
+		t.Errorf("healthy %d, want 0", healthy)
+	}
+}
+
+func TestInboundSeqGuardTable(t *testing.T) {
+	cases := []struct {
+		name string
+		seqs []int64
+		want []string
+	}{
+		{"legacy all-zero", []int64{0, 0, 0}, []string{"", "", ""}},
+		{"sequenced strictly increasing", []int64{1, 2, 9}, []string{"", "", ""}},
+		{"replay equal", []int64{5, 5}, []string{"", "frame-seq-replay"}},
+		{"replay rewind", []int64{5, 3}, []string{"", "frame-seq-replay"}},
+		{"mode regression", []int64{5, 0}, []string{"", "frame-seq-mode-regression"}},
+		{"negative", []int64{-1}, []string{"negative-frame-seq"}},
+		{"legacy then sequenced", []int64{0, 7, 8}, []string{"", "", ""}},
+	}
+	for _, c := range cases {
+		var g inboundSeqGuard
+		for i, seq := range c.seqs {
+			if got := g.admit(seq); got != c.want[i] {
+				t.Errorf("%s[%d]: admit(%d) = %q, want %q", c.name, i, seq, got, c.want[i])
+			}
+		}
 	}
 }
 

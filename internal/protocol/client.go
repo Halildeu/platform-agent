@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"platform-agent/internal/security"
@@ -61,10 +62,15 @@ type Client struct {
 	baseURL       *url.URL // external base, e.g. https://host/api/v1/endpoint-agent
 	signingPrefix string   // backend-visible path prefix, e.g. /api/v1/agent
 	httpClient    *http.Client
-	credentialID  string // X-Device-Credential-Id
-	secret        string // device HMAC key
-	deviceID      string
-	now           func() time.Time
+	// identityMu guards the identity triple below. The remote-bridge harness
+	// (Faz 22.6 T-3) polls DeviceID from its own goroutine while
+	// enrollment/hydration writes through SetIdentity on the runner
+	// goroutine — unsynchronized, that is a data race (Codex 019ebb18 P1).
+	identityMu   sync.RWMutex
+	credentialID string // X-Device-Credential-Id
+	secret       string // device HMAC key
+	deviceID     string
+	now          func() time.Time
 }
 
 // NewClient builds a Client. baseURL is the external API base the agent dials
@@ -96,16 +102,26 @@ func NewClient(baseURL, signingPathPrefix string, httpClient *http.Client) (*Cli
 
 // SetIdentity sets the device credential used to sign subsequent requests.
 func (c *Client) SetIdentity(credentialID, secret, deviceID string) {
+	c.identityMu.Lock()
+	defer c.identityMu.Unlock()
 	c.credentialID = strings.TrimSpace(credentialID)
 	c.secret = strings.TrimSpace(secret)
 	c.deviceID = strings.TrimSpace(deviceID)
 }
 
 // CredentialID returns the device-credential key id (X-Device-Credential-Id).
-func (c *Client) CredentialID() string { return c.credentialID }
+func (c *Client) CredentialID() string {
+	c.identityMu.RLock()
+	defer c.identityMu.RUnlock()
+	return c.credentialID
+}
 
 // DeviceID returns the enrolled device id.
-func (c *Client) DeviceID() string { return c.deviceID }
+func (c *Client) DeviceID() string {
+	c.identityMu.RLock()
+	defer c.identityMu.RUnlock()
+	return c.deviceID
+}
 
 // SigningPathPrefix returns the backend-visible path prefix used for HMAC
 // signing (exposed for diagnostics and tests).
@@ -113,7 +129,15 @@ func (c *Client) SigningPathPrefix() string { return c.signingPrefix }
 
 // IsEnrolled reports whether the client holds a device credential.
 func (c *Client) IsEnrolled() bool {
-	return c.credentialID != "" && c.secret != ""
+	credentialID, secret := c.identity()
+	return credentialID != "" && secret != ""
+}
+
+// identity returns a consistent snapshot of the signing credential.
+func (c *Client) identity() (credentialID, secret string) {
+	c.identityMu.RLock()
+	defer c.identityMu.RUnlock()
+	return c.credentialID, c.secret
 }
 
 // Enroll consumes an enrollment token and, on success, installs the returned
@@ -222,7 +246,10 @@ func (c *Client) do(ctx context.Context, spec agentRequest, query string, payloa
 // /api/v1/endpoint-agent path, because the gateway rewrites the path before
 // the backend computes its own canonical string.
 func (c *Client) sign(request *http.Request, suffix, query string, body []byte) error {
-	if !c.IsEnrolled() {
+	// One locked snapshot: the header id and the HMAC key must come from the
+	// SAME identity generation even if SetIdentity races in between.
+	credentialID, secret := c.identity()
+	if credentialID == "" || secret == "" {
 		return fmt.Errorf("device credential is required for a signed request")
 	}
 	timestamp := c.now().UTC().Format(time.RFC3339Nano)
@@ -233,10 +260,10 @@ func (c *Client) sign(request *http.Request, suffix, query string, body []byte) 
 	canonicalPath := c.signingPrefix + suffix
 	canonical := security.CanonicalRequest(
 		request.Method, canonicalPath, query, timestamp, nonce, security.BodyHashHex(body))
-	request.Header.Set("X-Device-Credential-Id", c.credentialID)
+	request.Header.Set("X-Device-Credential-Id", credentialID)
 	request.Header.Set("X-Request-Timestamp", timestamp)
 	request.Header.Set("X-Request-Nonce", nonce)
-	request.Header.Set("X-Signature", security.Sign(c.secret, canonical))
+	request.Header.Set("X-Signature", security.Sign(secret, canonical))
 	return nil
 }
 

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -203,11 +204,28 @@ var errTransportKilled = errors.New("transport killed by broker")
 // AgentHello → obey loop. healthy reports whether at least one valid
 // heartbeat arrived (backoff reset signal).
 func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy bool, err error) {
-	conn, err := h.dial(ctx)
+	// DialTimeout is a REAL cap on the whole connect phase (Codex 019ebb18
+	// P2): grpc.NewClient is lazy and ConnectParams.MinConnectTimeout is a
+	// minimum, not a maximum — without this bound an unreachable/wedged
+	// broker would park the harness outside its tested reconnect/backoff
+	// path. The custom Dialer seam gets the same bounded context.
+	dctx, dcancel := context.WithTimeout(ctx, h.cfg.DialTimeout)
+	defer dcancel()
+	conn, err := h.dial(dctx)
 	if err != nil {
 		return false, fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
+	conn.Connect()
+	for {
+		st := conn.GetState()
+		if st == connectivity.Ready {
+			break
+		}
+		if !conn.WaitForStateChange(dctx, st) {
+			return false, fmt.Errorf("broker not reachable within %s", h.cfg.DialTimeout)
+		}
+	}
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -241,7 +259,7 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 	recvCh := make(chan recvResult, 1)
 	go recvLoop(stream, recvCh)
 
-	var lastInboundSeq int64 // forward-compatible monotonic guard (see handleInbound)
+	var seqGuard inboundSeqGuard // forward-compatible mode guard (see handleInbound)
 	for {
 		select {
 		case <-ctx.Done():
@@ -255,7 +273,7 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 				}
 				return healthy, fmt.Errorf("control recv: %w", r.err)
 			}
-			action, defectReason := h.handleInbound(r.env, &lastInboundSeq)
+			action, defectReason := h.handleInbound(r.env, &seqGuard)
 			switch action {
 			case actionContinue:
 				// nothing to do — recvLoop pipelines the next frame
@@ -307,6 +325,40 @@ const (
 	actionDefectClose
 )
 
+// inboundSeqGuard tracks the broker-push sequencing mode of one stream. The
+// T-2b broker does NOT stamp its outbound pushes (they all carry the proto3
+// default 0), so strict contiguity would break against the live broker. The
+// forward-compatible rule (Codex T-3 revision #4 + mixed-mode tightening):
+// a stream starts in unsequenced-legacy mode where ONLY 0 is accepted; the
+// first positive seq switches the stream to sequenced mode permanently —
+// from then on every frame must carry a strictly-increasing positive seq (a
+// repeat/rewind is a replayed frame, and a 0 after sequenced mode is a mode
+// regression). Both close the stream.
+type inboundSeqGuard struct {
+	sequenced bool
+	last      int64
+}
+
+// admit validates one frame's seq; non-empty reason = defect.
+func (g *inboundSeqGuard) admit(seq int64) string {
+	switch {
+	case seq < 0:
+		return "negative-frame-seq"
+	case seq == 0:
+		if g.sequenced {
+			return "frame-seq-mode-regression"
+		}
+		return ""
+	default:
+		if g.sequenced && seq <= g.last {
+			return "frame-seq-replay"
+		}
+		g.sequenced = true
+		g.last = seq
+		return ""
+	}
+}
+
 // handleInbound validates ONE broker envelope and dispatches it. The agent
 // mirrors the broker's directional discipline: on the CONTROL stream it
 // accepts only what the broker legitimately pushes while idle — heartbeat,
@@ -315,28 +367,15 @@ const (
 // protocol defect: T-3 has no machinery to honour them, and silently
 // consuming them would hide a broker bug or a premature enablement
 // (Codex T-3 revision #3 — defect-close, not inert-log).
-func (h *Harness) handleInbound(env *pb.Envelope, lastInboundSeq *int64) (inboundAction, string) {
+func (h *Harness) handleInbound(env *pb.Envelope, seqGuard *inboundSeqGuard) (inboundAction, string) {
 	if env == nil {
 		return actionDefectClose, "nil-envelope"
 	}
 	if env.GetChannelType() != pb.ChannelType_CONTROL {
 		return actionDefectClose, "non-control-channel"
 	}
-	// frameSeq: the T-2b broker does NOT stamp its outbound pushes (they all
-	// carry the proto3 default 0), so strict contiguity would break against
-	// the live broker. Forward-compatible monotonic rule instead: 0 is
-	// always accepted (today's unsequenced pushes); once a positive seq
-	// appears it must keep strictly increasing — a repeated/rewound positive
-	// seq is a replayed frame and closes the stream (Codex T-3 revision #4).
-	seq := env.GetFrameSeq()
-	switch {
-	case seq < 0:
-		return actionDefectClose, "negative-frame-seq"
-	case seq > 0:
-		if seq <= *lastInboundSeq {
-			return actionDefectClose, "frame-seq-replay"
-		}
-		*lastInboundSeq = seq
+	if reason := seqGuard.admit(env.GetFrameSeq()); reason != "" {
+		return actionDefectClose, reason
 	}
 
 	switch {

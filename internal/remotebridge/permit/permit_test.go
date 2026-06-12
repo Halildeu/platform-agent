@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -329,6 +330,8 @@ func TestNewVerifierConstructionGuards(t *testing.T) {
 		{"P-384 key", &p384.PublicKey, "kid", "dev"},
 		{"blank kid", &p256.PublicKey, "  ", "dev"},
 		{"blank deviceID", &p256.PublicKey, "kid", ""},
+		{"nil Y coordinate", &ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1)}, "kid", "dev"},
+		{"off-curve point", &ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)}, "kid", "dev"},
 	}
 	for _, c := range cases {
 		if _, err := NewVerifier(c.pub, c.kid, c.dev); err == nil {

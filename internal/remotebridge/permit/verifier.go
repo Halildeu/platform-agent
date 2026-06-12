@@ -40,11 +40,18 @@ type Verifier struct {
 }
 
 // NewVerifier builds a Verifier. The key MUST be EC P-256 (the pinned curve
-// of the permit-signing boundary); kid and deviceID must be non-blank — a
-// blank device binding would silently disable the device check.
+// of the permit-signing boundary) and a VALID curve point; kid and deviceID
+// must be non-blank — a blank device binding would silently disable the
+// device check.
 func NewVerifier(pub *ecdsa.PublicKey, expectedKid, expectedDeviceID string) (*Verifier, error) {
-	if pub == nil || pub.Curve != elliptic.P256() || pub.X == nil {
+	if pub == nil || pub.Curve != elliptic.P256() || pub.X == nil || pub.Y == nil {
 		return nil, errors.New("permit verify key must be EC P-256")
+	}
+	// ECDH() validates the point is on the curve and non-identity — a
+	// malformed/off-curve public key is refused at the boundary instead of
+	// producing undefined verify behavior (Codex 019ebb18 hardening).
+	if _, err := pub.ECDH(); err != nil {
+		return nil, errors.New("permit verify key is not a valid P-256 point")
 	}
 	if strings.TrimSpace(expectedKid) == "" {
 		return nil, errors.New("expectedKid must not be blank")
