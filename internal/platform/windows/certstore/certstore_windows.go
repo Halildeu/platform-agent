@@ -5,6 +5,7 @@ package certstore
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -13,7 +14,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/google/certtostore"
 	"golang.org/x/sys/windows"
 
 	"platform-agent/internal/autoenroll"
@@ -39,9 +39,9 @@ var procCertGetCertificateContextProperty = windows.NewLazySystemDLL("crypt32.dl
 // LoadEligibleCert enumerates LocalMachine\My, applies the agent
 // CertFilter (Codex F1 absorb — `SelectLatest` was previously
 // unreachable), and returns the CertMaterial for the latest valid cert.
-// The returned tls.Certificate.PrivateKey is a *certtostore.Key, which
-// implements crypto.Signer via NCryptSignHash so non-exportable
-// TPM-backed AD CS keys work unchanged (Codex F7 absorb).
+// The returned tls.Certificate.PrivateKey is a cngSigner (see
+// cngsigner_windows.go, #147) which implements crypto.Signer via
+// NCryptSignHash so non-exportable TPM-backed AD CS keys work unchanged.
 //
 // The enumeration uses x/sys/windows directly because certtostore's
 // CertWithContext returns only the first match against the configured
@@ -123,7 +123,7 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 	var (
 		chosenLeaf *x509.Certificate
 		chosenCtx  *windows.CertContext
-		chosenKey  *certtostore.Key
+		chosenKey  crypto.Signer
 	)
 	defer func() {
 		// Free every non-chosen context. The chosen context is freed by
@@ -136,7 +136,7 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 	}()
 
 	for _, rc := range rankedContexts {
-		signer, err := acquireSigner(rc.ctx)
+		signer, err := acquireSigner(rc.ctx, rc.leaf.PublicKey)
 		if err == nil && signer != nil {
 			chosenLeaf, chosenCtx, chosenKey = rc.leaf, rc.ctx, signer
 			break
@@ -151,9 +151,13 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 		return autoenroll.CertMaterial{}, fmt.Errorf("%w: no eligible cert had an acquireable CNG signer",
 			autoenroll.ErrNoCertMatch)
 	}
-	// Free the chosen context once we return — material now holds the
-	// signer + leaf; the cert context handle is no longer needed.
-	defer func() { _ = windows.CertFreeCertificateContext(chosenCtx) }()
+	// #147: do NOT free the chosen cert context here. The cngSigner's
+	// NCRYPT_KEY_HANDLE (from CryptAcquireCertificatePrivateKey on this very
+	// context) keeps an internal association to it on some providers; freeing
+	// the context underneath a live key handle access-violates. The context is
+	// held for the process lifetime (enroll runs once, then the result is
+	// persisted) — a single retained context, not a per-iteration leak.
+	_ = chosenCtx
 
 	tlsCert := tls.Certificate{
 		Certificate: [][]byte{chosenLeaf.Raw},
@@ -242,26 +246,10 @@ func isCryptENotFound(err error) bool {
 	return err != nil && errors.Is(err, syscall.Errno(cryptENotFound))
 }
 
-// acquireSigner wraps certtostore.CertKey so the agent does not have to
-// re-implement CryptAcquireCertificatePrivateKey + NCryptSignHash. The
-// WinCertStore receiver's storeHandle is unused inside CertKey — the
-// call only needs the *windows.CertContext — so we open a throwaway
-// store just to expose the method.
-func acquireSigner(ctx *windows.CertContext) (*certtostore.Key, error) {
-	if !hasPrivateKeyBinding(ctx) {
-		return nil, errors.New("certificate has no private-key binding")
-	}
-	store, err := certtostore.OpenWinCertStore("Microsoft Platform Crypto Provider", "", nil, nil, false)
-	if err != nil {
-		return nil, fmt.Errorf("open helper cert store: %w", err)
-	}
-	defer func() { _ = store.Close() }()
-	key, err := store.CertKey(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return key, nil
-}
+// acquireSigner now lives in cngsigner_windows.go (#147): it acquires the CNG
+// private key with .NET-equivalent flags (SILENT | PREFER_NCRYPT, no cache) and
+// returns a cngSigner, avoiding the certtostore.CertKey access-violation on
+// valid PCP/TPM keys.
 
 func hasPrivateKeyBinding(ctx *windows.CertContext) bool {
 	if ctx == nil {
