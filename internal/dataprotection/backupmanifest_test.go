@@ -361,6 +361,37 @@ func TestGenerate_InvalidRootRefOrClassDropped(t *testing.T) {
 	}
 }
 
+func TestValidRootRef(t *testing.T) {
+	// Codex 019ec2bb: positive allowlist — opaque token [A-Za-z0-9._-] only.
+	valid := []string{
+		"managed_root:11111111-1111-1111-1111-111111111111",
+		"managed_root:abc123",
+		"managed_root:root.v1_2-3",
+	}
+	invalid := []string{
+		"",                                     // empty
+		"abc",                                  // no prefix
+		"managed_root:",                        // empty token
+		`managed_root:C:\Users\Alice\Secret`,   // path-shaped (backslash + colon)
+		"managed_root:/etc/passwd",             // path-shaped (slash)
+		"managed_root:alice documents",         // embedded space
+		"managed_root:abc\tdef",                // embedded tab
+		"managed_root:abc\ndef",                // embedded newline
+		"managed_root:has%percent",             // percent (env-expansion vector)
+		"managed_root:a:b",                     // embedded colon (ADS/drive)
+	}
+	for _, s := range valid {
+		if !validRootRef(s) {
+			t.Errorf("expected valid root_ref %q", s)
+		}
+	}
+	for _, s := range invalid {
+		if validRootRef(s) {
+			t.Errorf("expected INVALID root_ref %q (must fail-closed)", s)
+		}
+	}
+}
+
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {

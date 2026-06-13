@@ -387,21 +387,31 @@ var validPathClasses = map[string]bool{
 	"mdm-gpo-root":              true,
 }
 
-// validRootRef enforces the opaque "managed_root:<token>" shape. The token
-// must be non-empty and free of path/stream metacharacters (`/ \ : %`) and
-// whitespace, so a path-shaped backend value (e.g.
-// "managed_root:C:\\Users\\Alice\\...") is rejected rather than echoed into
-// the manifest (path-free invariant, Codex 019ec2bb P1).
+// validRootRef enforces the opaque "managed_root:<token>" shape with a POSITIVE
+// allowlist: the token must be non-empty and contain ONLY [A-Za-z0-9._-]
+// (UUID-shaped or similar). This rejects path separators, drive colons, `%`,
+// AND any embedded whitespace (space/tab/newline) in one check, so a
+// path-shaped or otherwise untrusted backend value
+// ("managed_root:C:\\Users\\Alice\\..." or "managed_root:alice documents") can
+// never be echoed into the manifest (path-free invariant, Codex 019ec2bb).
 func validRootRef(s string) bool {
 	const prefix = "managed_root:"
 	if !strings.HasPrefix(s, prefix) {
 		return false
 	}
 	id := s[len(prefix):]
-	if id == "" || strings.TrimSpace(id) != id {
+	if id == "" {
 		return false
 	}
-	return !strings.ContainsAny(id, `:/\%`)
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func sortedKeys(m map[string]bool) []string {
