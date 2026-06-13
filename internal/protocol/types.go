@@ -61,6 +61,18 @@ const (
 	// Windows (RuntimeCapabilitiesWithOptions). The agent applies the policy to
 	// every loaded interactive user hive (internal/displaypolicy).
 	CommandSetDisplayPolicy CommandType = "SET_DISPLAY_POLICY"
+	// CommandCollectBackupDryRun (Faz 22.8A, #117): endpoint backup DRY-RUN
+	// manifest. METADATA-ONLY — the agent lists what WOULD be eligible for
+	// backup (path-class / size / mtime-bucket / count) WITHOUT reading any
+	// file content and WITHOUT computing any hash. DC-EA-RED classes
+	// (credential / browser / mailbox / private-key / cloud-token / password-
+	// manager / DPAPI / registry-hive / app-token / archive-container) are
+	// denied-aggregate and NEVER listed as entries. Disabled-by-default
+	// capability (RuntimeCapabilityOptions.EnableBackupDryRun); advertised
+	// only on a policy-ready Windows build, and only after the backend mirror
+	// validator lands. See internal/dataprotection and gitops
+	// docs/faz-22-8a-backup-manifest-contract-v1.md.
+	CommandCollectBackupDryRun CommandType = "COLLECT_BACKUP_DRYRUN"
 )
 
 type CommandStatus string
@@ -206,7 +218,7 @@ func (r CommandResult) ToWire() CommandResultWire {
 
 func (t CommandType) RequiresReason() bool {
 	switch t {
-	case CommandLockUserLogin, CommandUnlockUserLogin, CommandChangeLocalPassword, CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent:
+	case CommandLockUserLogin, CommandUnlockUserLogin, CommandChangeLocalPassword, CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent, CommandCollectBackupDryRun:
 		return true
 	default:
 		return false
@@ -215,7 +227,7 @@ func (t CommandType) RequiresReason() bool {
 
 func (t CommandType) IsSensitive() bool {
 	switch t {
-	case CommandLockUserLogin, CommandUnlockUserLogin, CommandChangeLocalPassword, CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent:
+	case CommandLockUserLogin, CommandUnlockUserLogin, CommandChangeLocalPassword, CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent, CommandCollectBackupDryRun:
 		return true
 	default:
 		return false
