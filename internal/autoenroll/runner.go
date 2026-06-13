@@ -174,8 +174,11 @@ func NewRunner(cfg Config, cert CertProvider, reg RegistryReader, store ConfigSt
 	}, nil
 }
 
-// RunOnce executes a single enroll/heartbeat/command iteration and returns.
-// First-run jitter is applied only when the persisted store is empty.
+// RunOnce executes a single reconcile iteration and returns. In the canonical
+// ADR-0029 M2 tokenless model it completes after the enrollment reconcile (the
+// mTLS cert is the continuous credential; refresh/heartbeat/command are the
+// retained legacy / #151 path). First-run jitter is applied only when the
+// persisted store is empty.
 func (r *Runner) RunOnce(ctx context.Context) error {
 	persisted, err := r.ConfigStore.Read(ctx)
 	if err != nil && !IsEmptyStore(err) {
@@ -210,6 +213,18 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		return err
 	}
 
+	// ADR-0029 M2 canonical path: tokenless mTLS enrollment. The cert is the
+	// continuous credential and the backend exposes no token-refresh /
+	// heartbeat / command endpoints on this surface yet (#151). Once the
+	// enrollment record is persisted there is nothing further to do this
+	// cycle — do NOT fall through to the token-dependent lifecycle steps.
+	if persisted.IsTokenlessEnrollment() {
+		r.logf("mTLS tokenless enrollment complete (status persisted); heartbeat/command lifecycle deferred to #151")
+		return nil
+	}
+
+	// Legacy token-backed lifecycle (retained, currently unreachable in the
+	// canonical tokenless model — the backend issues no service token).
 	persisted, err = r.maybeRefreshToken(ctx, persisted)
 	if err != nil {
 		return err
@@ -281,6 +296,18 @@ func (r *Runner) iterate(ctx context.Context) error {
 		return err
 	}
 
+	// ADR-0029 M2 canonical path: tokenless mTLS enrollment. The cert is the
+	// continuous credential and the backend exposes no token-refresh /
+	// heartbeat / command endpoints on this surface yet (#151). Once the
+	// enrollment record is persisted there is nothing further to do this
+	// cycle — do NOT fall through to the token-dependent lifecycle steps.
+	if persisted.IsTokenlessEnrollment() {
+		r.logf("mTLS tokenless enrollment complete (status persisted); heartbeat/command lifecycle deferred to #151")
+		return nil
+	}
+
+	// Legacy token-backed lifecycle (retained, currently unreachable in the
+	// canonical tokenless model — the backend issues no service token).
 	persisted, err = r.maybeRefreshToken(ctx, persisted)
 	if err != nil {
 		return err
@@ -424,10 +451,11 @@ func (r *Runner) waitForCert(ctx context.Context) error {
 // reconcileEnrollment makes the persisted state match the currently
 // loaded cert. The decision tree:
 //
-//   - empty store → POST /endpoint-enrollments/auto, persist response.
+//   - empty store → POST /endpoint-enrollments/auto, persist the tokenless
+//     enrollment record (deviceId + bound cert thumbprint; #149).
 //   - cert thumbprint changed → idempotent reissue via auto-enroll, persist.
-//   - cert thumbprint same + token already expired locally → idempotent
-//     reissue via auto-enroll (refresh would 401 because bearer is dead).
+//   - legacy token-backed record whose token expired locally → idempotent
+//     reissue via auto-enroll (rewrites it as a tokenless record; #151).
 //   - otherwise → leave persisted as-is.
 func (r *Runner) reconcileEnrollment(ctx context.Context, persisted PersistedConfig) (PersistedConfig, error) {
 	now := time.Now()
@@ -441,19 +469,24 @@ func (r *Runner) reconcileEnrollment(ctx context.Context, persisted PersistedCon
 		return persisted, nil
 	}
 
-	req := AutoEnrollRequest{
-		OSInfo:       collectOSInfo(r.Config.AgentVersion),
-		AgentVersion: r.Config.AgentVersion,
-	}
+	req := buildAutoEnrollRequest(r.Config.AgentVersion)
 	resp, err := r.wireClient.AutoEnroll(ctx, req)
 	if err != nil {
 		return persisted, fmt.Errorf("auto-enroll: %w", err)
 	}
+	// Fail-closed on a drifted/forged response: require a device id, a
+	// recognised status, and a cert thumbprint matching the cert we
+	// presented on this mTLS handshake (#149).
+	if err := resp.Validate(current); err != nil {
+		return persisted, fmt.Errorf("auto-enroll: %w", err)
+	}
 
+	// ADR-0029 M2 tokenless: persist a device + bound-cert enrollment record.
+	// The mTLS cert is the continuous credential — ServiceToken/TokenExpiresAt
+	// are deliberately left zero (the backend issues no token; the
+	// token-dependent lifecycle is #151).
 	cfg := PersistedConfig{
 		DeviceID:             resp.DeviceID,
-		ServiceToken:         resp.ServiceToken,
-		TokenExpiresAt:       resp.TokenExpiresAt,
 		CertThumbprintSHA256: current,
 		CertThumbprintSHA1:   r.loadedCert.ThumbprintSHA1,
 		Issued:               now,
@@ -465,8 +498,8 @@ func (r *Runner) reconcileEnrollment(ctx context.Context, persisted PersistedCon
 		return persisted, fmt.Errorf("persist enrollment: %w", err)
 	}
 
-	r.logf("auto-enroll reissue: device_id=%s existing=%t expires_at=%s",
-		cfg.DeviceID, resp.IsExistingDevice, cfg.TokenExpiresAt.Format(time.RFC3339))
+	r.logf("auto-enroll %s: device_id=%s thumbprint=%s (tokenless mTLS, ADR-0029 M2)",
+		resp.Status, cfg.DeviceID, cfg.CertThumbprintSHA256)
 	return cfg, nil
 }
 
@@ -475,6 +508,12 @@ func (r *Runner) reconcileEnrollment(ctx context.Context, persisted PersistedCon
 // here — reconcileEnrollment handled them with the auto-enroll reissue
 // path (Codex F11 absorb).
 func (r *Runner) maybeRefreshToken(ctx context.Context, persisted PersistedConfig) (PersistedConfig, error) {
+	// Tokenless mTLS enrollment never reaches here (RunOnce/iterate
+	// short-circuit). Fail closed if it does — never refresh against an
+	// endpoint the canonical model does not use (#151).
+	if persisted.ServiceToken == "" {
+		return persisted, ErrTokenlessLifecycleUnsupported
+	}
 	now := time.Now()
 	if persisted.IsZero() || persisted.TokenExpired(now) {
 		return persisted, nil
@@ -514,6 +553,11 @@ func (r *Runner) maybeRefreshToken(ctx context.Context, persisted PersistedConfi
 // "device-state rejected" without dropping to 401/403, and the agent
 // must respect that as terminal.
 func (r *Runner) heartbeat(ctx context.Context, persisted PersistedConfig) error {
+	// Fail closed rather than send an empty Bearer: tokenless enrollment has
+	// no heartbeat endpoint on the mTLS surface yet (#151).
+	if persisted.ServiceToken == "" {
+		return ErrTokenlessLifecycleUnsupported
+	}
 	snapshot := inventory.Collect(r.Config.AgentVersion, time.Now())
 	currentState := r.StateTracker.RecordSuccess()
 	caps := capabilityStrings(r.Executor.Capabilities)
@@ -557,6 +601,11 @@ func (r *Runner) heartbeat(ctx context.Context, persisted PersistedConfig) error
 
 // pollAndExecute fetches one queued command (if any) and runs it.
 func (r *Runner) pollAndExecute(ctx context.Context, persisted PersistedConfig) error {
+	// Fail closed rather than poll with an empty Bearer: tokenless enrollment
+	// has no command endpoint on the mTLS surface yet (#151).
+	if persisted.ServiceToken == "" {
+		return ErrTokenlessLifecycleUnsupported
+	}
 	pollStart := time.Now()
 	command, err := r.wireClient.NextCommand(ctx, persisted.ServiceToken)
 	// AG-038: record the NextCommand round-trip so a subsequent
@@ -614,16 +663,28 @@ func (r *Runner) logf(format string, args ...interface{}) {
 	}
 }
 
-// collectOSInfo packages the host self-description for the auto-enroll
-// body. inventory.Collect is reused for parity with the HMAC path. The
-// os_version field stays empty until inventory exposes a richer
-// platform-version probe; the backend tolerates omitempty per
-// AutoEnrollRequest schema.
-func collectOSInfo(agentVersion string) OSInfo {
+// buildAutoEnrollRequest packages the host self-description for the
+// auto-enroll body, reusing inventory.Collect for parity with the
+// heartbeat/HMAC path. The backend @NotBlank fields are guaranteed
+// non-empty: MachineFingerprint() is a deterministic sha256 (never blank),
+// Collect falls hostname back to "unknown" and sets osName to runtime.GOOS,
+// and osName falls back once more to the OS family enum as belt-and-braces.
+// osVersion/osBuild stay empty until inventory exposes a richer
+// platform-version probe; the backend tolerates their absence (only @Size,
+// not @NotBlank). domain is sent only when the host is domain-joined.
+func buildAutoEnrollRequest(agentVersion string) AutoEnrollRequest {
 	snap := inventory.Collect(agentVersion, time.Now())
-	return OSInfo{
-		OSType:       string(snap.OSFamily),
-		Architecture: snap.Architecture,
+	osName := strings.TrimSpace(snap.OSName)
+	if osName == "" {
+		osName = string(snap.OSFamily)
+	}
+	return AutoEnrollRequest{
+		MachineFingerprint: inventory.MachineFingerprint(),
+		Hostname:           snap.Hostname,
+		OSName:             osName,
+		Domain:             strings.TrimSpace(snap.Identity.Domain),
+		Architecture:       snap.Architecture,
+		AgentVersion:       snap.AgentVersion,
 	}
 }
 

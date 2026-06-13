@@ -17,8 +17,9 @@ import (
 // explicit opt-in for dev/test only.
 //
 // The persisted state is deliberately MINIMAL — no secrets that the backend
-// can re-derive, no env-overridable fields. Token storage lives only here;
-// it must never be written to env or logged (Codex F3 absorb).
+// can re-derive, no env-overridable fields. In the canonical ADR-0029 M2
+// model the record is tokenless (device id + bound cert thumbprint); any
+// legacy token field must never be written to env or logged (Codex F3 absorb).
 type PersistedConfig struct {
 	DeviceID             string    `json:"device_id"`
 	ServiceToken         string    `json:"service_token"`
@@ -36,11 +37,18 @@ func (p PersistedConfig) IsZero() bool {
 }
 
 // Validate enforces the persisted-config invariants the runner relies on
-// after a successful enroll or refresh. A response missing any of the
-// mandatory fields means the backend contract drifted (or a corrupted
-// blob was decoded) and the runner must NOT silently continue — Codex
-// F4 absorb. Validate is called both after Wire decode and before the
-// runner uses a snapshot loaded from disk.
+// after a successful enroll. A record missing a mandatory field means the
+// backend contract drifted (or a corrupted blob was decoded) and the runner
+// must NOT silently continue — Codex F4 absorb. Validate is called both after
+// wire decode and before the runner uses a snapshot loaded from disk.
+//
+// #149: the canonical ADR-0029 M2 model is TOKENLESS — the mTLS cert is the
+// continuous credential, so service_token/token_expires_at are OPTIONAL. The
+// mandatory fields are the device identity and the bound cert thumbprint. A
+// HALF-populated token shape (one of service_token/token_expires_at set, the
+// other empty) is still rejected: it signals corruption that could otherwise
+// drive a refresh loop with an inconsistent token (legacy token-backed shape
+// retained for #151).
 func (p PersistedConfig) Validate() error {
 	if p.IsZero() {
 		return ErrEmptyStore
@@ -48,16 +56,22 @@ func (p PersistedConfig) Validate() error {
 	if p.DeviceID == "" {
 		return fmt.Errorf("%w: device_id empty", ErrInvalidPersistedConfig)
 	}
-	if p.ServiceToken == "" {
-		return fmt.Errorf("%w: service_token empty", ErrInvalidPersistedConfig)
-	}
-	if p.TokenExpiresAt.IsZero() {
-		return fmt.Errorf("%w: token_expires_at zero", ErrInvalidPersistedConfig)
-	}
 	if p.CertThumbprintSHA256 == "" {
 		return fmt.Errorf("%w: cert_thumbprint_sha256 empty", ErrInvalidPersistedConfig)
 	}
+	if (p.ServiceToken == "") != p.TokenExpiresAt.IsZero() {
+		return fmt.Errorf("%w: inconsistent token shape (service_token and token_expires_at must both be set or both empty)", ErrInvalidPersistedConfig)
+	}
 	return nil
+}
+
+// IsTokenlessEnrollment reports whether this is a valid ADR-0029 M2 tokenless
+// enrollment record: a device + bound cert thumbprint and NO service token.
+// The runner uses this to stop after a successful enrollment reconcile (the
+// mTLS cert is the continuous credential; the token-dependent heartbeat /
+// command lifecycle is deferred to #151).
+func (p PersistedConfig) IsTokenlessEnrollment() bool {
+	return p.DeviceID != "" && p.CertThumbprintSHA256 != "" && p.ServiceToken == ""
 }
 
 // ErrInvalidPersistedConfig is returned by Validate when the snapshot

@@ -8,14 +8,20 @@
 // must never fall back to the HMAC path — fail-closed is the only valid
 // behaviour on auth/cert/token failure (Codex F2/F11 absorb).
 //
-// Wire contract is snake_case (backend Katman 2 must use
-// PropertyNamingStrategies.SNAKE_CASE or @JsonProperty) — Codex F12 absorb.
+// Wire contract is default-Jackson camelCase: the backend DTOs on this path
+// (AutoEnrollmentRequest, ConsumeEnrollmentRequest) are flat Java records with
+// no @JsonNaming and the service sets no global SNAKE_CASE strategy, so JSON
+// keys MUST be camelCase and match the Java field names exactly (#149). The
+// earlier "F12 snake_case" assumption was never accepted by the backend — it
+// produced a live 400 VALIDATION_ERROR because no @NotBlank field bound.
 package autoenroll
 
 import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -30,6 +36,14 @@ var ErrUnsupportedOS = errors.New("auto-enroll requires Windows machine certific
 // (HTTP 401/403). The agent must fail-closed; automatic re-enrollment from
 // this state is forbidden — Codex F11 absorb (revocation bypass risk).
 var ErrAuthFailure = errors.New("backend rejected cert or service token (fail-closed)")
+
+// ErrTokenlessLifecycleUnsupported is returned when a token-dependent step
+// (refresh / heartbeat / command poll / result submit) is reached without a
+// bearer token. In the ADR-0029 M2 canonical model enrollment is tokenless and
+// the runner short-circuits before these steps; reaching one with an empty
+// token means a caller bypassed the tokenless guard, so fail closed rather
+// than send an empty Bearer. The cert-authenticated lifecycle is #151.
+var ErrTokenlessLifecycleUnsupported = errors.New("tokenless mTLS enrollment: token-dependent lifecycle not supported (#151)")
 
 // CertFilter narrows the cert-store query to a single eligible machine
 // certificate. Template identity, issuer, and revocation are deliberately NOT
@@ -93,31 +107,101 @@ type CertMaterial struct {
 	ThumbprintSHA1   string // diagnostic only (Windows UI cross-reference)
 }
 
-// OSInfo is the os-shape payload submitted on auto-enroll. Snake_case wire
-// per Codex F12 absorb.
-type OSInfo struct {
-	OSType       string `json:"os_type"`
-	OSVersion    string `json:"os_version,omitempty"`
-	Architecture string `json:"architecture"`
-}
-
-// AutoEnrollRequest is the POST /endpoint-enrollments/auto body. Identity is
-// NOT carried in the body — the backend derives it from the client cert
-// (ADR-0029 Katman 2). Only host self-description travels in JSON.
+// AutoEnrollRequest is the POST /endpoint-enrollments/auto body. Device
+// identity is proven by the mTLS client cert (the SAN URI), NOT by this body
+// (ADR-0029 Katman 2) — the backend treats hostname/fingerprint as secondary,
+// informational fields. The shape MUST match backend AutoEnrollmentRequest
+// (com.example.endpointadmin.dto.v1.agent): a FLAT record with camelCase JSON
+// keys where machineFingerprint, hostname, osName and agentVersion are
+// @NotBlank and osVersion/osBuild/domain/architecture/schemaVersion are
+// optional. #149: a previous nested snake_case shape ({os_info{...},
+// agent_version}) 400'd because none of the @NotBlank fields bound.
 type AutoEnrollRequest struct {
-	OSInfo       OSInfo `json:"os_info"`
-	AgentVersion string `json:"agent_version"`
+	MachineFingerprint string `json:"machineFingerprint"`
+	Hostname           string `json:"hostname"`
+	OSName             string `json:"osName"`
+	OSVersion          string `json:"osVersion,omitempty"`
+	OSBuild            string `json:"osBuild,omitempty"`
+	Domain             string `json:"domain,omitempty"`
+	Architecture       string `json:"architecture,omitempty"`
+	AgentVersion       string `json:"agentVersion"`
+	SchemaVersion      int    `json:"schemaVersion,omitempty"`
 }
 
-// AutoEnrollResponse is the backend response. The service_token is
-// cert-bound (its validity requires the same mTLS cert in the TLS handshake
-// — token alone is not sufficient).
+// AutoEnrollResponse mirrors backend AutoEnrollmentResponse (camelCase). It is
+// a TOKENLESS enrollment confirmation (ADR-0029 M2): the mTLS client cert is
+// the continuous credential, so there is NO bearer/service token in the
+// response. status is "enrolled" (HTTP 201, fresh device+cert) or
+// "already-enrolled" (HTTP 200, idempotent repeat of an active cert).
 type AutoEnrollResponse struct {
-	DeviceID         string    `json:"device_id"`
-	ServiceToken     string    `json:"service_token"`
-	TokenExpiresAt   time.Time `json:"token_expires_at"`
-	IsExistingDevice bool      `json:"is_existing_device"`
-	ServerTime       time.Time `json:"server_time,omitempty"`
+	DeviceID   string             `json:"deviceId"`
+	Status     string             `json:"status"`
+	EnrolledAt time.Time          `json:"enrolledAt"`
+	CertInfo   AutoEnrollCertInfo `json:"certInfo"`
+}
+
+// AutoEnrollCertInfo mirrors backend AutoEnrollmentResponse.CertInfo — the
+// server's view of the cert it bound to the device. thumbprint is a
+// lowercase-hex SHA-256 over the DER cert (HexFormat.of().formatHex), the
+// same canonical form the agent computes via ThumbprintSHA256Hex.
+type AutoEnrollCertInfo struct {
+	SANURI     string    `json:"sanUri"`
+	ObjectGUID string    `json:"objectGuid"`
+	Thumbprint string    `json:"thumbprint"`
+	NotAfter   time.Time `json:"notAfter"`
+}
+
+const (
+	// StatusEnrolled / StatusAlreadyEnrolled are the only backend
+	// AutoEnrollmentResponse.status values (201 fresh / 200 idempotent).
+	StatusEnrolled        = "enrolled"
+	StatusAlreadyEnrolled = "already-enrolled"
+)
+
+// ErrInvalidEnrollResponse is returned by AutoEnrollResponse.Validate when the
+// decoded /auto response violates the tokenless contract. The runner treats it
+// as fatal for the reconcile — a drifted/forged response must not be persisted.
+var ErrInvalidEnrollResponse = errors.New("auto-enroll response invalid")
+
+// Validate enforces the tokenless /auto response contract (#149): a usable
+// enrollment confirmation must carry a device id, a recognised status, and a
+// cert thumbprint that MATCHES the cert the agent actually presented on the
+// mTLS handshake. The thumbprint match is a fail-closed proof the backend
+// enrolled THIS cert; both sides are lowercase-hex DER SHA-256 so the compare
+// is exact after normalisation.
+func (r AutoEnrollResponse) Validate(localThumbprintSHA256 string) error {
+	if strings.TrimSpace(r.DeviceID) == "" {
+		return fmt.Errorf("%w: response deviceId empty", ErrInvalidEnrollResponse)
+	}
+	if r.Status != StatusEnrolled && r.Status != StatusAlreadyEnrolled {
+		return fmt.Errorf("%w: unexpected status %q", ErrInvalidEnrollResponse, r.Status)
+	}
+	got := normalizeThumbprint(r.CertInfo.Thumbprint)
+	if got == "" {
+		return fmt.Errorf("%w: response cert thumbprint empty", ErrInvalidEnrollResponse)
+	}
+	// Contract: the backend thumbprint MUST equal the cert the agent
+	// presented. An empty local thumbprint means there is nothing to bind
+	// against — fail closed rather than skip the proof.
+	want := normalizeThumbprint(localThumbprintSHA256)
+	if want == "" {
+		return fmt.Errorf("%w: no local cert thumbprint to match the response against", ErrInvalidEnrollResponse)
+	}
+	if got != want {
+		return fmt.Errorf("%w: response cert thumbprint does not match presented cert", ErrInvalidEnrollResponse)
+	}
+	return nil
+}
+
+// normalizeThumbprint canonicalises a hex thumbprint for comparison: lowercase,
+// no colon/space separators. Agent (hex.EncodeToString) and backend
+// (HexFormat.of) already emit this form; normalisation is defence against an
+// upstream that inserts colons or uppercases.
+func normalizeThumbprint(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, ":", "")
+	s = strings.ReplaceAll(s, " ", "")
+	return s
 }
 
 // TokenRefreshResponse is the backend response to
@@ -130,9 +214,12 @@ type TokenRefreshResponse struct {
 	ServerTime     time.Time `json:"server_time,omitempty"`
 }
 
-// HeartbeatRequest mirrors the existing protocol.HeartbeatRequest shape but
-// uses snake_case for the auto-enroll wire and omits agent-id-style fields
-// (cert provides identity).
+// HeartbeatRequest mirrors the existing protocol.HeartbeatRequest shape and
+// omits agent-id-style fields (cert provides identity). NOTE: this is the
+// token-dependent lifecycle DTO (#151), NOT the /endpoint-enrollments/auto
+// body — its snake_case tags belong to a heartbeat endpoint the backend does
+// not yet expose on the mTLS surface; do not confuse it with the camelCase
+// AutoEnrollRequest contract.
 type HeartbeatRequest struct {
 	Hostname     string    `json:"hostname"`
 	OSType       string    `json:"os_type"`

@@ -189,10 +189,13 @@ func mountRoutes(routes map[string]*route) http.Handler {
 func TestClient_AutoEnroll_Success(t *testing.T) {
 	pki := setupTestPKI(t)
 	resp := AutoEnrollResponse{
-		DeviceID:         "dev-1",
-		ServiceToken:     "tok-1",
-		TokenExpiresAt:   time.Now().Add(24 * time.Hour).UTC(),
-		IsExistingDevice: false,
+		DeviceID:   "dev-1",
+		Status:     StatusEnrolled,
+		EnrolledAt: time.Now().UTC(),
+		CertInfo: AutoEnrollCertInfo{
+			SANURI:     "adcomputer:11111111-1111-1111-1111-111111111111",
+			Thumbprint: "abc123",
+		},
 	}
 	routes := map[string]*route{
 		PathAutoEnroll: {method: http.MethodPost, body: resp},
@@ -201,13 +204,16 @@ func TestClient_AutoEnroll_Success(t *testing.T) {
 	wire := newWireClient(t, pki, srv)
 
 	got, err := wire.AutoEnroll(context.Background(), AutoEnrollRequest{
-		OSInfo:       OSInfo{OSType: "WINDOWS", Architecture: "amd64"},
-		AgentVersion: "0.2.0",
+		MachineFingerprint: "fp-1",
+		Hostname:           "host-1",
+		OSName:             "windows",
+		Architecture:       "amd64",
+		AgentVersion:       "0.2.0",
 	})
 	if err != nil {
 		t.Fatalf("AutoEnroll: %v", err)
 	}
-	if got.DeviceID != resp.DeviceID || got.ServiceToken != resp.ServiceToken {
+	if got.DeviceID != resp.DeviceID || got.Status != resp.Status || got.CertInfo.Thumbprint != resp.CertInfo.Thumbprint {
 		t.Fatalf("response decode mismatch: %+v vs %+v", got, resp)
 	}
 }
