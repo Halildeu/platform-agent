@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"platform-agent/internal/dataprotection"
 	"platform-agent/internal/displaypolicy"
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
@@ -51,6 +52,17 @@ var updateAgentStageFn = func(ctx context.Context, stager *selfupdate.Stager, pa
 // actions. Production uses NetUser* APIs via internal/users; tests override it
 // without touching the host account database.
 var mutateLocalUserFn = users.MutateLocal
+
+// generateBackupDryRunFn is the Faz 22.8A (#117) executor seam. Production
+// wires dataprotection.GenerateFromRequest with the platform canonicalizer
+// (Windows GetFinalPathNameByHandle / non-Windows EvalSymlinks). Tests
+// override the seam to inject a fake canonicalizer + temp tree so the executor
+// path is exercised without touching real user data. The function is
+// metadata-only — it never reads file content (enforced by the dataprotection
+// package's static guard test).
+var generateBackupDryRunFn = func(req dataprotection.Request, now time.Time) (dataprotection.Manifest, error) {
+	return dataprotection.GenerateFromRequest(req, now, dataprotection.NewCanonicalizer())
+}
 
 type UpdateAgentStagerOptions struct {
 	AllowedHosts        []string
@@ -382,6 +394,31 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 		result.Status = mapUpdateStageStatusToCommandStatus(stageResult.StageStatus)
 		result.Summary = fmt.Sprintf("UPDATE_AGENT %s", stageResult.StageStatus)
 		result.Details = map[string]interface{}{"update": stageResult}
+	case protocol.CommandCollectBackupDryRun:
+		// Faz 22.8A (#117) — metadata-only backup dry-run manifest. The
+		// payload + result carry NO raw filesystem path (the manifest is
+		// path-class/aggregate only); the Summary is path-free. Capability is
+		// disabled-by-default, so Validate() only lets this arm run on a
+		// build that opted in (RuntimeCapabilityOptions.EnableBackupDryRun).
+		bdReq, payloadErr := unmarshalBackupDryRunPayload(command.Payload)
+		if payloadErr != nil {
+			result.Status = protocol.CommandStatusFailed
+			result.Summary = payloadErr.Error() // path-free code
+			break
+		}
+		manifest, genErr := generateBackupDryRunFn(bdReq, e.now())
+		if genErr != nil {
+			result.Status = protocol.CommandStatusFailed
+			result.Summary = fmt.Sprintf("COLLECT_BACKUP_DRYRUN %s", genErr.Error())
+			break
+		}
+		result.Status = protocol.CommandStatusSucceeded
+		result.Summary = fmt.Sprintf("COLLECT_BACKUP_DRYRUN eligible=%d denied=%d containers=%d unresolved=%d",
+			manifest.Aggregate.TotalEligibleCount,
+			manifest.Aggregate.DeniedCount,
+			manifest.Aggregate.ContainerCount,
+			manifest.Aggregate.UnresolvedPathCount)
+		result.Details = map[string]interface{}{"backupDryRun": manifest}
 	case protocol.CommandSetDisplayPolicy:
 		// #508 (Faz 22.5) — managed screensaver + wallpaper Group-Policy.
 		// Payload JSON round-trip (fail-closed), then OS-agnostic Validate
@@ -620,6 +657,28 @@ func unmarshalUninstallRequest(payload map[string]interface{}) (winget.Uninstall
 	// FAILED_UNSUPPORTED_VERIFICATION at the agent (defense in depth).
 	if strings.TrimSpace(req.ArgsPolicyPreset) == "" {
 		return winget.UninstallRequest{}, errors.New("UNINSTALL_SOFTWARE payload missing argsPolicyPreset")
+	}
+	return req, nil
+}
+
+// unmarshalBackupDryRunPayload decodes the COLLECT_BACKUP_DRYRUN payload
+// (Faz 22.8A, #117) using the same marshal→unmarshal round-trip the other
+// structured commands use. Errors are PATH-FREE (the payload carries local
+// paths the agent must not echo back into a result/log).
+func unmarshalBackupDryRunPayload(payload map[string]interface{}) (dataprotection.Request, error) {
+	if payload == nil {
+		return dataprotection.Request{}, errors.New("COLLECT_BACKUP_DRYRUN payload is empty")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return dataprotection.Request{}, errors.New("COLLECT_BACKUP_DRYRUN payload re-marshal failed")
+	}
+	var req dataprotection.Request
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return dataprotection.Request{}, errors.New("COLLECT_BACKUP_DRYRUN payload decode failed")
+	}
+	if len(req.Roots) == 0 {
+		return dataprotection.Request{}, errors.New("COLLECT_BACKUP_DRYRUN payload missing roots")
 	}
 	return req, nil
 }

@@ -698,6 +698,13 @@ func RuntimeCapabilityReport() protocol.CapabilityReport {
 
 type RuntimeCapabilityOptions struct {
 	EnableUpdateAgent bool
+	// EnableBackupDryRun (Faz 22.8A, #117) opts into advertising the
+	// COLLECT_BACKUP_DRYRUN capability. Default false: the metadata-only
+	// backup dry-run is privacy-sensitive (DC-EA-1) and must not be
+	// advertised from a plain build. It is gated on a policy-ready Windows
+	// build AND on the backend mirror validator being live (a later slice
+	// flips the wiring); until then this stays off in production.
+	EnableBackupDryRun bool
 }
 
 func RuntimeCapabilities() []protocol.CommandType {
@@ -757,6 +764,13 @@ func RuntimeCapabilitiesWithOptions(opts RuntimeCapabilityOptions) []protocol.Co
 			// (signer allowlist / URL allowlist / staging guardrails).
 			// Do not advertise it from a plain Windows build.
 			capabilities = append(capabilities, protocol.CommandUpdateAgent)
+		}
+		if opts.EnableBackupDryRun {
+			// Faz 22.8A (#117): COLLECT_BACKUP_DRYRUN is opt-in because the
+			// metadata-only backup manifest is privacy-sensitive (DC-EA-1)
+			// and must be gated on a policy-ready Windows build + the live
+			// backend mirror validator. Do not advertise from a plain build.
+			capabilities = append(capabilities, protocol.CommandCollectBackupDryRun)
 		}
 	}
 	return capabilities
