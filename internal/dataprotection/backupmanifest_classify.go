@@ -21,14 +21,25 @@ const (
 	classArchiveContainer   = "archive_container"
 )
 
-// archiveExts are the DC-EA-RED archive/container extensions. They are
+// archiveExts is the canonical DC-EA-RED archive/container family. These are
 // denied-aggregate (never an entry); RED data can hide inside them and
 // recursive classification is a separately-gated later step (contract §3 +
-// Codex 019ec28a). pst/ost intentionally appear here AND under mailbox_cache
-// (dual-match dedup handled by classifyDenied + recordDenied).
+// Codex 019ec28a). The contract lists `zip/7z/rar/vhd/vhdx/pst/ost` as
+// EXAMPLES; the agent applies the broader real-world family so a renamed-free
+// archive (`.tar.gz`, `.iso`, disk/VM image, backup container) cannot slip
+// through as an eligible "other" entry (Codex 019ec2bb P2). The backend mirror
+// (contract §5) MUST mirror this exact set. pst/ost intentionally appear here
+// AND under mailbox_cache (dual-match dedup in classifyDenied + recordDenied).
 var archiveExts = map[string]bool{
+	// classic archives
 	".zip": true, ".7z": true, ".rar": true,
-	".vhd": true, ".vhdx": true,
+	".tar": true, ".gz": true, ".tgz": true, ".bz2": true,
+	".tbz2": true, ".xz": true, ".txz": true, ".lz": true,
+	".lzma": true, ".zst": true, ".cab": true, ".arj": true,
+	// disk / VM / optical images (data can hide wholesale)
+	".vhd": true, ".vhdx": true, ".vmdk": true, ".iso": true,
+	".img": true, ".wim": true, ".dmg": true,
+	// mail stores (also mailbox_cache — dual match)
 	".pst": true, ".ost": true,
 }
 

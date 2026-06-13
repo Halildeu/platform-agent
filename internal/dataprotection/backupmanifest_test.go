@@ -295,6 +295,72 @@ func TestGenerate_RootResolvingToRedIsRefused(t *testing.T) {
 	}
 }
 
+func TestGenerate_BroadArchiveFamilyDenied(t *testing.T) {
+	// Codex 019ec2bb P2: the archive family is broader than the contract's
+	// examples — .tar/.gz/.iso/.vmdk must NOT become eligible "other" entries.
+	m := genOverTree(t, func(root string) {
+		writeFile(t, filepath.Join(root, "ok.docx"))
+		writeFile(t, filepath.Join(root, "logs.tar"))
+		writeFile(t, filepath.Join(root, "dump.gz"))
+		writeFile(t, filepath.Join(root, "image.iso"))
+		writeFile(t, filepath.Join(root, "vm.vmdk"))
+	})
+	if m.Aggregate.TotalEligibleCount != 1 {
+		t.Errorf("only ok.docx eligible; tar/gz/iso/vmdk must be denied, got %d (entries=%+v)", m.Aggregate.TotalEligibleCount, m.Entries)
+	}
+	if m.Aggregate.DeniedCount != 4 || m.Aggregate.ContainerCount != 4 {
+		t.Errorf("expected 4 archives denied+containers, got denied=%d container=%d", m.Aggregate.DeniedCount, m.Aggregate.ContainerCount)
+	}
+	if !contains(m.Aggregate.DeniedClasses, classArchiveContainer) {
+		t.Errorf("expected archive_container class, got %v", m.Aggregate.DeniedClasses)
+	}
+	for _, e := range m.Entries {
+		if e.ExtensionType != extDoc {
+			t.Errorf("archive leaked as entry: %+v", e)
+		}
+	}
+}
+
+func TestGenerate_InvalidRootRefOrClassDropped(t *testing.T) {
+	// Codex 019ec2bb P1: a path-shaped root_ref or out-of-enum path_class must
+	// be dropped fail-closed (never canonicalized/walked, never echoed).
+	base := t.TempDir()
+	good := filepath.Join(base, "good")
+	bad := filepath.Join(base, "bad")
+	writeFile(t, filepath.Join(good, "a.docx"))
+	writeFile(t, filepath.Join(bad, "b.docx"))
+
+	m, err := Generate(Options{
+		DeviceID: "d", TenantID: "t", AllowlistProfileID: "p",
+		Now: time.Now(), Canon: NewCanonicalizer(),
+		Roots: []ManagedRoot{
+			{RootRef: `managed_root:C:\Users\Alice\Secret`, LocalPath: bad, PathClass: "managed/it-folder", CompanyManaged: true}, // path-shaped ref
+			{RootRef: "managed_root:99999999-9999-9999-9999-999999999999", LocalPath: bad, PathClass: "totally-bogus-class", CompanyManaged: true},  // bad class
+			{RootRef: "managed_root:88888888-8888-8888-8888-888888888888", LocalPath: good, PathClass: "managed/it-folder", CompanyManaged: true},   // valid
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	// Only the valid root is echoed + walked.
+	if len(m.Scope.ManagedDataRoots) != 1 || m.Scope.ManagedDataRoots[0] != "managed_root:88888888-8888-8888-8888-888888888888" {
+		t.Errorf("only the valid root should be echoed, got %v", m.Scope.ManagedDataRoots)
+	}
+	if m.Aggregate.TotalEligibleCount != 1 {
+		t.Errorf("only good/a.docx eligible (2 bad roots dropped), got %d", m.Aggregate.TotalEligibleCount)
+	}
+	if m.Aggregate.UnresolvedPathCount < 2 {
+		t.Errorf("two invalid roots should be counted unresolved, got %d", m.Aggregate.UnresolvedPathCount)
+	}
+	// The path-shaped ref must NOT appear anywhere in the manifest JSON.
+	raw, _ := json.Marshal(m)
+	for _, needle := range []string{`C:\Users\Alice`, "Alice", "Secret", "totally-bogus-class"} {
+		if strings.Contains(string(raw), needle) {
+			t.Errorf("invalid root field %q leaked into manifest", needle)
+		}
+	}
+}
+
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {

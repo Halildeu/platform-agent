@@ -1,6 +1,13 @@
 // Package dataprotection implements the Faz 22.8A endpoint backup dry-run
-// manifest generator (gitops docs/faz-22-8a-backup-manifest-contract-v1.md,
-// Codex 019ea961 AGREE + 019ec28a P0 amendment).
+// manifest generator.
+//
+// AUTHORITATIVE CONTRACT (cross-repo): the manifest schema, the DC-EA-RED
+// class set, and the archive denied-aggregate / pst-ost dedup rules are
+// defined in the platform-k8s-gitops repository at
+// docs/faz-22-8a-backup-manifest-contract-v1.md (Codex 019ea961 AGREE +
+// 019ec28a P0 amendment, merged gitops PR #1530). That file does NOT live in
+// this repo; the backend mirror validator (contract §5) re-validates every
+// manifest server-side against the same rules.
 //
 // CONTRACT INVARIANTS (machine-enforced by backupmanifest_guard_test.go):
 //
@@ -203,6 +210,16 @@ func Generate(opts Options) (Manifest, error) {
 
 	rootRefs := make([]string, 0, len(opts.Roots))
 	for _, root := range opts.Roots {
+		// Codex 019ec2bb P1: RootRef + PathClass are echoed verbatim into the
+		// manifest, so the path-free invariant (#4) is only machine-enforced
+		// if we VALIDATE them. A backend bug that sent a path-shaped
+		// root_ref ("managed_root:C:\Users\Alice\...") or path_class would
+		// otherwise leak a raw path. Both are bounded fail-closed: an invalid
+		// root is dropped (counted, never echoed, never walked).
+		if !validRootRef(root.RootRef) || !validPathClasses[root.PathClass] {
+			g.agg.UnresolvedPathCount++
+			continue
+		}
 		rootRefs = append(rootRefs, root.RootRef)
 		// Canonicalize the root itself; if it cannot be resolved or is a
 		// reparse point, we fail-closed (count, do not walk).
@@ -357,6 +374,34 @@ func withinRoot(canon, root string) bool {
 
 func normalizeForCompare(p string) string {
 	return strings.ToLower(filepath.Clean(p))
+}
+
+// validPathClasses is the bounded path_class enum (contract §2). A root whose
+// PathClass is not one of these is dropped fail-closed so an unexpected /
+// path-shaped value can never be echoed into the manifest.
+var validPathClasses = map[string]bool{
+	"managed/onedrive-business": true,
+	"managed/sharepoint":        true,
+	"managed/unc-corp":          true,
+	"managed/it-folder":         true,
+	"mdm-gpo-root":              true,
+}
+
+// validRootRef enforces the opaque "managed_root:<token>" shape. The token
+// must be non-empty and free of path/stream metacharacters (`/ \ : %`) and
+// whitespace, so a path-shaped backend value (e.g.
+// "managed_root:C:\\Users\\Alice\\...") is rejected rather than echoed into
+// the manifest (path-free invariant, Codex 019ec2bb P1).
+func validRootRef(s string) bool {
+	const prefix = "managed_root:"
+	if !strings.HasPrefix(s, prefix) {
+		return false
+	}
+	id := s[len(prefix):]
+	if id == "" || strings.TrimSpace(id) != id {
+		return false
+	}
+	return !strings.ContainsAny(id, `:/\%`)
 }
 
 func sortedKeys(m map[string]bool) []string {

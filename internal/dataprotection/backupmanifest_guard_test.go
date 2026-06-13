@@ -46,18 +46,26 @@ func stripComments(src []byte) string {
 // makes that a compile-of-the-suite failure, not a code-review hope.
 func TestNoContentReadImports(t *testing.T) {
 	forbiddenImports := map[string]bool{
-		"io":         true, // io.ReadAll / io.Copy can stream content (io/fs is fine)
-		"bufio":      true,
-		"io/ioutil":  true,
-		"crypto/md5": true,
+		"io":        true, // io.ReadAll / io.Copy can stream content (io/fs is fine)
+		"bufio":     true,
+		"io/ioutil": true,
+		"mmap":      true,
 	}
 	forbiddenImportPrefixes := []string{"crypto", "hash"}
+	// Denylist of content-read / hash entry points. Codex 019ec2bb P1/P2: the
+	// guard must catch future content-read regressions, not just the obvious
+	// os.ReadFile. We forbid the named read APIs across the os / io / ioutil /
+	// syscall / x-sys / mmap surfaces AND the generic ".Read(" method call and
+	// "ReadFile(" — a metadata-only package legitimately needs neither (it uses
+	// os.ReadDir + os.Lstat + CreateFile(FILE_READ_ATTRIBUTES) only).
 	forbiddenCallSubstrings := []string{
-		"os.Open(", "os.OpenFile(", "os.ReadFile(",
-		"io.ReadAll(", "io.Copy(", "ioutil.ReadFile(",
+		"os.Open(", "os.OpenFile(", "os.ReadFile(", "os.NewFile(",
+		"io.ReadAll(", "io.Copy(", "ioutil.ReadFile(", "ioutil.ReadAll(",
 		"bufio.NewReader(", "bufio.NewScanner(",
-		"sha256.", "sha1.", "md5.", "sha512.",
-		".Sum(", "crc32.",
+		".Read(", "ReadFile(", "ReadAll(",
+		"syscall.Read", "unix.Read", "unix.Pread", "windows.ReadFile",
+		"MapViewOfFile", "Mmap(", "Mmap (",
+		"sha256.", "sha1.", "md5.", "sha512.", "blake", ".Sum(", "crc32.", "fnv.",
 	}
 
 	files := packageGoFiles(t, false)
