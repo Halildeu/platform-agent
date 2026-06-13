@@ -312,8 +312,22 @@ func (r *Runner) ensureCert(ctx context.Context) error {
 	}
 
 	if r.loadedCert.ThumbprintSHA256 == cert.ThumbprintSHA256 && r.wireClient != nil {
+		// #147: LoadEligibleCert acquired a fresh private-key handle + cert
+		// context for this redundant reload; release it so the service loop
+		// does not leak a handle/context every CommandPollInterval.
+		closeCertMaterialSigner(cert)
 		return nil
 	}
+
+	// #147: if any client-build step below fails after we acquired this cert's
+	// signer, release it so a misconfig retry loop does not leak handles.
+	// Cleared once ownership transfers to r.loadedCert.
+	committed := false
+	defer func() {
+		if !committed {
+			closeCertMaterialSigner(cert)
+		}
+	}()
 
 	host, err := serverNameFromURL(r.Config.APIURL)
 	if err != nil {
@@ -337,15 +351,31 @@ func (r *Runner) ensureCert(ctx context.Context) error {
 	// replacing the transport — Codex F6 absorb. Without this the
 	// old mTLS connections live another IdleConnTimeout (~90s) and
 	// might serve requests under the old cert identity.
+	previous := r.loadedCert
 	if r.httpClient != nil {
 		r.httpClient.CloseIdleConnections()
 	}
 	r.httpClient = httpClient
 	r.wireClient = wire
 	r.loadedCert = cert
+	committed = true
+	// #147: release the superseded cert's signer (key handle + context) once its
+	// idle mTLS connections are closed and it is no longer referenced. No-op on
+	// first load (zero CertMaterial) or for signers without Close.
+	closeCertMaterialSigner(previous)
 	r.logf("auto-enroll cert loaded: subject=%q thumbprint_sha256=%s not_after=%s",
 		cert.Leaf.Subject.CommonName, cert.ThumbprintSHA256, cert.Leaf.NotAfter.Format(time.RFC3339))
 	return nil
+}
+
+// closeCertMaterialSigner releases the private-key handle (and any owned
+// platform resources) held by a CertMaterial's signer when it implements
+// Close() — the Windows cngSigner does (#147). No-op on platforms / signers
+// that do not (e.g. a zero CertMaterial, or non-Windows software keys).
+func closeCertMaterialSigner(m CertMaterial) {
+	if c, ok := m.TLSCertificate.PrivateKey.(interface{ Close() }); ok {
+		c.Close()
+	}
 }
 
 // noCertBackoffSchedule returns the bounded retry intervals used when
