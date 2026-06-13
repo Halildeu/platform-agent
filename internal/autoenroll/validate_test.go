@@ -22,7 +22,7 @@ func TestPersistedConfig_Validate_TokenlessHappyPath(t *testing.T) {
 }
 
 // TestPersistedConfig_Validate_LegacyTokenHappyPath keeps the legacy
-// token-backed shape valid (retained for the #150 lifecycle).
+// token-backed shape valid (retained for the #151 lifecycle).
 func TestPersistedConfig_Validate_LegacyTokenHappyPath(t *testing.T) {
 	cfg := PersistedConfig{
 		DeviceID:             "dev-1",

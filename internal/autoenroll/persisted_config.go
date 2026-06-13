@@ -48,7 +48,7 @@ func (p PersistedConfig) IsZero() bool {
 // HALF-populated token shape (one of service_token/token_expires_at set, the
 // other empty) is still rejected: it signals corruption that could otherwise
 // drive a refresh loop with an inconsistent token (legacy token-backed shape
-// retained for #150).
+// retained for #151).
 func (p PersistedConfig) Validate() error {
 	if p.IsZero() {
 		return ErrEmptyStore
@@ -69,7 +69,7 @@ func (p PersistedConfig) Validate() error {
 // enrollment record: a device + bound cert thumbprint and NO service token.
 // The runner uses this to stop after a successful enrollment reconcile (the
 // mTLS cert is the continuous credential; the token-dependent heartbeat /
-// command lifecycle is deferred to #150).
+// command lifecycle is deferred to #151).
 func (p PersistedConfig) IsTokenlessEnrollment() bool {
 	return p.DeviceID != "" && p.CertThumbprintSHA256 != "" && p.ServiceToken == ""
 }

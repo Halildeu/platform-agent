@@ -177,7 +177,7 @@ func NewRunner(cfg Config, cert CertProvider, reg RegistryReader, store ConfigSt
 // RunOnce executes a single reconcile iteration and returns. In the canonical
 // ADR-0029 M2 tokenless model it completes after the enrollment reconcile (the
 // mTLS cert is the continuous credential; refresh/heartbeat/command are the
-// retained legacy / #150 path). First-run jitter is applied only when the
+// retained legacy / #151 path). First-run jitter is applied only when the
 // persisted store is empty.
 func (r *Runner) RunOnce(ctx context.Context) error {
 	persisted, err := r.ConfigStore.Read(ctx)
@@ -215,11 +215,11 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 
 	// ADR-0029 M2 canonical path: tokenless mTLS enrollment. The cert is the
 	// continuous credential and the backend exposes no token-refresh /
-	// heartbeat / command endpoints on this surface yet (#150). Once the
+	// heartbeat / command endpoints on this surface yet (#151). Once the
 	// enrollment record is persisted there is nothing further to do this
 	// cycle — do NOT fall through to the token-dependent lifecycle steps.
 	if persisted.IsTokenlessEnrollment() {
-		r.logf("mTLS tokenless enrollment complete (status persisted); heartbeat/command lifecycle deferred to #150")
+		r.logf("mTLS tokenless enrollment complete (status persisted); heartbeat/command lifecycle deferred to #151")
 		return nil
 	}
 
@@ -298,11 +298,11 @@ func (r *Runner) iterate(ctx context.Context) error {
 
 	// ADR-0029 M2 canonical path: tokenless mTLS enrollment. The cert is the
 	// continuous credential and the backend exposes no token-refresh /
-	// heartbeat / command endpoints on this surface yet (#150). Once the
+	// heartbeat / command endpoints on this surface yet (#151). Once the
 	// enrollment record is persisted there is nothing further to do this
 	// cycle — do NOT fall through to the token-dependent lifecycle steps.
 	if persisted.IsTokenlessEnrollment() {
-		r.logf("mTLS tokenless enrollment complete (status persisted); heartbeat/command lifecycle deferred to #150")
+		r.logf("mTLS tokenless enrollment complete (status persisted); heartbeat/command lifecycle deferred to #151")
 		return nil
 	}
 
@@ -455,7 +455,7 @@ func (r *Runner) waitForCert(ctx context.Context) error {
 //     enrollment record (deviceId + bound cert thumbprint; #149).
 //   - cert thumbprint changed → idempotent reissue via auto-enroll, persist.
 //   - legacy token-backed record whose token expired locally → idempotent
-//     reissue via auto-enroll (rewrites it as a tokenless record; #150).
+//     reissue via auto-enroll (rewrites it as a tokenless record; #151).
 //   - otherwise → leave persisted as-is.
 func (r *Runner) reconcileEnrollment(ctx context.Context, persisted PersistedConfig) (PersistedConfig, error) {
 	now := time.Now()
@@ -484,7 +484,7 @@ func (r *Runner) reconcileEnrollment(ctx context.Context, persisted PersistedCon
 	// ADR-0029 M2 tokenless: persist a device + bound-cert enrollment record.
 	// The mTLS cert is the continuous credential — ServiceToken/TokenExpiresAt
 	// are deliberately left zero (the backend issues no token; the
-	// token-dependent lifecycle is #150).
+	// token-dependent lifecycle is #151).
 	cfg := PersistedConfig{
 		DeviceID:             resp.DeviceID,
 		CertThumbprintSHA256: current,
@@ -510,7 +510,7 @@ func (r *Runner) reconcileEnrollment(ctx context.Context, persisted PersistedCon
 func (r *Runner) maybeRefreshToken(ctx context.Context, persisted PersistedConfig) (PersistedConfig, error) {
 	// Tokenless mTLS enrollment never reaches here (RunOnce/iterate
 	// short-circuit). Fail closed if it does — never refresh against an
-	// endpoint the canonical model does not use (#150).
+	// endpoint the canonical model does not use (#151).
 	if persisted.ServiceToken == "" {
 		return persisted, ErrTokenlessLifecycleUnsupported
 	}
@@ -554,7 +554,7 @@ func (r *Runner) maybeRefreshToken(ctx context.Context, persisted PersistedConfi
 // must respect that as terminal.
 func (r *Runner) heartbeat(ctx context.Context, persisted PersistedConfig) error {
 	// Fail closed rather than send an empty Bearer: tokenless enrollment has
-	// no heartbeat endpoint on the mTLS surface yet (#150).
+	// no heartbeat endpoint on the mTLS surface yet (#151).
 	if persisted.ServiceToken == "" {
 		return ErrTokenlessLifecycleUnsupported
 	}
@@ -602,7 +602,7 @@ func (r *Runner) heartbeat(ctx context.Context, persisted PersistedConfig) error
 // pollAndExecute fetches one queued command (if any) and runs it.
 func (r *Runner) pollAndExecute(ctx context.Context, persisted PersistedConfig) error {
 	// Fail closed rather than poll with an empty Bearer: tokenless enrollment
-	// has no command endpoint on the mTLS surface yet (#150).
+	// has no command endpoint on the mTLS surface yet (#151).
 	if persisted.ServiceToken == "" {
 		return ErrTokenlessLifecycleUnsupported
 	}

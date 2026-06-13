@@ -42,8 +42,8 @@ var ErrAuthFailure = errors.New("backend rejected cert or service token (fail-cl
 // bearer token. In the ADR-0029 M2 canonical model enrollment is tokenless and
 // the runner short-circuits before these steps; reaching one with an empty
 // token means a caller bypassed the tokenless guard, so fail closed rather
-// than send an empty Bearer. The cert-authenticated lifecycle is #150.
-var ErrTokenlessLifecycleUnsupported = errors.New("tokenless mTLS enrollment: token-dependent lifecycle not supported (#150)")
+// than send an empty Bearer. The cert-authenticated lifecycle is #151.
+var ErrTokenlessLifecycleUnsupported = errors.New("tokenless mTLS enrollment: token-dependent lifecycle not supported (#151)")
 
 // CertFilter narrows the cert-store query to a single eligible machine
 // certificate. Template identity, issuer, and revocation are deliberately NOT
@@ -216,7 +216,7 @@ type TokenRefreshResponse struct {
 
 // HeartbeatRequest mirrors the existing protocol.HeartbeatRequest shape and
 // omits agent-id-style fields (cert provides identity). NOTE: this is the
-// token-dependent lifecycle DTO (#150), NOT the /endpoint-enrollments/auto
+// token-dependent lifecycle DTO (#151), NOT the /endpoint-enrollments/auto
 // body — its snake_case tags belong to a heartbeat endpoint the backend does
 // not yet expose on the mTLS surface; do not confuse it with the camelCase
 // AutoEnrollRequest contract.
