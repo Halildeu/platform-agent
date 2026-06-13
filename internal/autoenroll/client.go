@@ -64,9 +64,11 @@ func NewClient(baseURL string, httpClient *http.Client) (*Client, error) {
 // Useful for diagnostics and log messages.
 func (c *Client) BaseURL() string { return c.baseURL.String() }
 
-// AutoEnroll consumes the cert + os info and returns the freshly minted
-// service token. The backend determines whether the cert maps to an
-// existing device (idempotent reissue path) or a new one.
+// AutoEnroll submits the cert + host self-description and returns the
+// backend's TOKENLESS enrollment confirmation (deviceId + status + certInfo;
+// #149 — no service token, the mTLS cert is the credential). The backend
+// determines whether the cert maps to an existing device (idempotent
+// "already-enrolled") or a new one ("enrolled").
 func (c *Client) AutoEnroll(ctx context.Context, req AutoEnrollRequest) (AutoEnrollResponse, error) {
 	var resp AutoEnrollResponse
 	if err := c.do(ctx, http.MethodPost, PathAutoEnroll, "", req, &resp); err != nil {

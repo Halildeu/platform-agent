@@ -188,13 +188,14 @@ func newTestServer(t *testing.T, pki *testPKI, cfg *handlerConfig, recorder *req
 func TestRunner_FirstRun_EnrollsAndPersists(t *testing.T) {
 	pki := setupTestPKI(t)
 	recorder := &requestRecorder{hit: map[string]int{}}
+	localThumb := ThumbprintSHA256Hex(pki.clientCert.Leaf)
 	cfg := &handlerConfig{
 		autoEnroll: AutoEnrollResponse{
-			DeviceID:       "dev-1",
-			ServiceToken:   "tok-1",
-			TokenExpiresAt: time.Now().Add(24 * time.Hour).UTC(),
+			DeviceID:   "dev-1",
+			Status:     StatusEnrolled,
+			EnrolledAt: time.Now().UTC(),
+			CertInfo:   AutoEnrollCertInfo{Thumbprint: localThumb},
 		},
-		heartbeat: HeartbeatResponse{Accepted: true, Status: "active", ServerTime: time.Now().UTC()},
 	}
 	srv := newTestServer(t, pki, cfg, recorder)
 	store := NewMemoryStore()
@@ -209,15 +210,32 @@ func TestRunner_FirstRun_EnrollsAndPersists(t *testing.T) {
 	if got := recorder.count(PathAutoEnroll); got != 1 {
 		t.Fatalf("AutoEnroll hits: got %d, want 1", got)
 	}
+	// ADR-0029 M2 tokenless: a successful enrollment must NOT fall through
+	// to the token-dependent lifecycle (refresh / heartbeat / commands).
+	if got := recorder.count(PathTokenRefresh); got != 0 {
+		t.Fatalf("RefreshToken must not be called in tokenless mode; got %d", got)
+	}
+	if got := recorder.count(PathHeartbeat); got != 0 {
+		t.Fatalf("Heartbeat must not be called in tokenless mode; got %d", got)
+	}
+	if got := recorder.count(PathCommandsNext); got != 0 {
+		t.Fatalf("NextCommand must not be called in tokenless mode; got %d", got)
+	}
 	persisted, ok := store.Snapshot()
 	if !ok {
 		t.Fatal("expected persisted snapshot")
 	}
-	if persisted.DeviceID != "dev-1" || persisted.ServiceToken != "tok-1" {
-		t.Fatalf("persisted mismatch: %+v", persisted)
+	if persisted.DeviceID != "dev-1" {
+		t.Fatalf("persisted device id mismatch: %+v", persisted)
 	}
-	if persisted.CertThumbprintSHA256 == "" {
-		t.Fatal("persisted thumbprint should be populated after enroll")
+	if persisted.ServiceToken != "" {
+		t.Fatalf("tokenless enrollment must persist NO service token; got %q", persisted.ServiceToken)
+	}
+	if !persisted.IsTokenlessEnrollment() {
+		t.Fatalf("expected a tokenless enrollment record; got %+v", persisted)
+	}
+	if persisted.CertThumbprintSHA256 != localThumb {
+		t.Fatalf("persisted thumbprint should bind the presented cert; got %q want %q", persisted.CertThumbprintSHA256, localThumb)
 	}
 }
 
@@ -226,19 +244,17 @@ func TestRunner_CertThumbprintChange_TriggersReissue(t *testing.T) {
 	recorder := &requestRecorder{hit: map[string]int{}}
 	cfg := &handlerConfig{
 		autoEnroll: AutoEnrollResponse{
-			DeviceID:         "dev-1",
-			ServiceToken:     "tok-2",
-			TokenExpiresAt:   time.Now().Add(24 * time.Hour).UTC(),
-			IsExistingDevice: true,
+			DeviceID:   "dev-1",
+			Status:     StatusAlreadyEnrolled,
+			EnrolledAt: time.Now().UTC(),
+			CertInfo:   AutoEnrollCertInfo{Thumbprint: "new-thumbprint"},
 		},
-		heartbeat: HeartbeatResponse{Accepted: true, Status: "active", ServerTime: time.Now().UTC()},
 	}
 	srv := newTestServer(t, pki, cfg, recorder)
 	store := NewMemoryStore()
+	// Prior tokenless enrollment whose AD CS cert has since rotated.
 	_ = store.Write(context.Background(), PersistedConfig{
 		DeviceID:             "dev-1",
-		ServiceToken:         "tok-1",
-		TokenExpiresAt:       time.Now().Add(24 * time.Hour).UTC(),
 		CertThumbprintSHA256: "old-thumbprint",
 	})
 	provider := &fakeCertProvider{pki: pki, thumbprint: "new-thumbprint"}
@@ -258,8 +274,8 @@ func TestRunner_CertThumbprintChange_TriggersReissue(t *testing.T) {
 	if persisted.CertThumbprintSHA256 != "new-thumbprint" {
 		t.Fatalf("expected thumbprint rebind, got %q", persisted.CertThumbprintSHA256)
 	}
-	if persisted.ServiceToken != "tok-2" {
-		t.Fatalf("expected new token after reissue, got %q", persisted.ServiceToken)
+	if persisted.ServiceToken != "" {
+		t.Fatalf("tokenless reissue must persist NO service token, got %q", persisted.ServiceToken)
 	}
 }
 
@@ -307,19 +323,22 @@ func TestRunner_TokenExpiringTriggersRefresh(t *testing.T) {
 func TestRunner_TokenExpired_TriggersReissue(t *testing.T) {
 	pki := setupTestPKI(t)
 	recorder := &requestRecorder{hit: map[string]int{}}
+	localThumb := ThumbprintSHA256Hex(pki.clientCert.Leaf)
 	cfg := &handlerConfig{
 		autoEnroll: AutoEnrollResponse{
-			DeviceID:         "dev-1",
-			ServiceToken:     "tok-2",
-			TokenExpiresAt:   time.Now().Add(24 * time.Hour).UTC(),
-			IsExistingDevice: true,
+			DeviceID:   "dev-1",
+			Status:     StatusAlreadyEnrolled,
+			EnrolledAt: time.Now().UTC(),
+			CertInfo:   AutoEnrollCertInfo{Thumbprint: localThumb},
 		},
-		heartbeat: HeartbeatResponse{Accepted: true, Status: "active", ServerTime: time.Now().UTC()},
 	}
 	srv := newTestServer(t, pki, cfg, recorder)
 	store := NewMemoryStore()
 	provider := &fakeCertProvider{pki: pki}
 	mat, _ := provider.LoadEligibleCert(context.Background(), DefaultCertFilter())
+	// Legacy token-backed record (pre-tokenless migration) whose bearer has
+	// already expired — reconcile must reissue (not refresh) and rewrite it
+	// as a tokenless enrollment record.
 	_ = store.Write(context.Background(), PersistedConfig{
 		DeviceID:             "dev-1",
 		ServiceToken:         "tok-1",
@@ -337,6 +356,10 @@ func TestRunner_TokenExpired_TriggersReissue(t *testing.T) {
 	}
 	if got := recorder.count(PathTokenRefresh); got != 0 {
 		t.Fatalf("expected zero RefreshToken calls (refresh on expired token is unsafe), got %d", got)
+	}
+	persisted, _ := store.Snapshot()
+	if persisted.ServiceToken != "" || !persisted.IsTokenlessEnrollment() {
+		t.Fatalf("expired legacy record should be rewritten tokenless; got %+v", persisted)
 	}
 }
 
