@@ -384,6 +384,11 @@ func runAutoEnrollDryRun(cfg config.Config, apiURLOverride string, logger *log.L
 	if err != nil {
 		return fmt.Errorf("cert load: %w", err)
 	}
+	defer func() {
+		if c, ok := material.TLSCertificate.PrivateKey.(interface{ Close() }); ok {
+			c.Close()
+		}
+	}()
 	logger.Printf("dry-run cert: subject=%q thumbprint_sha256=%s not_after=%s",
 		material.Leaf.Subject.CommonName, material.ThumbprintSHA256, material.Leaf.NotAfter.Format(time.RFC3339))
 
