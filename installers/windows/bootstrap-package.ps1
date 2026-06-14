@@ -15,7 +15,7 @@ param(
     [Parameter(Mandatory)] [string]$ExpectedZipSha256,
     [string]$ApiUrl = "https://testai.acik.com/api/v1/endpoint-agent",
     [switch]$AutoEnroll,
-    [string]$AutoEnrollApiUrl = "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent",
+    [string]$AutoEnrollApiUrl = "https://mtls.testai.acik.com/api/v1/endpoint-agent",
     [string]$AutoEnrollCertSubjectSuffix = "",
     [string]$AutoEnrollCertSANURIPrefix = "adcomputer:",
     [int]$AutoEnrollJitterSeconds = 0,

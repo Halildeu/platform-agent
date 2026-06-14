@@ -141,6 +141,13 @@ func buildTestMTLSClient(pki *testPKI) (*http.Client, error) {
 	return testHTTPClient(pki), nil
 }
 
+func TestDefaults_UsesCanonicalTestMTLSEdge(t *testing.T) {
+	const want = "https://mtls.testai.acik.com/api/v1/endpoint-agent"
+	if got := Defaults().APIURL; got != want {
+		t.Fatalf("Defaults().APIURL = %q, want %q", got, want)
+	}
+}
+
 // Standard handler that maps enrollment + heartbeat + commands + token
 // refresh paths to configurable responses. recorder logs every hit.
 type handlerConfig struct {
@@ -382,6 +389,24 @@ func TestRunner_TokenExpired_TriggersReissue(t *testing.T) {
 	persisted, _ := store.Snapshot()
 	if persisted.ServiceToken != "" || !persisted.IsTokenlessEnrollment() {
 		t.Fatalf("expired legacy record should be rewritten tokenless; got %+v", persisted)
+	}
+}
+
+func TestRunner_TokenlessLifecycleGuardsFailClosed(t *testing.T) {
+	runner := &Runner{}
+	persisted := PersistedConfig{
+		DeviceID:             "dev-1",
+		CertThumbprintSHA256: "thumb-1",
+	}
+
+	if _, err := runner.maybeRefreshToken(context.Background(), persisted); !errors.Is(err, ErrTokenlessLifecycleUnsupported) {
+		t.Fatalf("maybeRefreshToken tokenless error = %v, want ErrTokenlessLifecycleUnsupported", err)
+	}
+	if err := runner.heartbeat(context.Background(), persisted); !errors.Is(err, ErrTokenlessLifecycleUnsupported) {
+		t.Fatalf("heartbeat tokenless error = %v, want ErrTokenlessLifecycleUnsupported", err)
+	}
+	if err := runner.pollAndExecute(context.Background(), persisted); !errors.Is(err, ErrTokenlessLifecycleUnsupported) {
+		t.Fatalf("pollAndExecute tokenless error = %v, want ErrTokenlessLifecycleUnsupported", err)
 	}
 }
 

@@ -24,21 +24,21 @@ func (s stubRegistry) ReadString(key, value, def string) string {
 }
 
 func TestHostnameOnly_AcceptsHTTPS(t *testing.T) {
-	got, err := hostnameOnly("https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin")
+	got, err := hostnameOnly("https://mtls.testai.acik.com/api/v1/endpoint-agent")
 	if err != nil {
 		t.Fatalf("hostnameOnly: %v", err)
 	}
-	if got != "endpoint-agent-mtls.testai.acik.com" {
+	if got != "mtls.testai.acik.com" {
 		t.Fatalf("got %q", got)
 	}
 }
 
 func TestHostnameOnly_StripsPort(t *testing.T) {
-	got, err := hostnameOnly("https://endpoint-agent-mtls.testai.acik.com:8443/api/v1/endpoint-admin")
+	got, err := hostnameOnly("https://mtls.testai.acik.com:8443/api/v1/endpoint-agent")
 	if err != nil {
 		t.Fatalf("hostnameOnly: %v", err)
 	}
-	if got != "endpoint-agent-mtls.testai.acik.com" {
+	if got != "mtls.testai.acik.com" {
 		t.Fatalf("got %q", got)
 	}
 }

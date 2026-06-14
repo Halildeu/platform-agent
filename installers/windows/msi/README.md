@@ -109,7 +109,7 @@ msiexec /i EndpointAgent-0.1.1-lab.msi /qn /l*v C:\ProgramData\EndpointAgent\log
 
 # Domain / GPO (tokenless):
 msiexec /i EndpointAgent-0.1.1-lab.msi /qn AUTO_ENROLL=1 `
-  AUTO_ENROLL_API_URL=https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent
+  AUTO_ENROLL_API_URL=https://mtls.testai.acik.com/api/v1/endpoint-agent
 ```
 
 GPO computer-assignment + an MST carrying only non-secret config; the deferred CA
