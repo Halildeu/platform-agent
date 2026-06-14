@@ -66,19 +66,34 @@ func (r *fakeRegistry) ReadString(key, value, def string) string {
 // requestRecorder captures requests by path with a mutex so concurrent
 // goroutines do not race. Used to assert "AutoEnroll called N times".
 type requestRecorder struct {
-	mu  sync.Mutex
-	hit map[string]int
+	mu   sync.Mutex
+	hit  map[string]int
+	auth map[string][]string
 }
 
 func (r *requestRecorder) inc(path string) {
+	r.record(path, nil)
+}
+func (r *requestRecorder) record(path string, req *http.Request) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.hit[path]++
+	if req != nil {
+		if r.auth == nil {
+			r.auth = map[string][]string{}
+		}
+		r.auth[path] = append(r.auth[path], req.Header.Get("Authorization"))
+	}
 }
 func (r *requestRecorder) count(path string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.hit[path]
+}
+func (r *requestRecorder) authHeaders(path string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.auth[path]...)
 }
 
 // buildRunner constructs a Runner bound to the given httptest server +
@@ -148,13 +163,17 @@ func newTestServer(t *testing.T, pki *testPKI, cfg *handlerConfig, recorder *req
 		_ = json.NewEncoder(w).Encode(cfg.autoEnroll)
 	})
 	mux.HandleFunc(PathHeartbeat, func(w http.ResponseWriter, r *http.Request) {
-		recorder.inc(PathHeartbeat)
+		recorder.record(PathHeartbeat, r)
 		if cfg.heartbeatErr != 0 {
 			w.WriteHeader(cfg.heartbeatErr)
 			return
 		}
+		resp := cfg.heartbeat
+		if !resp.Accepted && resp.Status == "" && resp.ServerTime.IsZero() {
+			resp = HeartbeatResponse{Accepted: true, Status: "active", ServerTime: time.Now().UTC()}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(cfg.heartbeat)
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc(PathTokenRefresh, func(w http.ResponseWriter, r *http.Request) {
 		recorder.inc(PathTokenRefresh)
@@ -210,13 +229,16 @@ func TestRunner_FirstRun_EnrollsAndPersists(t *testing.T) {
 	if got := recorder.count(PathAutoEnroll); got != 1 {
 		t.Fatalf("AutoEnroll hits: got %d, want 1", got)
 	}
-	// ADR-0029 M2 tokenless: a successful enrollment must NOT fall through
-	// to the token-dependent lifecycle (refresh / heartbeat / commands).
+	// ADR-0029 M2 tokenless: a successful enrollment now sends exactly one
+	// cert-auth heartbeat and must still avoid token-refresh / commands.
 	if got := recorder.count(PathTokenRefresh); got != 0 {
 		t.Fatalf("RefreshToken must not be called in tokenless mode; got %d", got)
 	}
-	if got := recorder.count(PathHeartbeat); got != 0 {
-		t.Fatalf("Heartbeat must not be called in tokenless mode; got %d", got)
+	if got := recorder.count(PathHeartbeat); got != 1 {
+		t.Fatalf("Heartbeat hits: got %d, want 1", got)
+	}
+	if got := recorder.authHeaders(PathHeartbeat); len(got) != 1 || got[0] != "" {
+		t.Fatalf("tokenless heartbeat must not send Authorization header; got %#v", got)
 	}
 	if got := recorder.count(PathCommandsNext); got != 0 {
 		t.Fatalf("NextCommand must not be called in tokenless mode; got %d", got)

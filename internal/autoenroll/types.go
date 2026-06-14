@@ -214,18 +214,16 @@ type TokenRefreshResponse struct {
 	ServerTime     time.Time `json:"server_time,omitempty"`
 }
 
-// HeartbeatRequest mirrors the existing protocol.HeartbeatRequest shape and
-// omits agent-id-style fields (cert provides identity). NOTE: this is the
-// token-dependent lifecycle DTO (#151), NOT the /endpoint-enrollments/auto
-// body — its snake_case tags belong to a heartbeat endpoint the backend does
-// not yet expose on the mTLS surface; do not confuse it with the camelCase
-// AutoEnrollRequest contract.
+// HeartbeatRequest mirrors backend AgentHeartbeatRequest and omits
+// agent-id-style fields because the cert (or legacy HMAC credential) provides
+// identity. The backend Java record uses default Jackson camelCase, so these
+// tags intentionally match internal/protocol.HeartbeatRequest.
 type HeartbeatRequest struct {
 	Hostname     string    `json:"hostname"`
-	OSType       string    `json:"os_type"`
+	OSType       string    `json:"osType"`
 	Architecture string    `json:"architecture"`
-	AgentVersion string    `json:"agent_version"`
-	OSVersion    string    `json:"os_version,omitempty"`
+	AgentVersion string    `json:"agentVersion"`
+	OSVersion    string    `json:"osVersion,omitempty"`
 	State        string    `json:"state"`
 	Capabilities []string  `json:"capabilities"`
 	Timestamp    time.Time `json:"timestamp"`
@@ -234,15 +232,15 @@ type HeartbeatRequest struct {
 // HeartbeatResponse carries the optional CRL-outage grace window signal from
 // the backend (ADR-0029 R24 bounded formula). grace_until is the
 // backend-computed deadline; the agent does NOT recompute it (Codex Q4
-// absorb), it only enforces server_time > grace_until → fail-closed, plus
-// local NotAfter as defense-in-depth.
+// absorb), it only enforces serverTime > graceUntil → fail-closed, plus local
+// NotAfter as defense-in-depth.
 type HeartbeatResponse struct {
 	Accepted    bool       `json:"accepted"`
-	DeviceID    string     `json:"device_id,omitempty"`
+	DeviceID    string     `json:"deviceId,omitempty"`
 	Status      string     `json:"status"`
-	ServerTime  time.Time  `json:"server_time"`
-	GraceWindow bool       `json:"grace_window,omitempty"`
-	GraceUntil  *time.Time `json:"grace_until,omitempty"`
+	ServerTime  time.Time  `json:"serverTime"`
+	GraceWindow bool       `json:"graceWindow,omitempty"`
+	GraceUntil  *time.Time `json:"graceUntil,omitempty"`
 }
 
 // AgentCommand and CommandResult wire shapes are reused from the existing

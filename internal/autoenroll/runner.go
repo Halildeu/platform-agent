@@ -175,10 +175,10 @@ func NewRunner(cfg Config, cert CertProvider, reg RegistryReader, store ConfigSt
 }
 
 // RunOnce executes a single reconcile iteration and returns. In the canonical
-// ADR-0029 M2 tokenless model it completes after the enrollment reconcile (the
-// mTLS cert is the continuous credential; refresh/heartbeat/command are the
-// retained legacy / #151 path). First-run jitter is applied only when the
-// persisted store is empty.
+// ADR-0029 M2 tokenless model it completes after enrollment reconcile +
+// cert-auth heartbeat. Command polling remains token-dependent until the
+// backend exposes the matching cert-auth command surface. First-run jitter is
+// applied only when the persisted store is empty.
 func (r *Runner) RunOnce(ctx context.Context) error {
 	persisted, err := r.ConfigStore.Read(ctx)
 	if err != nil && !IsEmptyStore(err) {
@@ -214,12 +214,14 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	}
 
 	// ADR-0029 M2 canonical path: tokenless mTLS enrollment. The cert is the
-	// continuous credential and the backend exposes no token-refresh /
-	// heartbeat / command endpoints on this surface yet (#151). Once the
-	// enrollment record is persisted there is nothing further to do this
-	// cycle — do NOT fall through to the token-dependent lifecycle steps.
+	// continuous credential. Heartbeat now uses the cert-auth endpoint;
+	// command polling remains deferred until the backend exposes cert-auth
+	// commands.
 	if persisted.IsTokenlessEnrollment() {
-		r.logf("mTLS tokenless enrollment complete (status persisted); heartbeat/command lifecycle deferred to #151")
+		if err := r.heartbeatCert(ctx); err != nil {
+			return err
+		}
+		r.logf("mTLS tokenless heartbeat sent; command lifecycle still deferred to #151 follow-up")
 		return nil
 	}
 
@@ -297,12 +299,14 @@ func (r *Runner) iterate(ctx context.Context) error {
 	}
 
 	// ADR-0029 M2 canonical path: tokenless mTLS enrollment. The cert is the
-	// continuous credential and the backend exposes no token-refresh /
-	// heartbeat / command endpoints on this surface yet (#151). Once the
-	// enrollment record is persisted there is nothing further to do this
-	// cycle — do NOT fall through to the token-dependent lifecycle steps.
+	// continuous credential. Heartbeat now uses the cert-auth endpoint;
+	// command polling remains deferred until the backend exposes cert-auth
+	// commands.
 	if persisted.IsTokenlessEnrollment() {
-		r.logf("mTLS tokenless enrollment complete (status persisted); heartbeat/command lifecycle deferred to #151")
+		if err := r.heartbeatCert(ctx); err != nil {
+			return err
+		}
+		r.logf("mTLS tokenless heartbeat sent; command lifecycle still deferred to #151 follow-up")
 		return nil
 	}
 
@@ -554,10 +558,20 @@ func (r *Runner) maybeRefreshToken(ctx context.Context, persisted PersistedConfi
 // must respect that as terminal.
 func (r *Runner) heartbeat(ctx context.Context, persisted PersistedConfig) error {
 	// Fail closed rather than send an empty Bearer: tokenless enrollment has
-	// no heartbeat endpoint on the mTLS surface yet (#151).
+	// its own cert-auth heartbeat path and must not use the legacy bearer path.
 	if persisted.ServiceToken == "" {
 		return ErrTokenlessLifecycleUnsupported
 	}
+	return r.sendHeartbeat(ctx, persisted.ServiceToken)
+}
+
+// heartbeatCert sends a heartbeat on the tokenless mTLS surface. The presented
+// client cert is the only credential; no bearer token is attached.
+func (r *Runner) heartbeatCert(ctx context.Context) error {
+	return r.sendHeartbeat(ctx, "")
+}
+
+func (r *Runner) sendHeartbeat(ctx context.Context, token string) error {
 	snapshot := inventory.Collect(r.Config.AgentVersion, time.Now())
 	currentState := r.StateTracker.RecordSuccess()
 	caps := capabilityStrings(r.Executor.Capabilities)
@@ -570,7 +584,15 @@ func (r *Runner) heartbeat(ctx context.Context, persisted PersistedConfig) error
 		Capabilities: caps,
 		Timestamp:    time.Now(),
 	}
-	resp, err := r.wireClient.Heartbeat(ctx, persisted.ServiceToken, req)
+	var (
+		resp HeartbeatResponse
+		err  error
+	)
+	if token == "" {
+		resp, err = r.wireClient.HeartbeatCert(ctx, req)
+	} else {
+		resp, err = r.wireClient.Heartbeat(ctx, token, req)
+	}
 	if err != nil {
 		r.StateTracker.RecordFailure(time.Now())
 		return err

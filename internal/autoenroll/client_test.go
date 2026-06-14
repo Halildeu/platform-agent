@@ -245,6 +245,29 @@ func TestClient_Heartbeat_GraceWindowField(t *testing.T) {
 	}
 }
 
+func TestClient_HeartbeatCert_DoesNotSendAuthorization(t *testing.T) {
+	pki := setupTestPKI(t)
+	captured := &http.Request{}
+	routes := map[string]*route{
+		PathHeartbeat: {
+			method:   http.MethodPost,
+			body:     HeartbeatResponse{Accepted: true, Status: "active", ServerTime: time.Now().UTC()},
+			captured: captured,
+		},
+	}
+	srv := startMTLSServer(t, pki, mountRoutes(routes))
+	wire := newWireClient(t, pki, srv)
+
+	if _, err := wire.HeartbeatCert(context.Background(), HeartbeatRequest{
+		Hostname: "h", OSType: "WINDOWS", Architecture: "amd64", AgentVersion: "0.2.0", State: "STARTING",
+	}); err != nil {
+		t.Fatalf("HeartbeatCert: %v", err)
+	}
+	if got := captured.Header.Get("Authorization"); got != "" {
+		t.Fatalf("HeartbeatCert must not send Authorization header, got %q", got)
+	}
+}
+
 func TestClient_NextCommand_204_ReturnsErrNoCommand(t *testing.T) {
 	pki := setupTestPKI(t)
 	routes := map[string]*route{

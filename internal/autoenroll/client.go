@@ -98,6 +98,16 @@ func (c *Client) Heartbeat(ctx context.Context, token string, req HeartbeatReque
 	return resp, nil
 }
 
+// HeartbeatCert reports current state using the presented mTLS machine cert as
+// the only credential. No Authorization header is sent.
+func (c *Client) HeartbeatCert(ctx context.Context, req HeartbeatRequest) (HeartbeatResponse, error) {
+	var resp HeartbeatResponse
+	if err := c.do(ctx, http.MethodPost, PathHeartbeat, "", req, &resp); err != nil {
+		return HeartbeatResponse{}, err
+	}
+	return resp, nil
+}
+
 // NextCommand polls for the next queued command. ErrNoCommand wraps a
 // 204 No Content response.
 func (c *Client) NextCommand(ctx context.Context, token string) (protocol.AgentCommand, error) {
