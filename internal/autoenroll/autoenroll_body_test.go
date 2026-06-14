@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 // TestBuildAutoEnrollRequest_BackendContract is the #149 regression guard.
@@ -146,5 +147,37 @@ func TestAutoEnrollResponse_DecodeAndValidate(t *testing.T) {
 	r.Status = StatusAlreadyEnrolled
 	if err := r.Validate(localThumb); err != nil {
 		t.Fatalf("already-enrolled must be valid: %v", err)
+	}
+}
+
+func TestHeartbeatRequest_BackendContract(t *testing.T) {
+	req := HeartbeatRequest{
+		Hostname:     "ERP-MOBIL",
+		OSType:       "WINDOWS",
+		Architecture: "amd64",
+		AgentVersion: "0.2.0-test",
+		OSVersion:    "Windows Server 2022",
+		State:        "ONLINE",
+		Capabilities: []string{"COLLECT_INVENTORY"},
+		Timestamp:    time.Date(2026, 6, 14, 18, 0, 0, 0, time.UTC),
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal heartbeat: %v", err)
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal heartbeat: %v", err)
+	}
+
+	for _, k := range []string{"hostname", "osType", "architecture", "agentVersion", "osVersion", "state", "capabilities", "timestamp"} {
+		if _, ok := body[k]; !ok {
+			t.Errorf("heartbeat key %q missing from wire body %s", k, raw)
+		}
+	}
+	for _, k := range []string{"os_type", "agent_version", "os_version"} {
+		if _, ok := body[k]; ok {
+			t.Errorf("stale snake_case heartbeat key %q present in wire body %s", k, raw)
+		}
 	}
 }
