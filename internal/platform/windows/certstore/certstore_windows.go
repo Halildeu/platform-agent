@@ -121,13 +121,15 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 	}
 
 	var (
-		chosenLeaf *x509.Certificate
-		chosenCtx  *windows.CertContext
-		chosenKey  crypto.Signer
+		chosenLeaf            *x509.Certificate
+		chosenCtx             *windows.CertContext
+		chosenKey             crypto.Signer
+		cleanupRankedContexts = true
 	)
 	defer func() {
-		// Free every non-chosen context. The chosen context is freed by
-		// the outer defer once the material is returned.
+		if !cleanupRankedContexts {
+			return
+		}
 		for _, rc := range rankedContexts {
 			if rc.ctx != nil && rc.ctx != chosenCtx {
 				_ = windows.CertFreeCertificateContext(rc.ctx)
@@ -151,12 +153,15 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 		return autoenroll.CertMaterial{}, fmt.Errorf("%w: no eligible cert had an acquireable CNG signer",
 			autoenroll.ErrNoCertMatch)
 	}
-	// #147: do NOT free the chosen cert context here. The cngSigner's
-	// NCRYPT_KEY_HANDLE (from CryptAcquireCertificatePrivateKey on this very
-	// context) keeps an internal association to it on some providers; freeing
-	// the context underneath a live key handle access-violates. The context is
-	// held for the process lifetime (enroll runs once, then the result is
-	// persisted) — a single retained context, not a per-iteration leak.
+	// #151 live M2 dry-run on ERP-MOBIL proved that freeing ranked contexts
+	// immediately after a successful CryptAcquireCertificatePrivateKey can
+	// still access-violate on some providers. On success, cngSigner owns the
+	// selected context and will release it from Close(); the remaining ranked
+	// contexts are deliberately retained for the process lifetime. Auto-enroll
+	// loads certs only on startup/rotation, so this favors mTLS correctness over
+	// a tiny bounded context leak. The error path still frees ranked contexts so
+	// misconfigured retry loops do not grow unbounded.
+	cleanupRankedContexts = false
 	_ = chosenCtx
 
 	tlsCert := tls.Certificate{
