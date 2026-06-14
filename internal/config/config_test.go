@@ -42,13 +42,13 @@ func TestLoadFromEnvSigningPathPrefix(t *testing.T) {
 }
 
 func TestLoadFromEnv_AutoEnrollOverrides(t *testing.T) {
-	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_API_URL", "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent/")
+	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_API_URL", "https://mtls.testai.acik.com/api/v1/endpoint-agent/")
 	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_CONFIG_PATH", `C:\ProgramData\EndpointAgent\config\auto-enroll.dpapi`)
 	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX", ".acik.local")
 	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX", "adcomputer:")
 
 	cfg := LoadFromEnv()
-	if cfg.AutoEnrollAPIURL != "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent" {
+	if cfg.AutoEnrollAPIURL != "https://mtls.testai.acik.com/api/v1/endpoint-agent" {
 		t.Fatalf("AutoEnrollAPIURL = %q (trailing slash should be trimmed)", cfg.AutoEnrollAPIURL)
 	}
 	if cfg.AutoEnrollConfigPath != `C:\ProgramData\EndpointAgent\config\auto-enroll.dpapi` {

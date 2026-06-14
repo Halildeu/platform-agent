@@ -42,7 +42,7 @@ func main() {
 	version := flag.Bool("version", false, "print agent version and exit")
 	serviceRunName := flag.String("service-run-name", winservice.DefaultName, "internal Windows service name")
 	autoEnrollFlag := flag.Bool("auto-enroll", false, "run in mTLS auto-enroll mode (ADR-0029 Faz 22.3 Katman 3); requires Windows")
-	autoEnrollAPIURL := flag.String("api-url", "", "auto-enroll API base URL override (full canonical path, e.g. https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-admin)")
+	autoEnrollAPIURL := flag.String("api-url", "", "auto-enroll API base URL override (full canonical path, e.g. https://mtls.testai.acik.com/api/v1/endpoint-agent)")
 	dryRun := flag.Bool("dry-run", false, "auto-enroll only: load cert + build TLS config + validate persisted config without making HTTP calls")
 	// AG-026B: operator escape hatch for the HMAC enrollment token.
 	// The PRODUCTION install path (install.ps1, AG-026C) writes the

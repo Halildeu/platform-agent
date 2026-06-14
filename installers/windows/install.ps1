@@ -36,7 +36,7 @@ param(
     [string]$MaintenanceTokenHash = "",
     [string]$ServiceSddl = "D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;AU)",
     [switch]$AutoEnroll,
-    [string]$AutoEnrollApiUrl = "https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent",
+    [string]$AutoEnrollApiUrl = "https://mtls.testai.acik.com/api/v1/endpoint-agent",
     [string]$AutoEnrollCertSubjectSuffix = "",
     [string]$AutoEnrollCertSANURIPrefix = "adcomputer:",
     [int]$AutoEnrollJitterSeconds = 0,

@@ -20,7 +20,7 @@ import (
 var ErrNoCommand = errors.New("no command available")
 
 // Auto-enroll wire endpoints. Suffix-only; the base URL is the full
-// canonical API base (e.g. https://endpoint-agent-mtls.testai.acik.com/api/v1/endpoint-agent)
+// canonical API base (e.g. https://mtls.testai.acik.com/api/v1/endpoint-agent)
 // — Codex F4 absorb: endpoint constants, not registry/env override.
 const (
 	PathAutoEnroll    = "/endpoint-enrollments/auto"
