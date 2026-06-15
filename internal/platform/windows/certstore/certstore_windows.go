@@ -153,14 +153,15 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 		return autoenroll.CertMaterial{}, fmt.Errorf("%w: no eligible cert had an acquireable CNG signer",
 			autoenroll.ErrNoCertMatch)
 	}
-	// #151 live M2 dry-run on ERP-MOBIL proved that freeing ranked contexts
-	// immediately after a successful CryptAcquireCertificatePrivateKey can
-	// still access-violate on some providers. On success, cngSigner owns the
-	// selected context and will release it from Close(); the remaining ranked
-	// contexts are deliberately retained for the process lifetime. Auto-enroll
-	// loads certs only on startup/rotation, so this favors mTLS correctness over
-	// a tiny bounded context leak. The error path still frees ranked contexts so
-	// misconfigured retry loops do not grow unbounded.
+	// #151/#165 live M2 dry-runs on ERP-MOBIL proved that freeing cert
+	// contexts after successful CryptAcquireCertificatePrivateKey can
+	// access-violate on some providers, including at dry-run process cleanup.
+	// On success, cngSigner owns the selected NCrypt handle and retains the
+	// selected context for process lifetime; the remaining ranked contexts are
+	// also deliberately retained. Auto-enroll loads certs only on
+	// startup/rotation, so this favors mTLS correctness over a tiny bounded
+	// context leak. The error path still frees ranked contexts so misconfigured
+	// retry loops do not grow unbounded.
 	cleanupRankedContexts = false
 	_ = chosenCtx
 

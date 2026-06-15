@@ -5,6 +5,8 @@ package certstore
 import (
 	"crypto"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestBcryptHashAlgID(t *testing.T) {
@@ -38,4 +40,20 @@ func TestAcquireFlagsPreferNCryptNoCache(t *testing.T) {
 	if eff&cacheFlag != 0 || eff&onlyNCryptFlag != 0 {
 		t.Errorf("effective acquire flags 0x%x must not include CACHE(0x1) or ONLY_NCRYPT(0x40000)", eff)
 	}
+}
+
+func TestCngSignerCloseDoesNotFreeCertContext(t *testing.T) {
+	// Regression for #165: dry-run cleanup crashed inside
+	// CertFreeCertificateContext. Close must not invoke that API; the
+	// duplicated context is intentionally retained for process lifetime.
+	s := &cngSigner{
+		ctx: &windows.CertContext{},
+	}
+
+	s.Close()
+	if s.ctx != nil {
+		t.Fatal("Close should clear the retained context pointer after deciding not to free it")
+	}
+
+	s.Close()
 }
