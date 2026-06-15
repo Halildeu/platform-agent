@@ -76,18 +76,19 @@ func TestEnvelopeWireShapeFrozen(t *testing.T) {
 		"heartbeat":            18,
 		"data_frame":           19,
 		"error":                20,
+		"operation_dispatch":   21,
 	})
 	payload := md.Oneofs().ByName("payload")
 	if payload == nil {
 		t.Fatal("oneof payload missing")
 	}
-	if got, want := payload.Fields().Len(), 11; got != want {
+	if got, want := payload.Fields().Len(), 12; got != want {
 		t.Fatalf("oneof payload has %d members, want %d", got, want)
 	}
 	for i := 0; i < payload.Fields().Len(); i++ {
 		fd := payload.Fields().Get(i)
-		if fd.Number() < 10 || fd.Number() > 20 {
-			t.Errorf("oneof member %s outside the frozen 10-20 range: %d", fd.Name(), fd.Number())
+		if fd.Number() < 10 || fd.Number() > 21 {
+			t.Errorf("oneof member %s outside the frozen 10-21 range: %d", fd.Name(), fd.Number())
 		}
 	}
 }
