@@ -175,9 +175,8 @@ func NewRunner(cfg Config, cert CertProvider, reg RegistryReader, store ConfigSt
 }
 
 // RunOnce executes a single reconcile iteration and returns. In the canonical
-// ADR-0029 M2 tokenless model it completes after enrollment reconcile +
-// cert-auth heartbeat. Command polling remains token-dependent until the
-// backend exposes the matching cert-auth command surface. First-run jitter is
+// ADR-0029 M2 tokenless model it performs enrollment reconcile, cert-auth
+// heartbeat, then one cert-auth command poll/result cycle. First-run jitter is
 // applied only when the persisted store is empty.
 func (r *Runner) RunOnce(ctx context.Context) error {
 	persisted, err := r.ConfigStore.Read(ctx)
@@ -214,15 +213,13 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	}
 
 	// ADR-0029 M2 canonical path: tokenless mTLS enrollment. The cert is the
-	// continuous credential. Heartbeat now uses the cert-auth endpoint;
-	// command polling remains deferred until the backend exposes cert-auth
-	// commands.
+	// continuous credential for heartbeat and command lifecycle; no bearer
+	// token is required or sent.
 	if persisted.IsTokenlessEnrollment() {
 		if err := r.heartbeatCert(ctx); err != nil {
 			return err
 		}
-		r.logf("mTLS tokenless heartbeat sent; command lifecycle still deferred to #151 follow-up")
-		return nil
+		return r.pollAndExecuteCert(ctx)
 	}
 
 	// Legacy token-backed lifecycle (retained, currently unreachable in the
@@ -299,15 +296,13 @@ func (r *Runner) iterate(ctx context.Context) error {
 	}
 
 	// ADR-0029 M2 canonical path: tokenless mTLS enrollment. The cert is the
-	// continuous credential. Heartbeat now uses the cert-auth endpoint;
-	// command polling remains deferred until the backend exposes cert-auth
-	// commands.
+	// continuous credential for heartbeat and command lifecycle; no bearer
+	// token is required or sent.
 	if persisted.IsTokenlessEnrollment() {
 		if err := r.heartbeatCert(ctx); err != nil {
 			return err
 		}
-		r.logf("mTLS tokenless heartbeat sent; command lifecycle still deferred to #151 follow-up")
-		return nil
+		return r.pollAndExecuteCert(ctx)
 	}
 
 	// Legacy token-backed lifecycle (retained, currently unreachable in the
@@ -624,12 +619,30 @@ func (r *Runner) sendHeartbeat(ctx context.Context, token string) error {
 // pollAndExecute fetches one queued command (if any) and runs it.
 func (r *Runner) pollAndExecute(ctx context.Context, persisted PersistedConfig) error {
 	// Fail closed rather than poll with an empty Bearer: tokenless enrollment
-	// has no command endpoint on the mTLS surface yet (#151).
+	// has its own cert-auth command path and must not use the legacy bearer path.
 	if persisted.ServiceToken == "" {
 		return ErrTokenlessLifecycleUnsupported
 	}
+	return r.pollAndExecuteInternal(ctx, persisted.ServiceToken)
+}
+
+// pollAndExecuteCert fetches one queued command (if any) over the tokenless
+// mTLS surface and reports the result using the same presented machine cert.
+func (r *Runner) pollAndExecuteCert(ctx context.Context) error {
+	return r.pollAndExecuteInternal(ctx, "")
+}
+
+func (r *Runner) pollAndExecuteInternal(ctx context.Context, token string) error {
 	pollStart := time.Now()
-	command, err := r.wireClient.NextCommand(ctx, persisted.ServiceToken)
+	var (
+		command protocol.AgentCommand
+		err     error
+	)
+	if token == "" {
+		command, err = r.wireClient.NextCommandCert(ctx)
+	} else {
+		command, err = r.wireClient.NextCommand(ctx, token)
+	}
 	// AG-038: record the NextCommand round-trip so a subsequent
 	// COLLECT_INVENTORY diagnostics probe reports the REAL last-poll latency.
 	// Measured even on ErrNoCommand (204) — an empty poll is still a
@@ -671,7 +684,12 @@ func (r *Runner) pollAndExecute(ctx context.Context, persisted PersistedConfig) 
 	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	result := r.Executor.Execute(commandCtx, command)
-	if err := r.wireClient.SubmitResult(ctx, persisted.ServiceToken, result); err != nil {
+	if token == "" {
+		err = r.wireClient.SubmitResultCert(ctx, result)
+	} else {
+		err = r.wireClient.SubmitResult(ctx, token, result)
+	}
+	if err != nil {
 		r.StateTracker.RecordFailure(time.Now())
 		return err
 	}
