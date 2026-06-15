@@ -35,13 +35,13 @@ const (
 )
 
 var (
-	crypt32Mod   = windows.NewLazySystemDLL("crypt32.dll")
-	advapi32Mod  = windows.NewLazySystemDLL("advapi32.dll")
-	ncryptMod    = windows.NewLazySystemDLL("ncrypt.dll")
-	procAcquire  = crypt32Mod.NewProc("CryptAcquireCertificatePrivateKey")
-	procSign     = ncryptMod.NewProc("NCryptSignHash")
-	procFreeObj  = ncryptMod.NewProc("NCryptFreeObject")
-	procRelCtx   = advapi32Mod.NewProc("CryptReleaseContext")
+	crypt32Mod  = windows.NewLazySystemDLL("crypt32.dll")
+	advapi32Mod = windows.NewLazySystemDLL("advapi32.dll")
+	ncryptMod   = windows.NewLazySystemDLL("ncrypt.dll")
+	procAcquire = crypt32Mod.NewProc("CryptAcquireCertificatePrivateKey")
+	procSign    = ncryptMod.NewProc("NCryptSignHash")
+	procFreeObj = ncryptMod.NewProc("NCryptFreeObject")
+	procRelCtx  = advapi32Mod.NewProc("CryptReleaseContext")
 )
 
 type bcryptPKCS1PaddingInfo struct{ AlgID *uint16 }
@@ -54,31 +54,32 @@ type bcryptPSSPaddingInfo struct {
 // cngSigner is a crypto.Signer over an NCRYPT_KEY_HANDLE acquired via
 // CryptAcquireCertificatePrivateKey. It satisfies tls.Certificate.PrivateKey.
 //
-// It OWNS the cert context (#147): the NCRYPT key handle keeps an internal
-// association to the context on some providers, so the context must outlive the
-// key handle. LoadEligibleCert hands ownership here instead of freeing the
-// chosen context itself, and the runner closes the signer when the material is
-// superseded (see closeCertMaterialSigner) to avoid a per-iteration handle leak.
+// It keeps the cert context alive (#147): the NCRYPT key handle keeps an
+// internal association to the context on some providers, so the context must
+// outlive the key handle. ERP-MOBIL M2 dry-run evidence (#165) showed that
+// calling CertFreeCertificateContext during process cleanup can still
+// access-violate on valid machine certs. The signer therefore frees the NCrypt
+// handle when allowed, but deliberately retains the duplicated cert context for
+// process lifetime. Cert loads happen on startup/rotation, making this a tiny
+// bounded leak rather than a crash-prone cleanup path.
 type cngSigner struct {
-	handle    uintptr
+	handle     uintptr
 	callerFree bool // pfCallerFreeProvOrNCryptKey — only then may we free
-	ctx       *windows.CertContext
-	pub       crypto.PublicKey
+	ctx        *windows.CertContext
+	pub        crypto.PublicKey
 }
 
 func (s *cngSigner) Public() crypto.PublicKey { return s.pub }
 
-// Close frees the NCRYPT key handle (only when the acquire reported
-// caller-free) and the owned cert context. Idempotent.
+// Close frees the NCRYPT key handle only when the acquire reported caller-free.
+// It intentionally does not call CertFreeCertificateContext; see cngSigner.
+// Idempotent.
 func (s *cngSigner) Close() {
 	if s.handle != 0 && s.callerFree {
 		_, _, _ = procFreeObj.Call(s.handle) // NCRYPT key spec only (legacy rejected at acquire)
 	}
 	s.handle = 0
-	if s.ctx != nil {
-		_ = windows.CertFreeCertificateContext(s.ctx)
-		s.ctx = nil
-	}
+	s.ctx = nil
 }
 
 func (s *cngSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
@@ -182,6 +183,7 @@ func acquireSigner(ctx *windows.CertContext, pub crypto.PublicKey) (crypto.Signe
 		return nil, errors.New("acquired key is a legacy CSP key, not CNG/NCrypt")
 	}
 	// The signer takes ownership of the NCrypt key handle (freed only when
-	// callerFree) and the cert context. See cngSigner doc.
+	// callerFree) and retains the cert context for process lifetime. See
+	// cngSigner doc.
 	return &cngSigner{handle: kh, callerFree: callerFree != 0, ctx: ctx, pub: pub}, nil
 }
