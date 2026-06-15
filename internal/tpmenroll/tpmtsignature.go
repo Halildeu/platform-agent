@@ -26,10 +26,12 @@ func MarshalRSASSASignature(hashAlg int, sig []byte) []byte {
 }
 
 // SignAttestRSASSA produces the AK's TPMT_SIGNATURE over a TPMS_ATTEST: PKCS#1
-// v1.5 over H_nameAlg(attest) — the exact scheme the backend verifies (it feeds
+// v1.5 over H_hashAlg(attest) — the exact scheme the backend verifies (it feeds
 // the raw attest to a "<hash>withRSA" JCA Signature, which hashes internally).
-func SignAttestRSASSA(akPriv *rsa.PrivateKey, nameAlg int, attest []byte) ([]byte, error) {
-	ch, err := cryptoHash(nameAlg)
+// hashAlg is the signature scheme's hash (the AK's scheme hash, e.g. AlgSHA256);
+// it is threaded into both the digest and the written TPMT_SIGNATURE.hashAlg.
+func SignAttestRSASSA(akPriv *rsa.PrivateKey, hashAlg int, attest []byte) ([]byte, error) {
+	ch, err := cryptoHash(hashAlg)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +41,7 @@ func SignAttestRSASSA(akPriv *rsa.PrivateKey, nameAlg int, attest []byte) ([]byt
 	if err != nil {
 		return nil, fmt.Errorf("tpmenroll: AK sign: %w", err)
 	}
-	return MarshalRSASSASignature(nameAlg, sig), nil
+	return MarshalRSASSASignature(hashAlg, sig), nil
 }
 
 // VerifyAttestSignature verifies a TPMT_SIGNATURE over a TPMS_ATTEST against the
