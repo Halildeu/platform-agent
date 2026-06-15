@@ -96,6 +96,12 @@ type Config struct {
 	// Dialer overrides the gRPC connection factory (bufconn test seam). When
 	// set, BrokerAddr is not required.
 	Dialer func(ctx context.Context) (*grpc.ClientConn, error)
+	// PTYDispatcher, when non-nil, ENABLES CONSTRAINED_PTY operation handling:
+	// an inbound operation_dispatch is decoded + executed + its output streamed
+	// on a fresh per-operation DATA stream. nil (the default) keeps the harness
+	// idle — an inbound operation_dispatch is a protocol defect (disabled-by-
+	// default; LIVE activation is owner-gated, ADR-0034 §13/D10).
+	PTYDispatcher PTYDispatcher
 }
 
 func (c Config) withDefaults() Config {
@@ -288,6 +294,20 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 				}
 			case actionTransportKill:
 				return healthy, errTransportKilled
+			case actionDispatch:
+				// A broker-authorized CONSTRAINED_PTY operation. Decode SYNCHRONOUSLY (a malformed broker
+				// frame is a protocol defect → close the stream), then execute + stream the output OFF the
+				// recv loop so a long-running command never blocks heartbeats or a KILL.
+				permit, commandLine, derr := decodeDispatch(r.env.GetOperationDispatch())
+				if derr != nil {
+					h.mu.Lock()
+					h.defects++
+					h.mu.Unlock()
+					_ = sender.sendError(derr.Error(), false)
+					_ = stream.CloseSend()
+					return healthy, fmt.Errorf("protocol defect: %s", derr.Error())
+				}
+				go h.dispatchOperation(sctx, conn, permit, commandLine, sender)
 			case actionDefectClose:
 				h.mu.Lock()
 				h.defects++
@@ -323,6 +343,10 @@ const (
 	actionHeartbeat
 	actionTransportKill
 	actionDefectClose
+	// actionDispatch: a broker-authorized CONSTRAINED_PTY operation_dispatch arrived and a PTY dispatcher is
+	// wired — connectOnce decodes it and runs it off the recv loop. Without a dispatcher this never occurs
+	// (handleInbound defect-closes operation_dispatch — disabled-by-default).
+	actionDispatch
 )
 
 // inboundSeqGuard tracks the broker-push sequencing mode of one stream. The
@@ -397,6 +421,14 @@ func (h *Harness) handleInbound(env *pb.Envelope, seqGuard *inboundSeqGuard) (in
 		h.logger.Printf("remote-bridge: broker error frame code=%q retryable=%v",
 			env.GetError().GetCode(), env.GetError().GetRetryable())
 		return actionContinue, ""
+	case env.GetOperationDispatch() != nil:
+		// A CONSTRAINED_PTY operation push (T-4). DISABLED-BY-DEFAULT: with no PTY dispatcher wired the agent
+		// has no execution machinery, so — like any other broker payload in idle mode — it is a protocol
+		// defect. When a dispatcher IS configured, connectOnce decodes + executes it off the recv loop.
+		if h.cfg.PTYDispatcher == nil {
+			return actionDefectClose, "unsupported-payload-in-idle"
+		}
+		return actionDispatch, ""
 	default:
 		return actionDefectClose, "unsupported-payload-in-idle"
 	}
