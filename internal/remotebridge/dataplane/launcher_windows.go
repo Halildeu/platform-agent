@@ -9,6 +9,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"platform-agent/internal/remotebridge/cmdline"
 )
 
 // tokenLaunchAccess is the least-privilege token-access set for duplicating the
@@ -107,7 +109,7 @@ func LaunchInActiveSession(exePath string, args ...string) (*LaunchedHelper, err
 	if err != nil {
 		return nil, fmt.Errorf("dataplane: exe path: %w", err)
 	}
-	cmdPtr, err := windows.UTF16PtrFromString(buildCommandLine(exePath, args))
+	cmdPtr, err := windows.UTF16PtrFromString(cmdline.BuildCommandLine(exePath, args))
 	if err != nil {
 		return nil, fmt.Errorf("dataplane: command line: %w", err)
 	}
