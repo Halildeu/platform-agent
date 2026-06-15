@@ -40,6 +40,8 @@ param(
     [string]$AutoEnrollCertSubjectSuffix = "",
     [string]$AutoEnrollCertSANURIPrefix = "adcomputer:",
     [int]$AutoEnrollJitterSeconds = 0,
+    [ValidateRange(1, 600)]
+    [int]$ServiceStartTimeoutSeconds = 30,
     [switch]$Start,
     [switch]$Force,
     [switch]$ResetCredentialStore,
@@ -593,6 +595,45 @@ function Wait-ForCredentialConfirmed {
     return $false
 }
 
+function Wait-ForServiceRunning {
+    param(
+        [string]$Name,
+        [int]$TimeoutSeconds = 30
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if ($null -ne $service -and $service.Status -eq "Running") {
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Get-AgentLogTailForError {
+    param(
+        [string]$LogPath,
+        [int]$LineCount = 40
+    )
+    if (-not (Test-Path -LiteralPath $LogPath)) {
+        return "agent log not found: $LogPath"
+    }
+    try {
+        $lines = Get-Content -LiteralPath $LogPath -Tail $LineCount -ErrorAction Stop
+        $joined = ($lines -join " | ")
+        if ([string]::IsNullOrWhiteSpace($joined)) {
+            return "agent log exists but has no recent lines: $LogPath"
+        }
+        if ($joined.Length -gt 4096) {
+            return $joined.Substring($joined.Length - 4096)
+        }
+        return $joined
+    } catch {
+        return "agent log tail read failed: $($_.Exception.Message)"
+    }
+}
+
 function Remove-ServiceBestEffort {
     param(
         [string]$Name,
@@ -1080,6 +1121,10 @@ try {
     if ($Start) {
         Write-Step "starting service: $ServiceName"
         Invoke-AgentServiceCommand -ExePath $targetBinary -Arguments @("service", "start", "--name", $ServiceName)
+        if (-not (Wait-ForServiceRunning -Name $ServiceName -TimeoutSeconds $ServiceStartTimeoutSeconds)) {
+            $recentLog = Get-AgentLogTailForError -LogPath $agentLog -LineCount 40
+            throw "Service '$ServiceName' did not reach Running within ${ServiceStartTimeoutSeconds}s after start. Recent agent log: $recentLog"
+        }
     }
 
     Write-Step "status"

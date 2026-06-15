@@ -108,6 +108,88 @@ func TestRunnerRunOnceFullLifecycle(t *testing.T) {
 	}
 }
 
+func TestRunnerSubmitsFailedFallbackWhenResultRejected(t *testing.T) {
+	const deviceSecret = "device-hmac-secret"
+	var resultAttempts []protocol.CommandResultWire
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/endpoint-agent/enrollments/consume":
+			writeJSON(t, w, protocol.EnrollResponse{
+				DeviceID:        "device-1",
+				CredentialKeyID: "cred-1",
+				Secret:          deviceSecret,
+				HmacAlgorithm:   "hmac-sha256",
+				ServerTime:      time.Now().UTC(),
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/endpoint-agent/heartbeat":
+			requireValidSignature(t, r, deviceSecret)
+			writeJSON(t, w, protocol.HeartbeatResponse{
+				Accepted: true, DeviceID: "device-1", Status: "ACTIVE", ServerTime: time.Now().UTC(),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/endpoint-agent/commands/next":
+			requireValidSignature(t, r, deviceSecret)
+			writeJSON(t, w, protocol.AgentCommand{
+				CommandID:      "22222222-2222-2222-2222-222222222222",
+				ClaimID:        "claim-2",
+				AttemptNumber:  2,
+				Type:           protocol.CommandCollectInventory,
+				ClaimExpiresAt: time.Now().Add(time.Minute),
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/endpoint-agent/commands/22222222-2222-2222-2222-222222222222/result":
+			requireValidSignature(t, r, deviceSecret)
+			var wire protocol.CommandResultWire
+			if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
+				t.Fatalf("decode result: %v", err)
+			}
+			resultAttempts = append(resultAttempts, wire)
+			if len(resultAttempts) == 1 {
+				http.Error(w, `{"error":"details rejected"}`, http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := protocol.NewClient(server.URL+"/api/v1/endpoint-agent", "", server.Client())
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	runner := NewRunner(config.Config{
+		APIURL:              server.URL + "/api/v1/endpoint-agent",
+		EnrollmentToken:     "enroll-token",
+		AgentVersion:        "test",
+		CommandTimeout:      5 * time.Second,
+		CommandPollInterval: time.Second,
+	}, client, log.New(io.Discard, "", 0))
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(resultAttempts) != 2 {
+		t.Fatalf("result attempts = %d, want 2", len(resultAttempts))
+	}
+	if resultAttempts[0].Status != "SUCCEEDED" {
+		t.Fatalf("first result status = %q, want SUCCEEDED", resultAttempts[0].Status)
+	}
+	fallback := resultAttempts[1]
+	if fallback.Status != "FAILED" {
+		t.Fatalf("fallback status = %q, want FAILED", fallback.Status)
+	}
+	if fallback.ErrorCode != "RESULT_SUBMIT_REJECTED" {
+		t.Fatalf("fallback errorCode = %q", fallback.ErrorCode)
+	}
+	if fallback.ClaimID != "claim-2" || fallback.AttemptNumber != 2 {
+		t.Fatalf("fallback claim/attempt = %q/%d, want claim-2/2", fallback.ClaimID, fallback.AttemptNumber)
+	}
+	if fallback.Details != nil {
+		t.Fatalf("fallback must omit original details, got %#v", fallback.Details)
+	}
+}
+
 func writeJSON(t *testing.T, w http.ResponseWriter, value interface{}) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")

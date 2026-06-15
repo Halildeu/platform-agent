@@ -45,6 +45,26 @@ func TestToWireExpiredCarriesErrorContext(t *testing.T) {
 	}
 }
 
+func TestToWirePreservesExplicitErrorContext(t *testing.T) {
+	wire := CommandResult{
+		Status:       CommandStatusFailed,
+		ClaimID:      "claim-1",
+		Summary:      "fallback submitted",
+		ErrorCode:    "RESULT_SUBMIT_REJECTED",
+		ErrorMessage: "POST /commands/result returned 400",
+	}.ToWire()
+
+	if wire.Status != "FAILED" {
+		t.Fatalf("status = %q, want FAILED", wire.Status)
+	}
+	if wire.ErrorCode != "RESULT_SUBMIT_REJECTED" {
+		t.Fatalf("errorCode = %q", wire.ErrorCode)
+	}
+	if wire.ErrorMessage != "POST /commands/result returned 400" {
+		t.Fatalf("errorMessage = %q", wire.ErrorMessage)
+	}
+}
+
 func TestToWirePassesThroughClaimAndTimestamps(t *testing.T) {
 	started := time.Date(2026, 5, 22, 13, 0, 0, 0, time.UTC)
 	finished := started.Add(2 * time.Second)

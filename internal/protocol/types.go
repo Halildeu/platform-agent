@@ -166,6 +166,8 @@ type CommandResult struct {
 	Status        CommandStatus          `json:"status"`
 	Summary       string                 `json:"summary"`
 	Details       map[string]interface{} `json:"details,omitempty"`
+	ErrorCode     string                 `json:"errorCode,omitempty"`
+	ErrorMessage  string                 `json:"errorMessage,omitempty"`
 	StartedAt     time.Time              `json:"startedAt"`
 	FinishedAt    time.Time              `json:"finishedAt"`
 }
@@ -212,6 +214,12 @@ func (r CommandResult) ToWire() CommandResultWire {
 		wire.ErrorMessage = "command claim expired before the result was reported"
 	default: // FAILED, plus any non-terminal status, defensively
 		wire.Status = "FAILED"
+	}
+	if r.ErrorCode != "" {
+		wire.ErrorCode = r.ErrorCode
+	}
+	if r.ErrorMessage != "" {
+		wire.ErrorMessage = r.ErrorMessage
 	}
 	return wire
 }

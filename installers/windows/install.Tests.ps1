@@ -51,6 +51,8 @@ function Import-InstallHelper {
 }
 
 Import-InstallHelper -Name "Wait-ForCredentialConfirmed"
+Import-InstallHelper -Name "Wait-ForServiceRunning"
+Import-InstallHelper -Name "Get-AgentLogTailForError"
 
 Describe "Wait-ForCredentialConfirmed" {
     BeforeAll {
@@ -109,6 +111,48 @@ Describe "Wait-ForCredentialConfirmed" {
         Add-Content -LiteralPath $script:tempLog -Value "endpoint-agent 2026/05/29 10:00:00 agent enrolled: device=new credential=new" -Encoding UTF8
         Add-Content -LiteralPath $script:tempLog -Value "endpoint-agent 2026/05/29 10:00:00 hmac credential confirmed device=new credential=new" -Encoding UTF8
         Wait-ForCredentialConfirmed -LogPath $script:tempLog -TimeoutSeconds 2 -BaselineLength $baseline | Should Be $true
+    }
+}
+
+Describe "Wait-ForServiceRunning" {
+    It "returns true when the service is running" {
+        Mock Get-Service { [pscustomobject]@{ Status = "Running" } }
+        Mock Start-Sleep {}
+
+        Wait-ForServiceRunning -Name "EndpointAgent" -TimeoutSeconds 1 | Should Be $true
+    }
+
+    It "returns false when the timeout expires before Running" {
+        Mock Get-Service { [pscustomobject]@{ Status = "Stopped" } }
+        Mock Start-Sleep {}
+
+        Wait-ForServiceRunning -Name "EndpointAgent" -TimeoutSeconds 1 | Should Be $false
+    }
+}
+
+Describe "Get-AgentLogTailForError" {
+    BeforeEach {
+        $script:tailLog = Join-Path $env:TEMP "endpoint-agent-tail-$([guid]::NewGuid()).log"
+    }
+    AfterEach {
+        if (Test-Path -LiteralPath $script:tailLog) {
+            Remove-Item -LiteralPath $script:tailLog -Force
+        }
+    }
+
+    It "returns a bounded recent log tail" {
+        1..50 | ForEach-Object { "line-$_" } | Set-Content -LiteralPath $script:tailLog -Encoding UTF8
+
+        $tail = Get-AgentLogTailForError -LogPath $script:tailLog -LineCount 3
+
+        $tail | Should Match "line-48"
+        $tail | Should Match "line-50"
+        $tail | Should Not Match "line-1"
+    }
+
+    It "returns a clear message when the log is missing" {
+        Get-AgentLogTailForError -LogPath $script:tailLog -LineCount 3 |
+            Should Match "agent log not found"
     }
 }
 
