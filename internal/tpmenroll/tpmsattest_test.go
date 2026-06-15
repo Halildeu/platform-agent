@@ -149,6 +149,28 @@ func TestVerifyAttest_FailsClosed(t *testing.T) {
 	}
 }
 
+// Proves SignAttestRSASSA threads nameAlg into BOTH the digest and the
+// TPMT_SIGNATURE hashAlg field (NOT hardcoded SHA-256): a SHA-384 signature
+// declares hashAlg=0x000c and verifies — which can only hold if the signed
+// digest is SHA-384 too (VerifyAttestSignature derives the hash from the field).
+func TestSignAttest_HashAlgThreaded_SHA384(t *testing.T) {
+	ak, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attest := MarshalCertifyAttest([]byte("ak"), []byte("x"), make([]byte, 48))
+	sig, err := SignAttestRSASSA(ak, AlgSHA384, attest)
+	if err != nil {
+		t.Fatalf("sign sha384: %v", err)
+	}
+	if sig[2] != 0x00 || sig[3] != 0x0c { // TPMT_SIGNATURE hashAlg == SHA384
+		t.Fatalf("hashAlg field = %02x%02x, want 000c", sig[2], sig[3])
+	}
+	if err := VerifyAttestSignature(&ak.PublicKey, attest, sig); err != nil {
+		t.Fatalf("SHA-384 sign/verify must agree (proves nameAlg threaded): %v", err)
+	}
+}
+
 func TestParseAttest_Rejects(t *testing.T) {
 	if _, err := ParseAttest([]byte{0x00, 0x00, 0x00, 0x00}); err == nil {
 		t.Error("bad magic must be rejected")
