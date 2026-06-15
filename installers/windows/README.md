@@ -34,12 +34,12 @@ dist/windows/EndpointAgent/SHA256SUMS
 
 ### Artifact host + versiyon (Faz 22.5 M1)
 
-Tek-komut bootstrap artifact'leri `https://testai.acik.com/artifacts/endpoint-agent/<VERSION>/`
+Tek-komut bootstrap artifact'leri `https://testai.acik.com/artifacts/endpoint-agent/current/`
 altinda statik servis edilir (GitOps: platform-k8s-gitops `artifact-host` nginx +
-`ghcr.io/halildeu/platform-agent-artifacts` image). `<VERSION>` = release tag
-(orn. `v0.1.1-lab.2`). `-ExpectedZipSha256` degerini ya
-`.../EndpointAgent.zip.sha256` ya da release-asset `SHA256SUMS` icindeki
-`EndpointAgent.zip` satirindan alin (komut satirina yazmadan once dogrulayin).
+`ghcr.io/halildeu/platform-agent-artifacts` image). `current` alias'i o an pinli
+release'i gosterir; immutable release yolu da
+`https://testai.acik.com/artifacts/endpoint-agent/<VERSION>/` seklindedir.
+`-ExpectedZipSha256` degerini `.../EndpointAgent.zip.sha256` dosyasindan alin.
 
 **Retention**: artifact host AYNI ANDA yalnizca pinli (current) release surumunu
 servis eder; image yeni surume rollover edince eski `/artifacts/<old-tag>/` URL'leri
@@ -50,11 +50,12 @@ zaman current pinli surumu kullanir.
 Pilot ZIP artifact kurulumu — domain/mTLS auto-enroll:
 
 ```powershell
-$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/v0.1.1-lab.2/EndpointAgent.zip"
-$ExpectedZipSha256 = "<zip-sha256>"
+$ArtifactBase = "https://testai.acik.com/artifacts/endpoint-agent/current"
+$PackageUrl = "$ArtifactBase/EndpointAgent.zip"
+$ExpectedZipSha256 = ((iwr -UseBasicParsing "$ArtifactBase/EndpointAgent.zip.sha256").Content -split "\s+")[0]
 
 iwr -UseBasicParsing `
-  "https://testai.acik.com/artifacts/endpoint-agent/v0.1.1-lab.2/bootstrap-package.ps1" `
+  "$ArtifactBase/bootstrap-package.ps1" `
   -OutFile "$env:TEMP\endpoint-agent-bootstrap.ps1"
 
 powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
@@ -73,11 +74,12 @@ servis auto-enroll modunda bekler ve HMAC token fallback'e sessiz dusmez.
 Pilot ZIP artifact kurulumu — gecici HMAC token fallback:
 
 ```powershell
-$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/v0.1.1-lab.2/EndpointAgent.zip"
-$ExpectedZipSha256 = "<zip-sha256>"
+$ArtifactBase = "https://testai.acik.com/artifacts/endpoint-agent/current"
+$PackageUrl = "$ArtifactBase/EndpointAgent.zip"
+$ExpectedZipSha256 = ((iwr -UseBasicParsing "$ArtifactBase/EndpointAgent.zip.sha256").Content -split "\s+")[0]
 
 iwr -UseBasicParsing `
-  "https://testai.acik.com/artifacts/endpoint-agent/v0.1.1-lab.2/bootstrap-package.ps1" `
+  "$ArtifactBase/bootstrap-package.ps1" `
   -OutFile "$env:TEMP\endpoint-agent-bootstrap.ps1"
 
 powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
