@@ -41,11 +41,12 @@ Yerel binary (release artifact'sız, hand-test/dev) — geri uyumlu:
 Pilot ZIP artifact (testai) ile standart PC kurulumu — domain/mTLS auto-enroll:
 
 ```powershell
-$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/EndpointAgent.zip"
-$ExpectedZipSha256 = "<zip-sha256>"
+$ArtifactBase = "https://testai.acik.com/artifacts/endpoint-agent/current"
+$PackageUrl = "$ArtifactBase/EndpointAgent.zip"
+$ExpectedZipSha256 = ((iwr -UseBasicParsing "$ArtifactBase/EndpointAgent.zip.sha256").Content -split "\s+")[0]
 
 iwr -UseBasicParsing `
-  "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/bootstrap-package.ps1" `
+  "$ArtifactBase/bootstrap-package.ps1" `
   -OutFile "$env:TEMP\endpoint-agent-bootstrap.ps1"
 
 powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
@@ -64,11 +65,12 @@ servis fail-closed bekler; token'li HMAC yoluna dusmez.
 Pilot ZIP artifact (testai) ile gecici HMAC token fallback kurulumu:
 
 ```powershell
-$PackageUrl = "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/EndpointAgent.zip"
-$ExpectedZipSha256 = "<zip-sha256>"
+$ArtifactBase = "https://testai.acik.com/artifacts/endpoint-agent/current"
+$PackageUrl = "$ArtifactBase/EndpointAgent.zip"
+$ExpectedZipSha256 = ((iwr -UseBasicParsing "$ArtifactBase/EndpointAgent.zip.sha256").Content -split "\s+")[0]
 
 iwr -UseBasicParsing `
-  "https://testai.acik.com/artifacts/endpoint-agent/0.1.0-dev/bootstrap-package.ps1" `
+  "$ArtifactBase/bootstrap-package.ps1" `
   -OutFile "$env:TEMP\endpoint-agent-bootstrap.ps1"
 
 powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
