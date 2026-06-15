@@ -85,3 +85,46 @@ func TestActiveIndicatorSurvivesEncode(t *testing.T) {
 		t.Fatalf("decoded band pixel not red: %02x %02x %02x", uint8(r>>8), uint8(g>>8), uint8(b>>8))
 	}
 }
+
+// TestApplyFrameProcessorsOrderAndNilSkip proves the shared pipeline hook the
+// producer uses: procs run in order, nil entries are skipped, and a nil frame /
+// empty list is a safe no-op. This is the OS-agnostic guarantee behind the
+// windows producer applying its exfil controls before encode.
+func TestApplyFrameProcessorsOrderAndNilSkip(t *testing.T) {
+	// nil frame + empty/nil procs: must not panic.
+	applyFrameProcessors(nil, nil)
+	applyFrameProcessors(nil, []func(*RawFrame){func(*RawFrame) {}})
+
+	var order []int
+	f := solidFrame(4, 4, 0, 0, 0)
+	procs := []func(*RawFrame){
+		func(*RawFrame) { order = append(order, 1) },
+		nil, // must be skipped, not invoked
+		func(fr *RawFrame) { order = append(order, 2); MaskRect(fr, 0, 0, 4, 4, 0, 0, 0xFF, 0xFF) },
+	}
+	applyFrameProcessors(&f, procs)
+
+	if len(order) != 2 || order[0] != 1 || order[1] != 2 {
+		t.Fatalf("processors not run in order with nil skipped: %v", order)
+	}
+	// second proc actually mutated the frame (red fill).
+	if _, _, r, _ := pixAt(f, 1, 1); r != 0xFF {
+		t.Fatalf("mask proc did not run: r=%02x", r)
+	}
+}
+
+// TestApplyFrameProcessorsActiveIndicatorChain mirrors the producer's default
+// wiring: an active-indicator processor applied to every frame leaves the top
+// band marked. This is the unit-level twin of the on-VM real-pixel proof.
+func TestApplyFrameProcessorsActiveIndicatorChain(t *testing.T) {
+	f := solidFrame(8, 8, 0, 0, 0)
+	indicator := func(fr *RawFrame) { ApplyActiveIndicator(fr, 2, 0, 0, 0xFF, 0xFF) }
+	applyFrameProcessors(&f, []func(*RawFrame){indicator})
+
+	if _, _, r, _ := pixAt(f, 4, 0); r != 0xFF { // band row
+		t.Fatalf("active-indicator band not applied via pipeline: r=%02x", r)
+	}
+	if _, _, r, _ := pixAt(f, 4, 5); r != 0 { // below band untouched
+		t.Fatalf("pipeline modified rows below the band: r=%02x", r)
+	}
+}

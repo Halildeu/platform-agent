@@ -69,3 +69,16 @@ func MaskRect(f *RawFrame, x0, y0, w, h int, b, g, r, a byte) {
 		}
 	}
 }
+
+// applyFrameProcessors runs procs in order against f, skipping nil entries. It
+// is the single point where the capture pipeline applies its exfil controls
+// before encode, so the windows producer and any other capture source share one
+// audited path. Each proc is responsible for its own fail-safe (frameWritable);
+// a nil frame or empty/nil procs is a safe no-op.
+func applyFrameProcessors(f *RawFrame, procs []func(*RawFrame)) {
+	for _, p := range procs {
+		if p != nil {
+			p(f)
+		}
+	}
+}
