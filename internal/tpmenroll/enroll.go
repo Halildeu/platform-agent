@@ -15,20 +15,43 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
+
+// RetryPolicy bounds the transient-failure retry on the idempotent /nonce leg
+// (capped exponential backoff). /attest is never retried — the nonce is single-use.
+type RetryPolicy struct {
+	MaxAttempts int
+	BaseBackoff time.Duration
+	MaxBackoff  time.Duration
+}
+
+// DefaultNonceRetry is the RFC8555-style default for /nonce (4 attempts,
+// 0.5s→8s capped exponential).
+func DefaultNonceRetry() RetryPolicy {
+	return RetryPolicy{MaxAttempts: 4, BaseBackoff: 500 * time.Millisecond, MaxBackoff: 8 * time.Second}
+}
+
+// Option customizes a Client.
+type Option func(*Client)
+
+// WithNonceRetry overrides the /nonce retry policy. (Backoff waits are ctx-aware;
+// tests keep the policy small to stay fast.)
+func WithNonceRetry(p RetryPolicy) Option { return func(c *Client) { c.nonceRetry = p } }
 
 // Client is the agent-side 4-leg TPM enrollment wire client. It wraps an mTLS
 // http.Client (the bootstrap transport) and joins the endpoint suffixes onto the
-// canonical agent API base (e.g. https://host/api/v1/agent). It does no retry —
-// that is the caller's / a later retry-wrapper's concern.
+// canonical agent API base (e.g. https://host/api/v1/agent). The idempotent
+// /nonce leg is retried on transient failures; /attest is not (nonce single-use).
 type Client struct {
-	baseURL *url.URL
-	http    *http.Client
+	baseURL    *url.URL
+	http       *http.Client
+	nonceRetry RetryPolicy
 }
 
 // NewClient constructs the wire client. baseURL must include scheme+host and must
 // NOT carry a query/fragment (suffixes are joined via url.JoinPath).
-func NewClient(baseURL string, httpClient *http.Client) (*Client, error) {
+func NewClient(baseURL string, httpClient *http.Client, opts ...Option) (*Client, error) {
 	if httpClient == nil {
 		return nil, fmt.Errorf("tpmenroll: http client is required")
 	}
@@ -42,7 +65,14 @@ func NewClient(baseURL string, httpClient *http.Client) (*Client, error) {
 	if parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, fmt.Errorf("tpmenroll: base url must not carry query or fragment")
 	}
-	return &Client{baseURL: parsed, http: httpClient}, nil
+	c := &Client{baseURL: parsed, http: httpClient, nonceRetry: DefaultNonceRetry()}
+	for _, o := range opts {
+		o(c)
+	}
+	if c.nonceRetry.MaxAttempts < 1 {
+		c.nonceRetry.MaxAttempts = 1
+	}
+	return c, nil
 }
 
 // EnrollOptions parameterizes one enrollment attempt.
@@ -154,52 +184,112 @@ func (c *Client) Enroll(ctx context.Context, tpm TPMDevice, opts EnrollOptions) 
 	return resp.Certificate, nil
 }
 
+// postNonce POSTs /nonce with bounded transient-failure retry (the leg is
+// idempotent — it only issues a challenge).
 func (c *Client) postNonce(ctx context.Context, req NonceRequest) (*AttestChallenge, error) {
-	var out AttestChallenge
-	if err := c.postJSON(ctx, PathTPMNonce, req, &out); err != nil {
-		return nil, err
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("tpmenroll: marshal /nonce: %w", err)
 	}
-	return &out, nil
+	var lastErr error
+	for attempt := 1; attempt <= c.nonceRetry.MaxAttempts; attempt++ {
+		status, body, netErr := c.doPost(ctx, PathTPMNonce, payload)
+		if netErr == nil && status == http.StatusOK {
+			var out AttestChallenge
+			if err := json.Unmarshal(body, &out); err != nil {
+				return nil, fmt.Errorf("tpmenroll: decode /nonce response: %w", err)
+			}
+			return &out, nil
+		}
+		lastErr = describeHTTPErr(PathTPMNonce, status, body, netErr)
+		if !isTransient(status, netErr) {
+			return nil, lastErr // terminal (4xx, e.g. uniform-403) — do not retry
+		}
+		if attempt < c.nonceRetry.MaxAttempts {
+			// ctx-aware backoff: a cancellation DURING the wait returns immediately
+			// (Codex 019eca4f must-fix — a plain sleep would block past cancel).
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoffDelay(c.nonceRetry, attempt)):
+			}
+		}
+	}
+	return nil, fmt.Errorf("tpmenroll: /nonce failed after %d attempts: %w", c.nonceRetry.MaxAttempts, lastErr)
 }
 
+// postAttest POSTs /attest with NO retry — the nonce is single-use, so a retried
+// /attest would always be rejected (V1).
 func (c *Client) postAttest(ctx context.Context, env AttestEnvelope) (*AttestResponse, error) {
+	payload, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("tpmenroll: marshal /attest: %w", err)
+	}
+	status, body, netErr := c.doPost(ctx, PathTPMAttest, payload)
+	if netErr != nil || status != http.StatusOK {
+		return nil, describeHTTPErr(PathTPMAttest, status, body, netErr)
+	}
 	var out AttestResponse
-	if err := c.postJSON(ctx, PathTPMAttest, env, &out); err != nil {
-		return nil, err
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("tpmenroll: decode /attest response: %w", err)
 	}
 	return &out, nil
 }
 
-func (c *Client) postJSON(ctx context.Context, suffix string, body, out any) error {
+// doPost performs a single JSON POST and returns (status, body, transport-error).
+// A transport error yields status 0; a non-2xx is returned as status+body (not an
+// error) so the caller can classify transient vs terminal.
+func (c *Client) doPost(ctx context.Context, suffix string, payload []byte) (int, []byte, error) {
 	u, err := url.JoinPath(c.baseURL.String(), suffix)
 	if err != nil {
-		return fmt.Errorf("tpmenroll: join url: %w", err)
-	}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("tpmenroll: marshal request: %w", err)
+		return 0, nil, fmt.Errorf("tpmenroll: join url: %w", err)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("tpmenroll: new request: %w", err)
+		return 0, nil, fmt.Errorf("tpmenroll: new request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("tpmenroll: POST %s: %w", suffix, err)
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != http.StatusOK {
-		// The backend returns a uniform 403 with a {"status":"denied"} body on any
-		// verifier failure; surface the status (the deny reason is audit-only server-side).
-		return fmt.Errorf("tpmenroll: POST %s returned %d: %s", suffix, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, body, nil
+}
+
+// isTransient: a transport error, 408 (proxy/edge timeout), 429, or 5xx is
+// retryable; other 4xx (incl. the backend's uniform-403 deny) is terminal.
+func isTransient(status int, netErr error) bool {
+	return netErr != nil ||
+		status == http.StatusRequestTimeout ||
+		status == http.StatusTooManyRequests ||
+		status >= 500
+}
+
+// backoffDelay is capped exponential: BaseBackoff * 2^(attempt-1), clamped to MaxBackoff.
+func backoffDelay(p RetryPolicy, attempt int) time.Duration {
+	d := p.BaseBackoff
+	for i := 1; i < attempt; i++ {
+		d *= 2
+		if d >= p.MaxBackoff {
+			return p.MaxBackoff
+		}
 	}
-	if err := json.Unmarshal(respBody, out); err != nil {
-		return fmt.Errorf("tpmenroll: decode %s response: %w", suffix, err)
+	if d <= 0 {
+		return p.MaxBackoff
 	}
-	return nil
+	return d
+}
+
+func describeHTTPErr(suffix string, status int, body []byte, netErr error) error {
+	if netErr != nil {
+		return fmt.Errorf("tpmenroll: POST %s: %w", suffix, netErr)
+	}
+	// The backend returns a uniform 403 + {"status":"denied"} on any verifier
+	// failure; the deny reason is audit-only server-side.
+	return fmt.Errorf("tpmenroll: POST %s returned %d: %s", suffix, status, strings.TrimSpace(string(body)))
 }
 
 // oidExtKeyUsage (2.5.29.37) and oidClientAuth (1.3.6.1.5.5.7.3.2) — the backend
