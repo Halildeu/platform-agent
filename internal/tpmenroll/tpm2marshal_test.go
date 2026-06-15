@@ -3,6 +3,7 @@ package tpmenroll
 import (
 	"bytes"
 	"crypto/rsa"
+	"math/big"
 	"testing"
 )
 
@@ -97,5 +98,9 @@ func TestBuildRSASigningPublicArea_Rejects(t *testing.T) {
 	}
 	if _, err := BuildRSASigningPublicArea(rk.N, AlgSHA256, AKObjectAttributes, AlgECDSA, AlgSHA256); err == nil {
 		t.Error("non-RSA scheme should be rejected")
+	}
+	// Implausible key size (tiny modulus) rejected fail-closed.
+	if _, err := BuildRSASigningPublicArea(big.NewInt(65537), AlgSHA256, AKObjectAttributes, AlgRSASSA, AlgSHA256); err == nil {
+		t.Error("tiny modulus (sub-2048-bit) should be rejected")
 	}
 }

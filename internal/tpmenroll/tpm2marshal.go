@@ -63,6 +63,13 @@ func BuildRSASigningPublicArea(modulus *big.Int, nameAlg int, objectAttributes u
 	}
 	mod := modulus.Bytes() // big-endian, minimal — 256 bytes for a 2048-bit modulus
 	keyBits := len(mod) * 8
+	// Sane RSA range (Codex 019ec723 optional hardening): rejects a malformed
+	// tiny/oversized modulus fail-closed, and keeps the body far under the u16
+	// TPM2B size limit so the size prefix can never silently overflow. A valid
+	// RSA modulus has its MSB set, so len(Bytes())*8 is the nominal key size.
+	if keyBits < 2048 || keyBits > 16384 {
+		return nil, fmt.Errorf("tpmenroll: implausible RSA key size %d bits", keyBits)
+	}
 
 	w := &tpmtWriter{}
 	w.u16(AlgRSA)           // type
