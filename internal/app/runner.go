@@ -168,7 +168,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	result := r.Executor.Execute(commandCtx, command)
-	if err := r.Client.SubmitResult(ctx, result); err != nil {
+	if err := r.submitResultWithFallback(ctx, result); err != nil {
 		r.StateTracker.RecordFailure(time.Now())
 		return err
 	}
@@ -186,6 +186,62 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		r.logf("command %s detail: summary=%q details=%v", command.CommandID, result.Summary, result.Details)
 	}
 	return nil
+}
+
+func (r *Runner) submitResultWithFallback(ctx context.Context, result protocol.CommandResult) error {
+	if err := r.Client.SubmitResult(ctx, result); err != nil {
+		fallback, ok := commandResultFallback(result, err, time.Now())
+		if !ok {
+			return err
+		}
+		r.logf("command result submit rejected command=%s claim=%s originalStatus=%s: %v; submitting FAILED fallback",
+			result.CommandID, result.ClaimID, result.Status, err)
+		if fallbackErr := r.Client.SubmitResult(ctx, fallback); fallbackErr != nil {
+			return fmt.Errorf("submit command result failed; fallback FAILED result also failed: original=%v; fallback=%w", err, fallbackErr)
+		}
+		r.logf("command %s fallback FAILED result submitted after original result rejection", result.CommandID)
+	}
+	return nil
+}
+
+func commandResultFallback(result protocol.CommandResult, err error, now time.Time) (protocol.CommandResult, bool) {
+	var httpErr *protocol.HTTPError
+	if !errors.As(err, &httpErr) {
+		return protocol.CommandResult{}, false
+	}
+	switch httpErr.StatusCode {
+	case 400, 413, 422:
+	default:
+		return protocol.CommandResult{}, false
+	}
+	finishedAt := result.FinishedAt
+	if finishedAt.IsZero() {
+		finishedAt = now
+	}
+	startedAt := result.StartedAt
+	if startedAt.IsZero() {
+		startedAt = finishedAt
+	}
+	return protocol.CommandResult{
+		CommandID:     result.CommandID,
+		ClaimID:       result.ClaimID,
+		AttemptNumber: result.AttemptNumber,
+		Status:        protocol.CommandStatusFailed,
+		Summary:       "Command result rejected by backend; submitted sanitized FAILED fallback",
+		ErrorCode:     "RESULT_SUBMIT_REJECTED",
+		ErrorMessage:  boundedSubmitError(httpErr),
+		StartedAt:     startedAt,
+		FinishedAt:    finishedAt,
+	}, true
+}
+
+func boundedSubmitError(err *protocol.HTTPError) string {
+	msg := err.Error()
+	const max = 512
+	if len(msg) <= max {
+		return msg
+	}
+	return msg[:max]
 }
 
 func newExecutor(cfg config.Config) *commands.LocalExecutor {
