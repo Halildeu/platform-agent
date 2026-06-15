@@ -89,6 +89,10 @@ type WindowsFrameProducer struct {
 	enc      Encoder
 	interval time.Duration
 	maxErr   int
+	// processors are the exfil controls (active-indicator / screen-mask) applied
+	// in order to each captured RawFrame BEFORE encode, so every egressed frame
+	// carries them (ADR-0034 D10). Empty = none.
+	processors []func(*RawFrame)
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -100,8 +104,11 @@ type WindowsFrameProducer struct {
 }
 
 // NewWindowsFrameProducer builds a GDI producer. A nil encoder defaults to PNG;
-// interval<=0 and maxErr<=0 take the documented defaults.
-func NewWindowsFrameProducer(enc Encoder, interval time.Duration, maxErr int) *WindowsFrameProducer {
+// interval<=0 and maxErr<=0 take the documented defaults. Optional processors
+// (exfil controls — active-indicator / screen-mask) are applied in order to each
+// captured RawFrame before encode; nil entries are skipped. Passing none keeps
+// the raw capture unmodified.
+func NewWindowsFrameProducer(enc Encoder, interval time.Duration, maxErr int, processors ...func(*RawFrame)) *WindowsFrameProducer {
 	if enc == nil {
 		enc = NewPNGEncoder()
 	}
@@ -111,7 +118,13 @@ func NewWindowsFrameProducer(enc Encoder, interval time.Duration, maxErr int) *W
 	if maxErr <= 0 {
 		maxErr = DefaultMaxConsecutiveErrors
 	}
-	return &WindowsFrameProducer{enc: enc, interval: interval, maxErr: maxErr, stop: make(chan struct{})}
+	procs := make([]func(*RawFrame), 0, len(processors))
+	for _, p := range processors {
+		if p != nil {
+			procs = append(procs, p)
+		}
+	}
+	return &WindowsFrameProducer{enc: enc, interval: interval, maxErr: maxErr, processors: procs, stop: make(chan struct{})}
 }
 
 // Next captures, encodes, and returns the next frame. It rate-limits with a
@@ -140,6 +153,10 @@ func (w *WindowsFrameProducer) Next() (Frame, bool) {
 		}
 		raw, err := capture()
 		if err == nil {
+			// Exfil controls run BEFORE encode so every egressed frame carries
+			// them (active-indicator band, screen-masks). frameWritable-guarded
+			// in-place ops; no processors leaves the capture untouched.
+			applyFrameProcessors(&raw, w.processors)
 			payload, encErr := w.enc.Encode(raw)
 			if encErr == nil {
 				w.mu.Lock()

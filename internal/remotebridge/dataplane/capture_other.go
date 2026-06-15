@@ -10,7 +10,8 @@ import "time"
 type WindowsFrameProducer struct{}
 
 // NewWindowsFrameProducer returns the stub (the real GDI capture is windows-only).
-func NewWindowsFrameProducer(_ Encoder, _ time.Duration, _ int) *WindowsFrameProducer {
+// The variadic processors keep build-tag signature parity with the windows build.
+func NewWindowsFrameProducer(_ Encoder, _ time.Duration, _ int, _ ...func(*RawFrame)) *WindowsFrameProducer {
 	return &WindowsFrameProducer{}
 }
 
