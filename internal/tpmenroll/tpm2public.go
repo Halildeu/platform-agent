@@ -28,6 +28,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash"
+	"math"
 	"math/big"
 )
 
@@ -229,7 +230,11 @@ func (p *PublicArea) PublicKey() (crypto.PublicKey, error) {
 	}
 	switch p.typ {
 	case AlgRSA:
-		return &rsa.PublicKey{N: pp.rsaModulus, E: int(pp.rsaExponent.Int64())}, nil
+		e, err := rsaExponentInt(pp.rsaExponent)
+		if err != nil {
+			return nil, err
+		}
+		return &rsa.PublicKey{N: pp.rsaModulus, E: e}, nil
 	case AlgECC:
 		curve, err := eccCurve(pp.curveID)
 		if err != nil {
@@ -239,6 +244,17 @@ func (p *PublicArea) PublicKey() (crypto.PublicKey, error) {
 	default:
 		return nil, fmt.Errorf("tpmenroll: unsupported TPM key type 0x%x", p.typ)
 	}
+}
+
+// rsaExponentInt narrows a TPM RSA public exponent to crypto/rsa.PublicKey.E
+// (an int), rejecting non-positive or out-of-int-range values (Codex 019ec723
+// optional hardening). On a 64-bit build a UINT32 exponent always fits; the
+// guard closes the theoretical 32-bit overflow / crafted-big.Int case fail-closed.
+func rsaExponentInt(e *big.Int) (int, error) {
+	if e == nil || e.Sign() <= 0 || !e.IsInt64() || e.Int64() > int64(math.MaxInt) {
+		return 0, fmt.Errorf("tpmenroll: RSA exponent out of range")
+	}
+	return int(e.Int64()), nil
 }
 
 func eccCurve(id int) (elliptic.Curve, error) {

@@ -4,6 +4,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"math/big"
 	"os"
 	"testing"
 )
@@ -155,6 +156,22 @@ func TestParse_RejectsTPM2BSizeMismatch(t *testing.T) {
 func TestParse_RejectsTruncated(t *testing.T) {
 	if _, err := ParsePublicArea([]byte{0x00, 0x02, 0x00}, true); err == nil {
 		t.Fatal("expected truncation rejection")
+	}
+}
+
+func TestRSAExponentInt_Guard(t *testing.T) {
+	if got, err := rsaExponentInt(big.NewInt(65537)); err != nil || got != 65537 {
+		t.Errorf("65537 should pass: got=%d err=%v", got, err)
+	}
+	if _, err := rsaExponentInt(big.NewInt(0)); err == nil {
+		t.Error("zero exponent should be rejected")
+	}
+	if _, err := rsaExponentInt(big.NewInt(-3)); err == nil {
+		t.Error("negative exponent should be rejected")
+	}
+	// 2^100 does not fit an int on any platform → rejected (the crafted-big.Int / 32-bit guard).
+	if _, err := rsaExponentInt(new(big.Int).Lsh(big.NewInt(1), 100)); err == nil {
+		t.Error("oversized exponent should be rejected")
 	}
 }
 
