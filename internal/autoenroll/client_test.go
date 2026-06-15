@@ -304,6 +304,32 @@ func TestClient_NextCommand_200_DecodesPayload(t *testing.T) {
 	}
 }
 
+func TestClient_NextCommandCert_DoesNotSendAuthorization(t *testing.T) {
+	pki := setupTestPKI(t)
+	captured := &http.Request{}
+	cmd := protocol.AgentCommand{
+		CommandID: "cmd-cert-1",
+		ClaimID:   "claim-cert-1",
+		Type:      protocol.CommandCollectInventory,
+	}
+	routes := map[string]*route{
+		PathCommandsNext: {method: http.MethodGet, body: cmd, captured: captured},
+	}
+	srv := startMTLSServer(t, pki, mountRoutes(routes))
+	wire := newWireClient(t, pki, srv)
+
+	got, err := wire.NextCommandCert(context.Background())
+	if err != nil {
+		t.Fatalf("NextCommandCert: %v", err)
+	}
+	if got.CommandID != cmd.CommandID || got.ClaimID != cmd.ClaimID {
+		t.Fatalf("decode mismatch: %+v", got)
+	}
+	if auth := captured.Header.Get("Authorization"); auth != "" {
+		t.Fatalf("NextCommandCert must not send Authorization header, got %q", auth)
+	}
+}
+
 func TestClient_AuthFailure_401MapsToErrAuthFailure(t *testing.T) {
 	pki := setupTestPKI(t)
 	routes := map[string]*route{
@@ -342,6 +368,28 @@ func TestClient_SubmitResult_RequiresIDs(t *testing.T) {
 	}
 	if err := wire.SubmitResult(context.Background(), "tok-1", protocol.CommandResult{CommandID: "x"}); err == nil {
 		t.Fatal("expected error for empty claim id")
+	}
+}
+
+func TestClient_SubmitResultCert_DoesNotSendAuthorization(t *testing.T) {
+	pki := setupTestPKI(t)
+	captured := &http.Request{}
+	routes := map[string]*route{
+		"/commands/cmd-cert-1/result": {method: http.MethodPost, statusCode: http.StatusNoContent, captured: captured},
+	}
+	srv := startMTLSServer(t, pki, mountRoutes(routes))
+	wire := newWireClient(t, pki, srv)
+
+	err := wire.SubmitResultCert(context.Background(), protocol.CommandResult{
+		CommandID: "cmd-cert-1",
+		ClaimID:   "claim-cert-1",
+		Status:    protocol.CommandStatusSucceeded,
+	})
+	if err != nil {
+		t.Fatalf("SubmitResultCert: %v", err)
+	}
+	if auth := captured.Header.Get("Authorization"); auth != "" {
+		t.Fatalf("SubmitResultCert must not send Authorization header, got %q", auth)
 	}
 }
 

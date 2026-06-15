@@ -192,7 +192,7 @@ func newTestServer(t *testing.T, pki *testPKI, cfg *handlerConfig, recorder *req
 		_ = json.NewEncoder(w).Encode(cfg.refresh)
 	})
 	mux.HandleFunc(PathCommandsNext, func(w http.ResponseWriter, r *http.Request) {
-		recorder.inc(PathCommandsNext)
+		recorder.record(PathCommandsNext, r)
 		if cfg.command != nil {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(cfg.command)
@@ -205,7 +205,7 @@ func newTestServer(t *testing.T, pki *testPKI, cfg *handlerConfig, recorder *req
 		w.WriteHeader(status)
 	})
 	mux.HandleFunc("/commands/", func(w http.ResponseWriter, r *http.Request) {
-		recorder.inc("/commands/result")
+		recorder.record("/commands/result", r)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	return startMTLSServer(t, pki, mux)
@@ -236,8 +236,9 @@ func TestRunner_FirstRun_EnrollsAndPersists(t *testing.T) {
 	if got := recorder.count(PathAutoEnroll); got != 1 {
 		t.Fatalf("AutoEnroll hits: got %d, want 1", got)
 	}
-	// ADR-0029 M2 tokenless: a successful enrollment now sends exactly one
-	// cert-auth heartbeat and must still avoid token-refresh / commands.
+	// ADR-0029 M2 tokenless: a successful enrollment sends exactly one
+	// cert-auth heartbeat and one cert-auth command poll, but never refreshes
+	// or attaches a bearer token.
 	if got := recorder.count(PathTokenRefresh); got != 0 {
 		t.Fatalf("RefreshToken must not be called in tokenless mode; got %d", got)
 	}
@@ -247,8 +248,14 @@ func TestRunner_FirstRun_EnrollsAndPersists(t *testing.T) {
 	if got := recorder.authHeaders(PathHeartbeat); len(got) != 1 || got[0] != "" {
 		t.Fatalf("tokenless heartbeat must not send Authorization header; got %#v", got)
 	}
-	if got := recorder.count(PathCommandsNext); got != 0 {
-		t.Fatalf("NextCommand must not be called in tokenless mode; got %d", got)
+	if got := recorder.count(PathCommandsNext); got != 1 {
+		t.Fatalf("NextCommand cert-auth hits: got %d, want 1", got)
+	}
+	if got := recorder.authHeaders(PathCommandsNext); len(got) != 1 || got[0] != "" {
+		t.Fatalf("tokenless NextCommand must not send Authorization header; got %#v", got)
+	}
+	if got := recorder.count("/commands/result"); got != 0 {
+		t.Fatalf("empty tokenless poll must not submit a result; got %d", got)
 	}
 	persisted, ok := store.Snapshot()
 	if !ok {
@@ -265,6 +272,53 @@ func TestRunner_FirstRun_EnrollsAndPersists(t *testing.T) {
 	}
 	if persisted.CertThumbprintSHA256 != localThumb {
 		t.Fatalf("persisted thumbprint should bind the presented cert; got %q want %q", persisted.CertThumbprintSHA256, localThumb)
+	}
+}
+
+func TestRunner_TokenlessLifecycleExecutesCommandWithCertAuth(t *testing.T) {
+	pki := setupTestPKI(t)
+	recorder := &requestRecorder{hit: map[string]int{}}
+	localThumb := ThumbprintSHA256Hex(pki.clientCert.Leaf)
+	cfg := &handlerConfig{
+		autoEnroll: AutoEnrollResponse{
+			DeviceID:   "dev-1",
+			Status:     StatusEnrolled,
+			EnrolledAt: time.Now().UTC(),
+			CertInfo:   AutoEnrollCertInfo{Thumbprint: localThumb},
+		},
+		command: &protocol.AgentCommand{
+			CommandID: "cmd-collect-1",
+			ClaimID:   "claim-collect-1",
+			Type:      protocol.CommandCollectInventory,
+		},
+	}
+	srv := newTestServer(t, pki, cfg, recorder)
+	store := NewMemoryStore()
+	provider := &fakeCertProvider{pki: pki}
+	registry := &fakeRegistry{intMap: map[string]int{}, stringMap: map[string]string{}}
+
+	runner := buildRunner(t, pki, srv, registry, store, provider)
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := recorder.count(PathHeartbeat); got != 1 {
+		t.Fatalf("Heartbeat hits: got %d, want 1", got)
+	}
+	if got := recorder.count(PathCommandsNext); got != 1 {
+		t.Fatalf("NextCommand hits: got %d, want 1", got)
+	}
+	if got := recorder.count("/commands/result"); got != 1 {
+		t.Fatalf("SubmitResult hits: got %d, want 1", got)
+	}
+	if got := recorder.authHeaders(PathCommandsNext); len(got) != 1 || got[0] != "" {
+		t.Fatalf("tokenless NextCommand must not send Authorization header; got %#v", got)
+	}
+	if got := recorder.authHeaders("/commands/result"); len(got) != 1 || got[0] != "" {
+		t.Fatalf("tokenless SubmitResult must not send Authorization header; got %#v", got)
+	}
+	if got := recorder.count(PathTokenRefresh); got != 0 {
+		t.Fatalf("RefreshToken must not be called in tokenless command lifecycle; got %d", got)
 	}
 }
 

@@ -111,8 +111,23 @@ func (c *Client) HeartbeatCert(ctx context.Context, req HeartbeatRequest) (Heart
 // NextCommand polls for the next queued command. ErrNoCommand wraps a
 // 204 No Content response.
 func (c *Client) NextCommand(ctx context.Context, token string) (protocol.AgentCommand, error) {
+	return c.nextCommand(ctx, token)
+}
+
+// NextCommandCert polls for the next queued command using the presented mTLS
+// machine cert as the only credential. No Authorization header is sent.
+func (c *Client) NextCommandCert(ctx context.Context) (protocol.AgentCommand, error) {
+	return c.nextCommand(ctx, "")
+}
+
+func (c *Client) nextCommand(ctx context.Context, token string) (protocol.AgentCommand, error) {
 	var resp protocol.AgentCommand
-	err := c.doAuthed(ctx, http.MethodGet, PathCommandsNext, "", token, nil, &resp)
+	var err error
+	if token == "" {
+		err = c.do(ctx, http.MethodGet, PathCommandsNext, "", nil, &resp)
+	} else {
+		err = c.doAuthed(ctx, http.MethodGet, PathCommandsNext, "", token, nil, &resp)
+	}
 	if errors.Is(err, ErrNoCommand) {
 		return protocol.AgentCommand{}, ErrNoCommand
 	}
@@ -126,6 +141,16 @@ func (c *Client) NextCommand(ctx context.Context, token string) (protocol.AgentC
 // required by the backend; SubmitResult enforces that locally so a bad
 // caller never POSTs a result the backend will reject.
 func (c *Client) SubmitResult(ctx context.Context, token string, result protocol.CommandResult) error {
+	return c.submitResult(ctx, token, result)
+}
+
+// SubmitResultCert reports a command result using the presented mTLS machine
+// cert as the only credential. No Authorization header is sent.
+func (c *Client) SubmitResultCert(ctx context.Context, result protocol.CommandResult) error {
+	return c.submitResult(ctx, "", result)
+}
+
+func (c *Client) submitResult(ctx context.Context, token string, result protocol.CommandResult) error {
 	if strings.TrimSpace(result.CommandID) == "" {
 		return fmt.Errorf("command result is missing a command id")
 	}
@@ -133,6 +158,9 @@ func (c *Client) SubmitResult(ctx context.Context, token string, result protocol
 		return fmt.Errorf("command result is missing a claim id")
 	}
 	path := fmt.Sprintf(PathCommandResult, url.PathEscape(result.CommandID))
+	if token == "" {
+		return c.do(ctx, http.MethodPost, path, "", result.ToWire(), nil)
+	}
 	return c.doAuthed(ctx, http.MethodPost, path, "", token, result.ToWire(), nil)
 }
 

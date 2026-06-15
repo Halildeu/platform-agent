@@ -37,12 +37,13 @@ var ErrUnsupportedOS = errors.New("auto-enroll requires Windows machine certific
 // this state is forbidden — Codex F11 absorb (revocation bypass risk).
 var ErrAuthFailure = errors.New("backend rejected cert or service token (fail-closed)")
 
-// ErrTokenlessLifecycleUnsupported is returned when a token-dependent step
-// (refresh / heartbeat / command poll / result submit) is reached without a
-// bearer token. In the ADR-0029 M2 canonical model enrollment is tokenless and
-// the runner short-circuits before these steps; reaching one with an empty
-// token means a caller bypassed the tokenless guard, so fail closed rather
-// than send an empty Bearer. The cert-authenticated lifecycle is #151.
+// ErrTokenlessLifecycleUnsupported is returned when a legacy token-dependent
+// step (refresh / bearer heartbeat / bearer command poll / bearer result
+// submit) is reached without a bearer token. In the ADR-0029 M2 canonical
+// model enrollment is tokenless and uses dedicated cert-auth heartbeat and
+// command paths; reaching a legacy bearer step with an empty token means a
+// caller bypassed the tokenless guard, so fail closed rather than send an
+// empty Bearer.
 var ErrTokenlessLifecycleUnsupported = errors.New("tokenless mTLS enrollment: token-dependent lifecycle not supported (#151)")
 
 // CertFilter narrows the cert-store query to a single eligible machine

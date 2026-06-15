@@ -67,9 +67,8 @@ func (p PersistedConfig) Validate() error {
 
 // IsTokenlessEnrollment reports whether this is a valid ADR-0029 M2 tokenless
 // enrollment record: a device + bound cert thumbprint and NO service token.
-// The runner uses this to stop after a successful enrollment reconcile (the
-// mTLS cert is the continuous credential; the token-dependent heartbeat /
-// command lifecycle is deferred to #151).
+// The runner uses this to select the cert-auth heartbeat / command lifecycle;
+// the mTLS cert is the continuous credential.
 func (p PersistedConfig) IsTokenlessEnrollment() bool {
 	return p.DeviceID != "" && p.CertThumbprintSHA256 != "" && p.ServiceToken == ""
 }
