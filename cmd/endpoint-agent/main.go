@@ -59,6 +59,11 @@ func main() {
 	// it is only ever set by a human at an interactive elevated
 	// prompt.
 	enrollmentToken := flag.String("enrollment-token", "", "HMAC enrollment token (operator escape hatch; takes precedence over ENDPOINT_AGENT_ENROLLMENT_TOKEN; mutually exclusive with --auto-enroll)")
+	// Faz 22.3B: AD-CS-less enrollment via TPM 2.0 attestation + Vault PKI. A
+	// CLOSED, separate mode (early-branch below) that never enters the AD CS
+	// resolveMode path; requires Windows (TBS). Mutually exclusive with --auto-enroll
+	// and --enrollment-token.
+	autoEnrollTpmFlag := flag.Bool("auto-enroll-tpm", false, "run TPM-attestation + Vault-PKI enrollment (Faz 22.3B); requires Windows; uses --api-url + the enrollment token")
 	flag.Parse()
 
 	cfg := config.LoadFromEnv()
@@ -80,6 +85,19 @@ func main() {
 	if len(flag.Args()) > 0 && flag.Args()[0] == "diagnose" {
 		handleDiagnoseCommand(flag.Args()[1:])
 		return
+	}
+
+	// Faz 22.3B TPM enrollment — a closed, isolated mode handled BEFORE the AD CS
+	// resolveMode dispatch so it never touches the AD CS path. Fail-closed on a
+	// conflicting flag combination (the TPM path is its own identity bootstrap).
+	if *autoEnrollTpmFlag {
+		if *autoEnrollFlag || strings.TrimSpace(*enrollmentToken) != "" {
+			log.Fatal("--auto-enroll-tpm is mutually exclusive with --auto-enroll and --enrollment-token")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := runTpmAutoEnroll(ctx, cfg, *autoEnrollAPIURL)
+		stop()
+		os.Exit(code)
 	}
 
 	runningAsService, err := winservice.IsWindowsService()
