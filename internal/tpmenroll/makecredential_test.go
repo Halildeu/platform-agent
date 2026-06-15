@@ -32,6 +32,24 @@ func loadGoldenField(t *testing.T, field string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(v)
 }
 
+// loadGoldenString returns a raw (non-base64) golden field, e.g. the hex nonce.
+func loadGoldenString(t *testing.T, field string) (string, error) {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/golden-rsa.json")
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	var m map[string]string
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("parse golden: %v", err)
+	}
+	v, ok := m[field]
+	if !ok || v == "" {
+		return "", fmt.Errorf("no field %s", field)
+	}
+	return v, nil
+}
+
 func mustHex(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(s)
