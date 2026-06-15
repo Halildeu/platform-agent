@@ -24,6 +24,14 @@ const (
 	pipeNonceFlag  = "--dppipe-nonce="
 )
 
+// streamProofBandHeight is the active-indicator band height (px) the stream
+// helper applies to EVERY streamed frame, so the streaming gold-proof can
+// confirm the exfil control (slice-5a/5b) survives the real e2e stream. The band
+// is red (BGRA 0,0,0xFF,0xFF). Kept small relative to the desktop so most of the
+// frame stays genuine captured content (verified by the below-band variance
+// check). The one-shot real-pixel proof keeps capturing RAW (no indicator).
+const streamProofBandHeight = 24
+
 func TestMain(m *testing.M) {
 	var pipeName, pipeNonce string
 	for _, a := range os.Args[1:] {
@@ -57,7 +65,11 @@ func runStreamHelper(pipeName, nonceHex string) int {
 		return 6
 	}
 	defer func() { _ = conn.Close() }()
-	p := NewWindowsFrameProducer(NewPNGEncoder(), 50*time.Millisecond, 3)
+	// Production-representative: apply the VIEW_ONLY active-indicator to every
+	// streamed frame (the exfil control the gold-proof verifies survives the
+	// real e2e stream). The producer applies it before encode (slice-5b wiring).
+	indicator := func(fr *RawFrame) { ApplyActiveIndicator(fr, streamProofBandHeight, 0, 0, 0xFF, 0xFF) }
+	p := NewWindowsFrameProducer(NewPNGEncoder(), 50*time.Millisecond, 3, indicator)
 	defer func() { _ = p.Close() }()
 	for i := 0; i < 2; i++ {
 		f, ok := p.Next()
