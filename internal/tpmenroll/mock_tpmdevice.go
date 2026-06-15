@@ -131,6 +131,9 @@ func (m *MockTPMDevice) CertifyDeviceKey(qualifyingData []byte) (certifyAttest, 
 
 func (m *MockTPMDevice) DeviceKeySigner() crypto.Signer { return m.deviceKey }
 
+// Close is a no-op — the software mock holds no OS/TPM resources.
+func (m *MockTPMDevice) Close() error { return nil }
+
 func cloneBytes(b []byte) []byte {
 	out := make([]byte, len(b))
 	copy(out, b)

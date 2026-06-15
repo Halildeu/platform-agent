@@ -3,6 +3,7 @@ module platform-agent
 go 1.25.0
 
 require (
+	github.com/google/go-tpm v0.9.8
 	golang.org/x/sys v0.43.0
 	google.golang.org/grpc v1.76.0
 	google.golang.org/protobuf v1.36.10

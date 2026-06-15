@@ -43,4 +43,8 @@ type TPMDevice interface {
 	// DeviceKeySigner is a crypto.Signer over the device key, for the CSR's
 	// proof-of-possession (backend V9). The private key never leaves the device.
 	DeviceKeySigner() crypto.Signer
+
+	// Close releases device resources (flushes transient TPM handles + closes the
+	// TPM transport for the hardware impl; a no-op for MockTPMDevice).
+	Close() error
 }
