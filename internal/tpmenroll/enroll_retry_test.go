@@ -2,6 +2,7 @@ package tpmenroll
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -9,13 +10,11 @@ import (
 	"time"
 )
 
-func noSleep(time.Duration) {}
-
+// fastClient uses a sub-millisecond backoff so the ctx-aware waits don't slow tests.
 func fastClient(t *testing.T, url string, srv *httptest.Server, maxAttempts int) *Client {
 	t.Helper()
 	c, err := NewClient(url, srv.Client(),
-		WithSleep(noSleep),
-		WithNonceRetry(RetryPolicy{MaxAttempts: maxAttempts, BaseBackoff: time.Millisecond, MaxBackoff: time.Millisecond}))
+		WithNonceRetry(RetryPolicy{MaxAttempts: maxAttempts, BaseBackoff: time.Microsecond, MaxBackoff: time.Microsecond}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +101,34 @@ func TestPostAttest_NoRetry(t *testing.T) {
 	}
 }
 
+// A ctx cancel DURING the backoff wait must return promptly (not block through the
+// remaining retries) — the Codex 019eca4f must-fix: the wait is ctx-aware.
+func TestPostNonce_ContextCancelDuringBackoff(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable) // always transient → keeps retrying/backing off
+	}))
+	defer srv.Close()
+	c, err := NewClient(srv.URL+"/api/v1/agent", srv.Client(),
+		WithNonceRetry(RetryPolicy{MaxAttempts: 6, BaseBackoff: 100 * time.Millisecond, MaxBackoff: time.Second}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+
+	start := time.Now()
+	_, err = c.postNonce(ctx, NonceRequest{EnrollmentToken: "t"})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled", err)
+	}
+	// Without ctx-aware backoff this would block ~ sum of 100ms+200ms+... ≫ 500ms.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("returned in %v — backoff is not ctx-aware", elapsed)
+	}
+}
+
 func TestBackoffDelay_CappedExponential(t *testing.T) {
 	p := RetryPolicy{MaxAttempts: 10, BaseBackoff: 100 * time.Millisecond, MaxBackoff: time.Second}
 	cases := []struct {
@@ -127,7 +154,7 @@ func TestNewClient_DefaultRetryApplied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.nonceRetry.MaxAttempts < 1 || c.sleep == nil {
-		t.Fatalf("defaults not applied: %+v sleep=%v", c.nonceRetry, c.sleep != nil)
+	if c.nonceRetry.MaxAttempts < 1 {
+		t.Fatalf("defaults not applied: %+v", c.nonceRetry)
 	}
 }

@@ -35,11 +35,9 @@ func DefaultNonceRetry() RetryPolicy {
 // Option customizes a Client.
 type Option func(*Client)
 
-// WithNonceRetry overrides the /nonce retry policy.
+// WithNonceRetry overrides the /nonce retry policy. (Backoff waits are ctx-aware;
+// tests keep the policy small to stay fast.)
 func WithNonceRetry(p RetryPolicy) Option { return func(c *Client) { c.nonceRetry = p } }
-
-// WithSleep overrides the backoff sleep (tests inject a no-op to avoid real waits).
-func WithSleep(fn func(time.Duration)) Option { return func(c *Client) { c.sleep = fn } }
 
 // Client is the agent-side 4-leg TPM enrollment wire client. It wraps an mTLS
 // http.Client (the bootstrap transport) and joins the endpoint suffixes onto the
@@ -49,7 +47,6 @@ type Client struct {
 	baseURL    *url.URL
 	http       *http.Client
 	nonceRetry RetryPolicy
-	sleep      func(time.Duration)
 }
 
 // NewClient constructs the wire client. baseURL must include scheme+host and must
@@ -68,15 +65,12 @@ func NewClient(baseURL string, httpClient *http.Client, opts ...Option) (*Client
 	if parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, fmt.Errorf("tpmenroll: base url must not carry query or fragment")
 	}
-	c := &Client{baseURL: parsed, http: httpClient, nonceRetry: DefaultNonceRetry(), sleep: time.Sleep}
+	c := &Client{baseURL: parsed, http: httpClient, nonceRetry: DefaultNonceRetry()}
 	for _, o := range opts {
 		o(c)
 	}
 	if c.nonceRetry.MaxAttempts < 1 {
 		c.nonceRetry.MaxAttempts = 1
-	}
-	if c.sleep == nil {
-		c.sleep = time.Sleep
 	}
 	return c, nil
 }
@@ -212,12 +206,13 @@ func (c *Client) postNonce(ctx context.Context, req NonceRequest) (*AttestChalle
 			return nil, lastErr // terminal (4xx, e.g. uniform-403) — do not retry
 		}
 		if attempt < c.nonceRetry.MaxAttempts {
+			// ctx-aware backoff: a cancellation DURING the wait returns immediately
+			// (Codex 019eca4f must-fix — a plain sleep would block past cancel).
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			default:
+			case <-time.After(backoffDelay(c.nonceRetry, attempt)):
 			}
-			c.sleep(backoffDelay(c.nonceRetry, attempt))
 		}
 	}
 	return nil, fmt.Errorf("tpmenroll: /nonce failed after %d attempts: %w", c.nonceRetry.MaxAttempts, lastErr)
@@ -264,10 +259,13 @@ func (c *Client) doPost(ctx context.Context, suffix string, payload []byte) (int
 	return resp.StatusCode, body, nil
 }
 
-// isTransient: a transport error, 429, or 5xx is retryable; 4xx (incl. the
-// uniform-403 deny) is terminal.
+// isTransient: a transport error, 408 (proxy/edge timeout), 429, or 5xx is
+// retryable; other 4xx (incl. the backend's uniform-403 deny) is terminal.
 func isTransient(status int, netErr error) bool {
-	return netErr != nil || status == http.StatusTooManyRequests || status >= 500
+	return netErr != nil ||
+		status == http.StatusRequestTimeout ||
+		status == http.StatusTooManyRequests ||
+		status >= 500
 }
 
 // backoffDelay is capped exponential: BaseBackoff * 2^(attempt-1), clamped to MaxBackoff.
