@@ -32,6 +32,8 @@ const (
 
 	ncryptPadPKCS1Flag = 0x2 // NCRYPT_PAD_PKCS1_FLAG
 	ncryptPadPSSFlag   = 0x8 // NCRYPT_PAD_PSS_FLAG
+
+	ncryptAlgorithmProperty = "Algorithm Name" // NCRYPT_ALGORITHM_PROPERTY
 )
 
 var (
@@ -41,6 +43,7 @@ var (
 	procAcquire = crypt32Mod.NewProc("CryptAcquireCertificatePrivateKey")
 	procSign    = ncryptMod.NewProc("NCryptSignHash")
 	procFreeObj = ncryptMod.NewProc("NCryptFreeObject")
+	procGetProp = ncryptMod.NewProc("NCryptGetProperty")
 	procRelCtx  = advapi32Mod.NewProc("CryptReleaseContext")
 )
 
@@ -174,16 +177,45 @@ func acquireSigner(ctx *windows.CertContext, pub crypto.PublicKey) (crypto.Signe
 	if r == 0 {
 		return nil, fmt.Errorf("CryptAcquireCertificatePrivateKey: %w", err)
 	}
+	ncryptProbeOK := false
 	if keySpec != certNCryptKeySpec {
+		ncryptProbeOK = ncryptHandleUsable(kh)
+	}
+	if !acquireResultIsNCrypt(keySpec, ncryptProbeOK) {
 		// Legacy CSP handle (HCRYPTPROV). We only support CNG/NCrypt keys;
 		// release per the ownership contract before rejecting.
 		if callerFree != 0 && kh != 0 {
 			_, _, _ = procRelCtx.Call(kh, 0) // CryptReleaseContext(hProv, 0)
 		}
-		return nil, errors.New("acquired key is a legacy CSP key, not CNG/NCrypt")
+		return nil, fmt.Errorf("acquired key is a legacy CSP key, not CNG/NCrypt (keySpec=0x%x)", keySpec)
 	}
 	// The signer takes ownership of the NCrypt key handle (freed only when
 	// callerFree) and retains the cert context for process lifetime. See
 	// cngSigner doc.
 	return &cngSigner{handle: kh, callerFree: callerFree != 0, ctx: ctx, pub: pub}, nil
+}
+
+func acquireResultIsNCrypt(keySpec uint32, ncryptProbeOK bool) bool {
+	return keySpec == certNCryptKeySpec || ncryptProbeOK
+}
+
+func ncryptHandleUsable(handle uintptr) bool {
+	if handle == 0 {
+		return false
+	}
+	prop, err := windows.UTF16PtrFromString(ncryptAlgorithmProperty)
+	if err != nil {
+		return false
+	}
+	buf := make([]byte, 512)
+	var size uint32
+	r, _, _ := procGetProp.Call(
+		handle,
+		uintptr(unsafe.Pointer(prop)),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)),
+		uintptr(unsafe.Pointer(&size)),
+		0,
+	)
+	return r == 0 && size > 0
 }
