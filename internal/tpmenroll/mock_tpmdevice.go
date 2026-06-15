@@ -38,7 +38,10 @@ func NewMockTPMDevice() (*MockTPMDevice, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tpmenroll: mock AK: %w", err)
 	}
-	deviceKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	// Device key is RSA-3072: the backend V12 DEVICE/CSR floor is RSA-3072+ (strict,
+	// our-policy), unlike the EK/AK 2048 floor (manufacturer-constrained). A 2048
+	// device key would be rejected at /attest.
+	deviceKey, err := rsa.GenerateKey(rand.Reader, 3072)
 	if err != nil {
 		return nil, fmt.Errorf("tpmenroll: mock device key: %w", err)
 	}
