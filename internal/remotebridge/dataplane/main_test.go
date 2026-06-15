@@ -1,28 +1,76 @@
 package dataplane
 
 import (
+	"context"
+	"encoding/hex"
 	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
-// captureOutFlag, when present in os.Args as "--dpcapture-out=<path>", switches
-// the test binary into capture-HELPER mode: it grabs ONE VIEW_ONLY frame and
-// writes the encoded PNG to <path>, then exits — it does NOT run the test suite.
-// The real-pixel gold-proof launches THIS binary (via the session-launcher) in
-// the interactive session with that flag, so the capture runs where GDI can read
-// the real desktop. The signal is a command-line ARG, not an env var, because
+// Helper-mode flags switch the test binary out of the suite into a capture
+// helper, so the real-pixel / streaming gold-proofs can launch THIS binary (via
+// the session-launcher) in the interactive session where GDI can read the real
+// desktop. Signals are command-line ARGS, not env vars, because
 // CreateProcessAsUser hands the helper the USER's environment block (not ours).
-const captureOutFlag = "--dpcapture-out="
+//
+//	--dpcapture-out=<path>      one-shot: capture ONE frame → write PNG to <path>
+//	--dppipe-client=<pipename>  stream: dial the pipe, handshake, stream frames
+//	--dppipe-nonce=<hex>        the launch nonce for the stream handshake
+const (
+	captureOutFlag = "--dpcapture-out="
+	pipeClientFlag = "--dppipe-client="
+	pipeNonceFlag  = "--dppipe-nonce="
+)
 
 func TestMain(m *testing.M) {
+	var pipeName, pipeNonce string
 	for _, a := range os.Args[1:] {
-		if strings.HasPrefix(a, captureOutFlag) {
+		switch {
+		case strings.HasPrefix(a, captureOutFlag):
 			os.Exit(runCaptureHelper(strings.TrimPrefix(a, captureOutFlag)))
+		case strings.HasPrefix(a, pipeClientFlag):
+			pipeName = strings.TrimPrefix(a, pipeClientFlag)
+		case strings.HasPrefix(a, pipeNonceFlag):
+			pipeNonce = strings.TrimPrefix(a, pipeNonceFlag)
 		}
 	}
+	if pipeName != "" {
+		os.Exit(runStreamHelper(pipeName, pipeNonce))
+	}
 	os.Exit(m.Run())
+}
+
+// runStreamHelper dials the secured pipe, sends the launch-nonce handshake, then
+// streams a few captured VIEW_ONLY frames and a graceful EOF. Returns a process
+// exit code (0 = ok). Runs in the interactive session (the launcher placed it).
+func runStreamHelper(pipeName, nonceHex string) int {
+	nonce, err := hex.DecodeString(nonceHex)
+	if err != nil || len(nonce) != ipcNonceLen {
+		return 5
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := DialAndHandshake(ctx, pipeName, nonce)
+	if err != nil {
+		return 6
+	}
+	defer func() { _ = conn.Close() }()
+	p := NewWindowsFrameProducer(NewPNGEncoder(), 50*time.Millisecond, 3)
+	defer func() { _ = p.Close() }()
+	for i := 0; i < 2; i++ {
+		f, ok := p.Next()
+		if !ok {
+			return 7
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := WriteFrame(conn, f.Payload); err != nil {
+			return 8
+		}
+	}
+	_ = WriteEOF(conn)
+	return 0
 }
 
 // runCaptureHelper captures one frame and writes its encoded bytes to outPath.
