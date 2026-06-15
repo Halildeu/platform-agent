@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -124,6 +125,7 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 		chosenLeaf            *x509.Certificate
 		chosenCtx             *windows.CertContext
 		chosenKey             crypto.Signer
+		attemptErrors         []string
 		cleanupRankedContexts = true
 	)
 	defer func() {
@@ -143,6 +145,10 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 			chosenLeaf, chosenCtx, chosenKey = rc.leaf, rc.ctx, signer
 			break
 		}
+		if err != nil {
+			attemptErrors = append(attemptErrors, fmt.Sprintf("subject=%q thumbprint_sha1=%s: %v",
+				rc.leaf.Subject.String(), autoenroll.ThumbprintSHA1Hex(rc.leaf), err))
+		}
 		// Log via stderr-style hint embedded in error: the autoenroll
 		// runner reads only the final returned error, but operators
 		// running --dry-run on the box see this chain when stepping
@@ -150,6 +156,10 @@ func (p *Provider) LoadEligibleCert(ctx context.Context, filter autoenroll.CertF
 		// (We do not return here; we try the next candidate.)
 	}
 	if chosenLeaf == nil || chosenKey == nil {
+		if len(attemptErrors) > 0 {
+			return autoenroll.CertMaterial{}, fmt.Errorf("%w: no eligible cert had an acquireable CNG signer (%s)",
+				autoenroll.ErrNoCertMatch, strings.Join(attemptErrors, "; "))
+		}
 		return autoenroll.CertMaterial{}, fmt.Errorf("%w: no eligible cert had an acquireable CNG signer",
 			autoenroll.ErrNoCertMatch)
 	}

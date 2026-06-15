@@ -42,6 +42,55 @@ func TestAcquireFlagsPreferNCryptNoCache(t *testing.T) {
 	}
 }
 
+func TestAcquireResultIsNCrypt_AllowsATNoneWhenHandleProbesAsNCrypt(t *testing.T) {
+	tests := []struct {
+		name          string
+		keySpec       uint32
+		ncryptProbeOK bool
+		want          bool
+	}{
+		{
+			name:          "canonical NCrypt key spec",
+			keySpec:       certNCryptKeySpec,
+			ncryptProbeOK: false,
+			want:          true,
+		},
+		{
+			name:          "AD CS CNG template reports AT_NONE but handle is NCrypt",
+			keySpec:       0,
+			ncryptProbeOK: true,
+			want:          true,
+		},
+		{
+			name:          "AT_NONE without NCrypt handle probe stays unsupported",
+			keySpec:       0,
+			ncryptProbeOK: false,
+			want:          false,
+		},
+		{
+			name:          "legacy AT_KEYEXCHANGE without NCrypt probe stays unsupported",
+			keySpec:       1,
+			ncryptProbeOK: false,
+			want:          false,
+		},
+		{
+			name:          "noncanonical key spec is allowed only when handle probes as NCrypt",
+			keySpec:       1,
+			ncryptProbeOK: true,
+			want:          true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := acquireResultIsNCrypt(tt.keySpec, tt.ncryptProbeOK); got != tt.want {
+				t.Fatalf("acquireResultIsNCrypt(0x%x, %v) = %v, want %v",
+					tt.keySpec, tt.ncryptProbeOK, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCngSignerCloseDoesNotFreeCertContext(t *testing.T) {
 	// Regression for #165: dry-run cleanup crashed inside
 	// CertFreeCertificateContext. Close must not invoke that API; the
