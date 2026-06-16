@@ -24,6 +24,10 @@ const (
 	// version. (Restored from the device-bound permit.Verifier reference; the
 	// lean operation.Verifier had dropped it.)
 	permitVersionPinned int32 = 1
+	// MaxPermitValidityMillis caps one broker-issued operation permit at 15 minutes. The broker should issue
+	// much shorter permits for attended sessions; this agent-side ceiling makes TTL a local fail-closed guard
+	// even if a broker bug signs an over-broad window.
+	MaxPermitValidityMillis int64 = 15 * 60 * 1000
 )
 
 // OperationPermit mirrors the broker's signed OperationPermit (broker-private / agent-public). The agent only
@@ -76,6 +80,7 @@ func (p OperationPermit) canonicalPayload() []byte {
 func (p OperationPermit) IsFresh(nowEpochMillis int64) bool {
 	return p.IssuedAtEpochMillis > 0 && p.ExpiresAtEpochMillis > 0 &&
 		p.IssuedAtEpochMillis < p.ExpiresAtEpochMillis &&
+		p.ExpiresAtEpochMillis-p.IssuedAtEpochMillis <= MaxPermitValidityMillis &&
 		nowEpochMillis >= p.IssuedAtEpochMillis && nowEpochMillis < p.ExpiresAtEpochMillis
 }
 

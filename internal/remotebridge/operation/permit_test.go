@@ -181,6 +181,7 @@ func TestIsFreshGuards(t *testing.T) {
 		{IssuedAtEpochMillis: -5, ExpiresAtEpochMillis: 1300},   // negative issued
 		{IssuedAtEpochMillis: 1300, ExpiresAtEpochMillis: 1000}, // inverted
 		{IssuedAtEpochMillis: 1200, ExpiresAtEpochMillis: 1200}, // degenerate
+		{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1000 + MaxPermitValidityMillis + 1},
 	}
 	for i, p := range bad {
 		if p.IsFresh(1100) {

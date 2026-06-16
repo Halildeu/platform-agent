@@ -82,6 +82,12 @@ type Config struct {
 	// documented. The default is TLS with system roots; real mTLS client
 	// identity is T-4.
 	InsecurePlaintext bool
+	// TLSConfig optionally overrides the client TLS configuration used for the
+	// broker connection. When PTYDispatcher is configured for real network use,
+	// this MUST include client certificate material (Certificates or
+	// GetClientCertificate), making operation-capable remote-ops outbound mTLS
+	// rather than server-auth-only TLS. InsecureSkipVerify is always rejected.
+	TLSConfig *tls.Config
 	// FirstHeartbeatDeadline bounds how long a fresh stream may stay silent
 	// before the harness treats the connection as dead (default 15s).
 	FirstHeartbeatDeadline time.Duration
@@ -178,6 +184,17 @@ func New(cfg Config, logger *log.Logger) (*Harness, error) {
 	if cfg.Dialer == nil && cfg.InsecurePlaintext && !isLoopbackBrokerAddr(cfg.BrokerAddr) {
 		return nil, fmt.Errorf("remote-bridge harness refuses insecure plaintext to non-loopback broker %q "+
 			"(insecure plaintext is lab/loopback only; use TLS for any remote broker)", cfg.BrokerAddr)
+	}
+	if cfg.Dialer == nil && cfg.TLSConfig != nil && cfg.TLSConfig.InsecureSkipVerify {
+		return nil, errors.New("remote-bridge harness refuses TLS config with InsecureSkipVerify")
+	}
+	if cfg.Dialer == nil && cfg.PTYDispatcher != nil {
+		if cfg.InsecurePlaintext {
+			return nil, errors.New("remote-bridge operation dispatch requires TLS/mTLS; plaintext dispatch is test-only")
+		}
+		if !hasClientCertificateMaterial(cfg.TLSConfig) {
+			return nil, errors.New("remote-bridge operation dispatch requires outbound mTLS client certificate")
+		}
 	}
 	if cfg.DeviceIDProvider == nil {
 		return nil, errors.New("remote-bridge harness requires a device id provider")
@@ -369,7 +386,17 @@ func (h *Harness) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	if h.cfg.Dialer != nil {
 		return h.cfg.Dialer(ctx)
 	}
-	creds := credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if h.cfg.TLSConfig != nil {
+		tlsConfig = h.cfg.TLSConfig.Clone()
+		if tlsConfig.MinVersion == 0 {
+			tlsConfig.MinVersion = tls.VersionTLS12
+		}
+	}
+	if tlsConfig.InsecureSkipVerify {
+		return nil, errors.New("remote-bridge refuses TLS config with InsecureSkipVerify")
+	}
+	creds := credentials.NewTLS(tlsConfig)
 	if h.cfg.InsecurePlaintext {
 		// Defense-in-depth (Codex review): New already refuses InsecurePlaintext
 		// to a non-loopback broker, but re-assert at the actual transport point
@@ -385,6 +412,10 @@ func (h *Harness) dial(ctx context.Context) (*grpc.ClientConn, error) {
 		grpc.WithTransportCredentials(creds),
 		grpc.WithConnectParams(grpc.ConnectParams{MinConnectTimeout: h.cfg.DialTimeout}),
 	)
+}
+
+func hasClientCertificateMaterial(cfg *tls.Config) bool {
+	return cfg != nil && (len(cfg.Certificates) > 0 || cfg.GetClientCertificate != nil)
 }
 
 type inboundAction int
