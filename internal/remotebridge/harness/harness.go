@@ -350,7 +350,7 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 					_ = stream.CloseSend()
 					return healthy, fmt.Errorf("protocol defect: %s", derr.Error())
 				}
-				go h.dispatchOperation(sctx, conn, permit, commandLine, sender)
+				go h.dispatchOperation(sctx, conn, permit, commandLine, deviceID, sender)
 			case actionDefectClose:
 				h.mu.Lock()
 				h.defects++
