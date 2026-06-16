@@ -46,11 +46,11 @@ var (
 	ErrArgMalformed         = errors.New("ptyexec: malformed argument token")
 )
 
-// Mirror of broker PtyArgumentPolicy constants.
-const (
-	argMaxLine     = 4096 // broker MAX_LINE — bound the total argument size (DoS / repeated-flag guard)
-	argMaxValueLen = 64   // broker MAX_VALUE_LEN — caps EVERY token (flag, value, operand)
-)
+// argMaxValueLen mirrors broker PtyArgumentPolicy.MAX_VALUE_LEN — caps EVERY token (flag, value, operand).
+// (Broker MAX_LINE, the whole-RAW-line bound, is NOT here: it belongs to the agent's "decide" equivalent —
+// operation.Authorizer, which holds the raw commandLine — exactly as the broker checks MAX_LINE in decide()
+// and NOT in evaluate(). See operation.MaxCommandLine.)
+const argMaxValueLen = 64
 
 var (
 	// broker HOST = ^[A-Za-z0-9._:-]{1,253}$ (IPv4 / IPv6 / DNS; tighter than the D-2 whole-line class). In
@@ -123,20 +123,11 @@ type argCommandSpec struct {
 
 // evaluate mirrors broker PtyArgumentPolicy.evaluate(spec, args) exactly: one pass, flags then operands,
 // default-deny. `args` is the argv AFTER the command (operation.CanonicalCommand.Argv) — the SAME list the
-// broker's evaluate receives. Total; never panics; anything not provably in-policy is denied.
+// broker's evaluate receives. Total; never panics; anything not provably in-policy is denied. Like the
+// broker's evaluate(), it does NOT bound the whole-line length — that is the raw-line MAX_LINE guard the
+// broker performs in decide() and the agent performs in operation.Authorizer (the layer holding the raw
+// commandLine). evaluate only enforces the per-token cap + the flag/value/operand grammar.
 func (s argCommandSpec) evaluate(args []string) error {
-	// Mirror broker decide()'s MAX_LINE guard at the argv level: bound the total argument size so a
-	// signed-but-pathological argv (e.g. a valueless flag repeated thousands of times — each per-flag check
-	// would otherwise pass) cannot slip a command past the agent that the broker's own MAX_LINE check would
-	// have refused. Conservatively bounds the args portion (argv[0] is a short allowlisted name). Fail-closed.
-	total := 0
-	for _, a := range args {
-		total += len(a) + 1 // token + its separating space (broker reconstructs the line by split(" +"))
-		if total > argMaxLine {
-			return ErrArgMalformed
-		}
-	}
-
 	operandCount := 0
 	for i := 0; i < len(args); i++ {
 		tok := args[i]

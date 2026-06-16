@@ -30,11 +30,19 @@ func eqStrings(a, b []string) bool {
 	return true
 }
 
-// TestPilotArgPolicyParity is the cross-repo DRIFT GUARD: it re-states the broker PtyArgumentPolicy
-// PILOT_DEFAULT_POLICY values explicitly (the authoritative endpoint-admin-service table) and asserts the
-// agent mirror equals them. If either side changes (the broker widens a range, the agent drops a forbidden
-// flag), this test must be updated deliberately — divergence is never silent. The agent set is the broker
-// pilot set MINUS the shell-only `ver`.
+// TestPilotArgPolicyParity is the DRIFT GUARD. It re-states the broker PtyArgumentPolicy PILOT_DEFAULT_POLICY
+// values explicitly (the authoritative endpoint-admin-service table) and asserts the agent mirror equals them
+// EXHAUSTIVELY — exact valueless-flag set, exact value-flag KEY set, exact forbidden set, exact enum
+// membership (size + contents), exact ranges, exact operand rule + max. The exhaustiveness matters: it
+// catches an agent-side WIDENING (an extra flag/value-flag/enum value — the broker-compromise-bypass
+// direction), not just a narrowing.
+//
+// SCOPE of the guard (honest): the broker repo is not present here, so this CANNOT auto-detect a broker-side
+// change — it pins the AGENT side to the re-stated broker values, so any agent edit must update this test
+// deliberately, and a reviewer comparing this table to the broker on a broker-side change sees the divergence.
+// A fully automatic cross-repo guard (a committed broker-emitted policy golden vector, like the existing
+// cross-language pty-permit-vector.json) is the permanent follow-up (PR #201 follow-up 2). The agent set is
+// the broker pilot set MINUS the shell-only `ver`.
 func TestPilotArgPolicyParity(t *testing.T) {
 	p := pilotArgPolicies()
 
@@ -48,44 +56,56 @@ func TestPilotArgPolicyParity(t *testing.T) {
 		t.Fatalf("pilot policy commands = %v, want %v (broker pilot set minus shell-only `ver`)", gotCommands, wantCommands)
 	}
 
-	// hostname — no flags, no operand.
+	// hostname — no flags, no value-flags, no forbidden, no operand.
 	if s := p["hostname"]; len(s.valuelessFlags) != 0 || len(s.valueFlags) != 0 || len(s.forbiddenFlags) != 0 ||
 		s.operandRule != operandNone || s.maxOperands != 0 {
 		t.Errorf("hostname spec drifted: %+v", s)
 	}
 
-	// whoami — 8 valueless identity flags + /fo {csv,table,list}; no operand.
+	// whoami — 8 valueless identity flags; value-flags EXACTLY {/fo} with enum EXACTLY {csv,table,list}; no
+	// forbidden; no operand.
 	whoami := p["whoami"]
 	if !eqStrings(sortedKeys(whoami.valuelessFlags), []string{"/all", "/fqdn", "/groups", "/logonid", "/nh", "/priv", "/upn", "/user"}) {
 		t.Errorf("whoami valueless flags drifted: %v", sortedKeys(whoami.valuelessFlags))
 	}
-	if fo, ok := whoami.valueFlags["/fo"]; !ok || fo.integer || !fo.accepts("csv") || !fo.accepts("table") ||
-		!fo.accepts("list") || fo.accepts("xml") {
-		t.Errorf("whoami /fo enum drifted: %+v", fo)
+	if !eqStrings(valueFlagKeys(whoami), []string{"/fo"}) {
+		t.Errorf("whoami value-flag keys drifted: %v", valueFlagKeys(whoami))
+	}
+	assertEnumExactly(t, whoami, "/fo", "csv", "table", "list")
+	if len(whoami.forbiddenFlags) != 0 {
+		t.Errorf("whoami must have no forbidden flags: %v", sortedKeys(whoami.forbiddenFlags))
 	}
 	if whoami.operandRule != operandNone {
 		t.Errorf("whoami must take no operand, got rule %v", whoami.operandRule)
 	}
 
-	// netstat — closed flag set; -p enum; NO operand (refresh-interval closed).
+	// netstat — closed valueless set; value-flags EXACTLY {-p} with enum EXACTLY the 8 protocols; no
+	// forbidden; NO operand (refresh-interval loop closed).
 	netstat := p["netstat"]
 	if !eqStrings(sortedKeys(netstat.valuelessFlags), []string{"-a", "-b", "-e", "-f", "-n", "-o", "-q", "-r", "-s", "-y"}) {
 		t.Errorf("netstat valueless flags drifted: %v", sortedKeys(netstat.valuelessFlags))
 	}
-	if pf, ok := netstat.valueFlags["-p"]; !ok || !pf.accepts("tcp") || !pf.accepts("udpv6") || pf.accepts("sctp") {
-		t.Errorf("netstat -p enum drifted: %+v", pf)
+	if !eqStrings(valueFlagKeys(netstat), []string{"-p"}) {
+		t.Errorf("netstat value-flag keys drifted: %v", valueFlagKeys(netstat))
+	}
+	assertEnumExactly(t, netstat, "-p", "tcp", "udp", "tcpv6", "udpv6", "ip", "ipv6", "icmp", "icmpv6")
+	if len(netstat.forbiddenFlags) != 0 {
+		t.Errorf("netstat must have no forbidden flags: %v", sortedKeys(netstat.forbiddenFlags))
 	}
 	if netstat.operandRule != operandNone {
 		t.Errorf("netstat must take no operand (refresh interval closed), got rule %v", netstat.operandRule)
 	}
 
-	// ping — -t FORBIDDEN; -n[1,10] -w[1,60000] -l[1,8192] -i[1,255]; one required host.
+	// ping — forbidden EXACTLY {-t}; valueless {-a,-4,-6,-f}; value-flags EXACTLY {-n,-w,-l,-i}; one required host.
 	ping := p["ping"]
-	if _, forbidden := ping.forbiddenFlags["-t"]; !forbidden {
-		t.Error("ping must FORBID -t (infinite ping)")
+	if !eqStrings(sortedKeys(ping.forbiddenFlags), []string{"-t"}) {
+		t.Errorf("ping forbidden flags must be exactly {-t}: %v", sortedKeys(ping.forbiddenFlags))
 	}
 	if !eqStrings(sortedKeys(ping.valuelessFlags), []string{"-4", "-6", "-a", "-f"}) {
 		t.Errorf("ping valueless flags drifted: %v", sortedKeys(ping.valuelessFlags))
+	}
+	if !eqStrings(valueFlagKeys(ping), []string{"-i", "-l", "-n", "-w"}) {
+		t.Errorf("ping value-flag keys drifted: %v", valueFlagKeys(ping))
 	}
 	assertIntRange(t, ping, "-n", 1, 10)
 	assertIntRange(t, ping, "-w", 1, 60000)
@@ -95,15 +115,53 @@ func TestPilotArgPolicyParity(t *testing.T) {
 		t.Errorf("ping must require exactly one host operand, got rule=%v max=%d", ping.operandRule, ping.maxOperands)
 	}
 
-	// tracert — -d/-4/-6; -h[1,255] -w[1,60000]; one required host.
+	// tracert — valueless {-d,-4,-6}; value-flags EXACTLY {-h,-w}; no forbidden; one required host.
 	tracert := p["tracert"]
 	if !eqStrings(sortedKeys(tracert.valuelessFlags), []string{"-4", "-6", "-d"}) {
 		t.Errorf("tracert valueless flags drifted: %v", sortedKeys(tracert.valuelessFlags))
 	}
+	if !eqStrings(valueFlagKeys(tracert), []string{"-h", "-w"}) {
+		t.Errorf("tracert value-flag keys drifted: %v", valueFlagKeys(tracert))
+	}
 	assertIntRange(t, tracert, "-h", 1, 255)
 	assertIntRange(t, tracert, "-w", 1, 60000)
+	if len(tracert.forbiddenFlags) != 0 {
+		t.Errorf("tracert must have no forbidden flags: %v", sortedKeys(tracert.forbiddenFlags))
+	}
 	if tracert.operandRule != operandRequiredHost || tracert.maxOperands != 1 {
 		t.Errorf("tracert must require exactly one host operand, got rule=%v max=%d", tracert.operandRule, tracert.maxOperands)
+	}
+}
+
+// valueFlagKeys returns the sorted value-flag keys of a spec (for exact-set drift comparison).
+func valueFlagKeys(s argCommandSpec) []string {
+	out := make([]string, 0, len(s.valueFlags))
+	for k := range s.valueFlags {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// assertEnumExactly checks an enum value-flag accepts EXACTLY the given members (size + each) and nothing
+// else of a known-foreign token — catching an agent-side enum WIDENING.
+func assertEnumExactly(t *testing.T, s argCommandSpec, flag string, members ...string) {
+	t.Helper()
+	vs, ok := s.valueFlags[flag]
+	if !ok || vs.integer {
+		t.Errorf("%s must be an enum value flag, got %+v (ok=%v)", flag, vs, ok)
+		return
+	}
+	if len(vs.enum) != len(members) {
+		t.Errorf("%s enum size = %d, want %d (%v)", flag, len(vs.enum), len(members), members)
+	}
+	for _, m := range members {
+		if !vs.accepts(m) {
+			t.Errorf("%s enum must accept %q", flag, m)
+		}
+	}
+	if vs.accepts("__not_a_member__") {
+		t.Errorf("%s enum must reject a foreign token", flag)
 	}
 }
 
@@ -264,9 +322,11 @@ func TestArgPolicyOperandOptionalHost(t *testing.T) {
 	}
 }
 
-// TestArgPolicyTokenAndLineCaps — a token over MAX_VALUE_LEN and an argv over MAX_LINE both fail-closed as
-// malformed (the latter guards a signed-but-pathological repeated-flag argv under broker-compromise).
-func TestArgPolicyTokenAndLineCaps(t *testing.T) {
+// TestArgPolicyTokenCap — a token over MAX_VALUE_LEN fails-closed as malformed, capped before the HOST
+// pattern is even consulted (exactly the broker evaluate() top-of-loop order). The whole-LINE bound
+// (broker MAX_LINE) is NOT evaluate()'s job — it is the gate's raw-line guard (operation.MaxCommandLine,
+// covered in operation/gate_test.go); evaluate() mirrors broker evaluate(), which has no line-length check.
+func TestArgPolicyTokenCap(t *testing.T) {
 	ping := pilotArgPolicies()["ping"]
 
 	longHost := make([]byte, argMaxValueLen+1)
@@ -277,14 +337,16 @@ func TestArgPolicyTokenAndLineCaps(t *testing.T) {
 		t.Errorf("a >MAX_VALUE_LEN token must be malformed (capped before the host pattern): %v", err)
 	}
 
-	// many repeated valueless flags (each individually valid) must trip the MAX_LINE bound.
+	// evaluate() itself does NOT bound the line length: many repeated valueless flags (each individually
+	// valid) + a host are accepted HERE; the over-long-line refusal is the gate's (broker decide() vs
+	// evaluate() split). This asserts the faithful decomposition — not a regression.
 	many := make([]string, 0, 2100)
-	for i := 0; i < 2100; i++ { // 2100 * len("-a"+space)=3 ≈ 6300 bytes > 4096
+	for i := 0; i < 2100; i++ {
 		many = append(many, "-a")
 	}
 	many = append(many, "8.8.8.8")
-	if err := ping.evaluate(many); !errors.Is(err, ErrArgMalformed) {
-		t.Errorf("a >MAX_LINE repeated-flag argv must be malformed: %v", err)
+	if err := ping.evaluate(many); err != nil {
+		t.Errorf("evaluate() must NOT enforce a line bound (that is the gate's MaxCommandLine job): %v", err)
 	}
 }
 

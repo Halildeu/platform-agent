@@ -17,11 +17,20 @@ type Decision struct {
 const (
 	ReasonPermitInvalid    = "permit-invalid"     // signature/kid/alg/freshness failed, or no verifier
 	ReasonCapabilityNotPTY = "capability-not-pty" // the permit does not grant CONSTRAINED_PTY
+	ReasonCommandTooLong   = "command-too-long"   // raw commandLine exceeds MaxCommandLine (broker MAX_LINE)
 	ReasonEmptyCommand     = "empty-command"      // the command canonicalises to empty (no command)
 	ReasonCommandMismatch  = "command-mismatch"   // hash(command) != the permit's commandHash
 	ReasonSeqInvalid       = "seq-invalid"        // permit seq <= 0 (malformed; broker seq starts >= 1)
 	ReasonSeqReplay        = "seq-replay"         // permit seq <= the last accepted seq for its session
 )
+
+// MaxCommandLine mirrors broker PtyArgumentPolicy.MAX_LINE: the agent's "decide" layer (this gate, which
+// holds the raw commandLine) bounds the whole RAW line exactly as the broker's decide() does BEFORE
+// tokenising — the per-token + per-argument grammar is then enforced downstream (ptyexec arg policy,
+// mirroring broker evaluate()). len() is a BYTE count; Java String.length() is UTF-16 code units. For the
+// ASCII command surface the D-2 guard already enforces these coincide, and for any multi-byte input the byte
+// count is >= the code-unit count, so the agent is stricter-or-equal — never more permissive — here.
+const MaxCommandLine = 4096
 
 // Authorizer is the agent-side CONSTRAINED_PTY execution gate: it admits a command ONLY against a valid,
 // fresh, broker-signed permit that grants the CONSTRAINED_PTY capability for exactly that (canonicalised)
@@ -62,6 +71,14 @@ func (a *Authorizer) Authorize(permit OperationPermit, commandLine string, nowEp
 	}
 	if permit.Capability != CapabilityConstrainedPTY {
 		return Decision{Reason: ReasonCapabilityNotPTY}
+	}
+	// Bound the RAW line before parsing it — mirrors broker PtyArgumentPolicy.decide()'s MAX_LINE check
+	// (the broker tests the whole line, including extra whitespace, before tokenising). Placed after the
+	// permit verifies (don't process input for an unverified permit) but before ParseCommand, so a
+	// signed-but-pathological over-long line is refused at this layer rather than only its per-argument
+	// fragments downstream. Fail-closed.
+	if len(commandLine) > MaxCommandLine {
+		return Decision{Reason: ReasonCommandTooLong}
 	}
 	cmd := ParseCommand(commandLine)
 	if cmd.IsEmpty() {
