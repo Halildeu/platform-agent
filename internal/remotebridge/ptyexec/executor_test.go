@@ -45,7 +45,7 @@ func loadExecVector(t *testing.T) (operation.OperationPermit, *operation.Verifie
 	if err := json.Unmarshal(permitVectorJSON, &v); err != nil {
 		t.Fatalf("parse embedded vector: %v", err)
 	}
-	ver, err := operation.NewVerifier(v.BrokerPublicKeyB64, v.Kid)
+	ver, err := operation.NewVerifier(v.BrokerPublicKeyB64, v.Kid, v.DeviceID)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}

@@ -69,7 +69,7 @@ func TestCanonicalPayloadByteExactWithBrokerVector(t *testing.T) {
 // (2) the broker's real ECDSA signature verifies under the broker's real public key.
 func TestVerifyAcceptsBrokerSignedVector(t *testing.T) {
 	v := loadVector(t)
-	ver, err := NewVerifier(v.BrokerPublicKeyB64, v.Kid)
+	ver, err := NewVerifier(v.BrokerPublicKeyB64, v.Kid, v.DeviceID)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestCommandHashByteExactWithBrokerVector(t *testing.T) {
 // fail-closed: every mutation of an otherwise-valid permit must be rejected.
 func TestVerifyFailClosed(t *testing.T) {
 	v := loadVector(t)
-	ver, err := NewVerifier(v.BrokerPublicKeyB64, v.Kid)
+	ver, err := NewVerifier(v.BrokerPublicKeyB64, v.Kid, v.DeviceID)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
@@ -118,6 +118,8 @@ func TestVerifyFailClosed(t *testing.T) {
 		{"tampered capability", freshNow, func(p *OperationPermit) { p.Capability = "FULL_RDP" }},
 		{"tampered commandHash", freshNow, func(p *OperationPermit) { p.CommandHash = "00" + p.CommandHash[2:] }},
 		{"tampered seq", freshNow, func(p *OperationPermit) { p.Seq = p.Seq + 1 }},
+		{"tampered deviceId", freshNow, func(p *OperationPermit) { p.DeviceID = "dev-EVIL" }},
+		{"wrong permitVersion", freshNow, func(p *OperationPermit) { p.PermitVersion = 2 }},
 		{"degenerate window (issued==expires)", freshNow, func(p *OperationPermit) {
 			p.IssuedAtEpochMillis = 1200
 			p.ExpiresAtEpochMillis = 1200
@@ -137,7 +139,7 @@ func TestVerifyRejectsForeignKey(t *testing.T) {
 	v := loadVector(t)
 	// a syntactically-valid but WRONG P-256 SPKI key (different keypair) must reject the real signature.
 	const foreignKeyB64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEqGT9p8dN2sQ4u1m1pVPiQ0H1k3xkY1f9oFqkq0d5Yk0r1tq0t8e7zj0bqkq6r6q0gq9c0o2p4u6w8x0z2A4C6E8g=="
-	ver, err := NewVerifier(foreignKeyB64, v.Kid)
+	ver, err := NewVerifier(foreignKeyB64, v.Kid, v.DeviceID)
 	if err != nil {
 		t.Skipf("foreign key not parseable in this build (%v) — covered by the tamper cases", err)
 	}
@@ -167,13 +169,16 @@ func TestIsFreshGuards(t *testing.T) {
 
 func TestNewVerifierFailClosed(t *testing.T) {
 	v := loadVector(t)
-	if _, err := NewVerifier(v.BrokerPublicKeyB64, ""); err == nil {
+	if _, err := NewVerifier(v.BrokerPublicKeyB64, "", v.DeviceID); err == nil {
 		t.Error("blank kid must error")
 	}
-	if _, err := NewVerifier("!!!notb64!!!", "kid-1"); err == nil {
+	if _, err := NewVerifier(v.BrokerPublicKeyB64, v.Kid, ""); err == nil {
+		t.Error("blank deviceID must error (a blank device binding would silently disable the check)")
+	}
+	if _, err := NewVerifier("!!!notb64!!!", "kid-1", "dev-x"); err == nil {
 		t.Error("non-base64 key must error")
 	}
-	if _, err := NewVerifier("YWJjZGVm", "kid-1"); err == nil { // valid base64, not an SPKI key
+	if _, err := NewVerifier("YWJjZGVm", "kid-1", "dev-x"); err == nil { // valid base64, not an SPKI key
 		t.Error("non-SPKI key must error")
 	}
 }
