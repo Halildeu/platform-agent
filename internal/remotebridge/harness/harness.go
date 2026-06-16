@@ -99,7 +99,10 @@ type Config struct {
 	// DialTimeout caps a single transport connect attempt (default 10s).
 	DialTimeout time.Duration
 	// Dialer overrides the gRPC connection factory (bufconn test seam). When
-	// set, BrokerAddr is not required.
+	// set, BrokerAddr is not required AND the insecure-plaintext loopback guard
+	// is bypassed (in-process, no real network). MUST remain test/in-process
+	// only — production wiring (internal/app) never sets it; a real-network
+	// Dialer would inherit this bypass.
 	Dialer func(ctx context.Context) (*grpc.ClientConn, error)
 	// PTYDispatcher, when non-nil, ENABLES CONSTRAINED_PTY operation handling:
 	// an inbound operation_dispatch is decoded + executed + its output streamed
@@ -191,7 +194,10 @@ func New(cfg Config, logger *log.Logger) (*Harness, error) {
 // could resolve to a different host at dial time — TOCTOU): the literal
 // "localhost" or an IP that parses as loopback. A hostname or a non-loopback
 // IP is rejected (fail-closed), mirroring the broker's server-side
-// non-loopback-plaintext refusal.
+// non-loopback-plaintext refusal. NOTE (Codex review): the literal "localhost"
+// is accepted for lab ergonomics; it resolves via the local resolver at dial
+// time, so a hosts-file-poisoned "localhost" is a theoretical bypass — a
+// stricter posture (post-pilot) would accept only IP literals.
 func isLoopbackBrokerAddr(addr string) bool {
 	addr = strings.TrimSpace(addr)
 	host, _, err := net.SplitHostPort(addr)
@@ -365,6 +371,14 @@ func (h *Harness) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	}
 	creds := credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
 	if h.cfg.InsecurePlaintext {
+		// Defense-in-depth (Codex review): New already refuses InsecurePlaintext
+		// to a non-loopback broker, but re-assert at the actual transport point
+		// so the no-cleartext-to-remote invariant holds regardless of how the
+		// Harness was constructed (a future intra-package caller or test). Run
+		// absorbs this error into backoff; it can never fire via New.
+		if !isLoopbackBrokerAddr(h.cfg.BrokerAddr) {
+			return nil, fmt.Errorf("remote-bridge refuses insecure plaintext to non-loopback broker %q", h.cfg.BrokerAddr)
+		}
 		creds = insecure.NewCredentials()
 	}
 	return grpc.NewClient(h.cfg.BrokerAddr,
