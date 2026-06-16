@@ -6,7 +6,7 @@ import "testing"
 // command-binding, and freshness end-to-end (real ECDSA verify).
 func TestAuthorizeFullStackWithBrokerVector(t *testing.T) {
 	v := loadVector(t)
-	ver, err := NewVerifier(v.BrokerPublicKeyB64, v.Kid)
+	ver, err := NewVerifier(v.BrokerPublicKeyB64, v.Kid, v.DeviceID)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}

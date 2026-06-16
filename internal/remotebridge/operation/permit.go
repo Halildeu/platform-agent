@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"strings"
 )
 
 const (
@@ -17,6 +18,12 @@ const (
 	// broker's RemoteBridgePermitSigner.PERMIT_ALG. "SHA256withECDSA" = SHA-256 digest + a DER-encoded ECDSA
 	// signature over the P-256 curve, which crypto/ecdsa.VerifyASN1 consumes directly.
 	PermitAlg = "SHA256withECDSA"
+	// permitVersionPinned is the only permit schema version this agent accepts
+	// (matches the broker's OperationPermit.PERMIT_VERSION). A future schema
+	// bump must be an explicit, reviewed change here — never a silently-accepted
+	// version. (Restored from the device-bound permit.Verifier reference; the
+	// lean operation.Verifier had dropped it.)
+	permitVersionPinned int32 = 1
 )
 
 // OperationPermit mirrors the broker's signed OperationPermit (broker-private / agent-public). The agent only
@@ -76,13 +83,26 @@ func (p OperationPermit) IsFresh(nowEpochMillis int64) bool {
 type Verifier struct {
 	pub         *ecdsa.PublicKey
 	expectedKid string
+	// expectedDeviceID binds every accepted permit to THIS agent's enrolled
+	// identity (the signed DeviceID field): a permit minted for ANOTHER device
+	// never verifies here even with a valid broker signature. Defense-in-depth —
+	// the dispatch harness also refuses a wrong-device permit dynamically (the
+	// authoritative, re-enrollment-aware check); this is the gate/executor-path
+	// backstop so the verifier is self-protecting regardless of caller. Set at
+	// construction (the attended pilot has no mid-session re-enrollment); a stale
+	// value fails CLOSED, never open.
+	expectedDeviceID string
 }
 
-// NewVerifier parses the broker's X.509/SPKI DER public key (base64) and pins the expected kid. Fail-closed:
-// a blank kid, an unparseable key, or a non-P-256 key is an error — no insecure verifier is constructed.
-func NewVerifier(brokerPublicKeyB64, expectedKid string) (*Verifier, error) {
-	if expectedKid == "" {
+// NewVerifier parses the broker's X.509/SPKI DER public key (base64) and pins the expected kid + device.
+// Fail-closed: a blank kid, a blank deviceID, an unparseable key, or a non-P-256 key is an error — no insecure
+// verifier is constructed (a blank device binding would silently disable the device check).
+func NewVerifier(brokerPublicKeyB64, expectedKid, expectedDeviceID string) (*Verifier, error) {
+	if strings.TrimSpace(expectedKid) == "" {
 		return nil, errors.New("operation: expectedKid must not be blank")
+	}
+	if strings.TrimSpace(expectedDeviceID) == "" {
+		return nil, errors.New("operation: expectedDeviceID must not be blank")
 	}
 	der, err := base64.StdEncoding.DecodeString(brokerPublicKeyB64)
 	if err != nil {
@@ -96,7 +116,7 @@ func NewVerifier(brokerPublicKeyB64, expectedKid string) (*Verifier, error) {
 	if !ok || pub.Curve != elliptic.P256() {
 		return nil, errors.New("operation: broker public key must be EC P-256")
 	}
-	return &Verifier{pub: pub, expectedKid: expectedKid}, nil
+	return &Verifier{pub: pub, expectedKid: expectedKid, expectedDeviceID: expectedDeviceID}, nil
 }
 
 // Verify reports whether the permit is from the expected key + pinned alg, fresh at now, and its signature
@@ -107,6 +127,11 @@ func (v *Verifier) Verify(p OperationPermit, nowEpochMillis int64) bool {
 		return false
 	}
 	if p.Kid != v.expectedKid || p.Alg != PermitAlg || p.SignatureB64 == "" {
+		return false
+	}
+	// Schema-version pin + device binding (both signed CanonicalPayload fields;
+	// restored defense-in-depth the lean verifier had dropped vs permit.Verifier).
+	if p.PermitVersion != permitVersionPinned || p.DeviceID != v.expectedDeviceID {
 		return false
 	}
 	if !p.IsFresh(nowEpochMillis) {

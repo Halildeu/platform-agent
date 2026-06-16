@@ -75,8 +75,10 @@ func (a *Authorizer) Authorize(permit OperationPermit, commandLine string, nowEp
 	if permit.Seq <= 0 {
 		return Decision{Reason: ReasonSeqInvalid}
 	}
-	// NOTE (slice-5): binding permit.DeviceID to THIS agent's device identity is a harness concern (the gate
-	// holds no device identity) — explicitly deferred to the harness-wiring slice, not silently skipped.
+	// Device binding is enforced TWICE: the dispatch harness refuses a wrong-device permit dynamically (the
+	// re-enrollment-aware PRIMARY), and operation.Verifier rejects one whose signed DeviceID != its bound
+	// expectedDeviceID (the static gate/executor-path backstop, checked above inside verify). The gate itself
+	// holds no device identity — it relies on the bound verifier.
 	// Replay guard LAST + under lock: a verified+bound permit advances the per-session window atomically; an
 	// equal/older seq is a replay → deny with NO state change.
 	a.mu.Lock()
