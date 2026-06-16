@@ -82,14 +82,22 @@ func BuildExecPlan(cmd operation.CanonicalCommand, allowlist map[string]AllowRul
 // shells (cmd/powershell), no write/admin tools (reg/sc/net/del). commandIds are lowercase (CanonicalCommand
 // lowercases). An operator widens this deliberately; it is never auto-expanded. Returns a FRESH map on every
 // call (the caller owns it — there is no shared mutable singleton to corrupt).
+//
+// RECONCILED to the broker's issuance allowlist (endpoint-admin-service
+// PtyCommandGuard.PILOT_DEFAULT_ALLOWLIST = hostname/whoami/ver/netstat/ping/tracert), MINUS `ver` — a cmd
+// shell-builtin with no standalone .exe that this no-shell executor (CreateProcess direct) cannot run. The
+// agent's last-line EXECUTION allowlist MUST stay a subset of the broker's ISSUANCE set: systeminfo /
+// tasklist / ipconfig were deliberately excluded broker-side (credential-on-command-line + remote-recon
+// surface) and must not be re-permitted here, or a broker bug/compromise that minted such a permit would
+// execute. (`ver`'s presence broker-side is itself questionable for a no-shell agent — flagged separately.)
 func DefaultAllowlist() map[string]AllowRule {
 	const sys = `C:\Windows\System32\`
 	return map[string]AllowRule{
-		"hostname":   {ExePath: sys + "hostname.exe"},
-		"whoami":     {ExePath: sys + "whoami.exe"},
-		"ipconfig":   {ExePath: sys + "ipconfig.exe"},
-		"systeminfo": {ExePath: sys + "systeminfo.exe"},
-		"tasklist":   {ExePath: sys + "tasklist.exe"},
+		"hostname": {ExePath: sys + "hostname.exe"},
+		"whoami":   {ExePath: sys + "whoami.exe"},
+		"netstat":  {ExePath: sys + "netstat.exe"},
+		"ping":     {ExePath: sys + "ping.exe"},
+		"tracert":  {ExePath: sys + "tracert.exe"},
 	}
 }
 
