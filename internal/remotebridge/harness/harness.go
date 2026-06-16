@@ -24,6 +24,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -74,8 +75,12 @@ type Config struct {
 	DeviceIDProvider func() string
 	// AgentVersion is the advisory hello version string.
 	AgentVersion string
-	// InsecurePlaintext dials without TLS. Lab/loopback only — the default
-	// is TLS with system roots; real mTLS client identity is T-4.
+	// InsecurePlaintext dials without TLS. Lab/loopback ONLY and ENFORCED:
+	// New refuses an InsecurePlaintext config whose BrokerAddr is not a
+	// loopback target (mirrors the broker's own non-loopback-plaintext
+	// refusal), so the "loopback only" promise is machine-enforced, not just
+	// documented. The default is TLS with system roots; real mTLS client
+	// identity is T-4.
 	InsecurePlaintext bool
 	// FirstHeartbeatDeadline bounds how long a fresh stream may stay silent
 	// before the harness treats the connection as dead (default 15s).
@@ -160,6 +165,17 @@ func New(cfg Config, logger *log.Logger) (*Harness, error) {
 	if cfg.Dialer == nil && strings.TrimSpace(cfg.BrokerAddr) == "" {
 		return nil, errors.New("remote-bridge harness requires a broker address")
 	}
+	// Insecure plaintext is lab/loopback ONLY — enforce it, do not merely
+	// document it. dial() would otherwise hand any BrokerAddr to
+	// insecure.NewCredentials(), sending gRPC in cleartext over the network
+	// against what the config comment promises. The broker refuses
+	// non-loopback plaintext server-side; this is the matching client-side
+	// fail-closed. (A Dialer override is the in-process bufconn test seam — no
+	// real network dial — so the guard does not apply there.)
+	if cfg.Dialer == nil && cfg.InsecurePlaintext && !isLoopbackBrokerAddr(cfg.BrokerAddr) {
+		return nil, fmt.Errorf("remote-bridge harness refuses insecure plaintext to non-loopback broker %q "+
+			"(insecure plaintext is lab/loopback only; use TLS for any remote broker)", cfg.BrokerAddr)
+	}
 	if cfg.DeviceIDProvider == nil {
 		return nil, errors.New("remote-bridge harness requires a device id provider")
 	}
@@ -167,6 +183,27 @@ func New(cfg Config, logger *log.Logger) (*Harness, error) {
 		logger = log.Default()
 	}
 	return &Harness{cfg: cfg, logger: logger, sessions: make(map[string]SessionState)}, nil
+}
+
+// isLoopbackBrokerAddr reports whether addr targets a loopback interface — the
+// ONLY destination for which InsecurePlaintext (no TLS) is permitted. Decided
+// deterministically from the LITERAL address with NO DNS resolution (a name
+// could resolve to a different host at dial time — TOCTOU): the literal
+// "localhost" or an IP that parses as loopback. A hostname or a non-loopback
+// IP is rejected (fail-closed), mirroring the broker's server-side
+// non-loopback-plaintext refusal.
+func isLoopbackBrokerAddr(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No "host:port" form (e.g. a bare host) — treat the whole string as host.
+		host = addr
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Run drives the connect/reconnect loop until ctx is cancelled. It never
