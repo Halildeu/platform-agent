@@ -119,7 +119,9 @@ func startDispatch(t *testing.T, broker *dispatchBroker, dispatcher PTYDispatche
 func ptyPermitProto() *pb.OperationPermit {
 	return &pb.OperationPermit{
 		Alg: operation.PermitAlg, Kid: "kid-1", PermitVersion: 1, PolicyVersion: "policy-1",
-		DecisionId: "sess-1:op-1", SessionId: "sess-1", OperationId: "op-1", DeviceId: "dev-1",
+		// DeviceId MUST match the harness DeviceIDProvider ("device-test") — the
+		// dispatch device-binding guard refuses a permit minted for another device.
+		DecisionId: "sess-1:op-1", SessionId: "sess-1", OperationId: "op-1", DeviceId: "device-test",
 		OperatorSubject: "operator@x", Capability: pb.Capability_CONSTRAINED_PTY,
 		CommandHash: "abc123", IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1300, Seq: 1, SignatureB64: "sig",
 	}
@@ -292,6 +294,40 @@ func TestDispatchHandlerErrorSendsControlErrorFrame(t *testing.T) {
 	startDispatch(t, broker, disp)
 
 	assertControlError(t, agentFrames, "operation-dispatch-failed")
+}
+
+// TestDispatchDeviceMismatchRefuses: a broker-signed permit minted for ANOTHER device (DeviceId != this
+// agent's enrolled id) is refused at the harness device-binding guard — the dispatcher is NEVER invoked (no
+// execution, no DATA stream) and a bounded CONTROL ErrorFrame is returned, transport stays up. Defense-in-depth
+// against a misrouted/leaked permit: the agent holds the broker's public key, so the signature alone would
+// otherwise verify and the (DeviceID-less) operation verifier + gate would let it through.
+func TestDispatchDeviceMismatchRefuses(t *testing.T) {
+	disp := &fakeDispatcher{run: func(func(*pb.DataFrame) error) error {
+		t.Error("dispatcher must NOT run for a device-mismatched permit")
+		return nil
+	}}
+	agentFrames := make(chan *pb.Envelope, 16)
+	broker := &dispatchBroker{connect: func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		mismatched := ptyPermitProto()
+		mismatched.DeviceId = "some-other-device" // != harness DeviceIDProvider "device-test"
+		_ = s.Send(operationDispatchEnv("hostname", mismatched))
+		for {
+			env, err := s.Recv()
+			if err != nil {
+				return nil
+			}
+			agentFrames <- env
+		}
+	}}
+	startDispatch(t, broker, disp)
+
+	assertControlError(t, agentFrames, "operation-device-mismatch")
+	if called, _, _, _ := disp.snapshot(); called {
+		t.Error("a device-mismatched permit must NOT reach the dispatcher (no execution)")
+	}
 }
 
 // assertControlError waits for an agent→broker CONTROL ErrorFrame with the given code.
