@@ -90,6 +90,14 @@ func BuildExecPlan(cmd operation.CanonicalCommand, allowlist map[string]AllowRul
 // tasklist / ipconfig were deliberately excluded broker-side (credential-on-command-line + remote-recon
 // surface) and must not be re-permitted here, or a broker bug/compromise that minted such a permit would
 // execute. (`ver`'s presence broker-side is itself questionable for a no-shell agent — flagged separately.)
+//
+// SCOPE — this reconciles the COMMAND NAME set only; ArgPolicy is nil here. nil relies on the commandHash
+// binding (the broker only mints a permit for an argv that already passed its PtyArgumentPolicy, and the
+// gate re-hashes the command against permit.commandHash). That is NOT an arg-level compromise defense:
+// under the same broker-compromise threat used to exclude systeminfo/tasklist, a signed-but-out-of-policy
+// argv (e.g. `ping -t` infinite) would still run. The LIVE-wiring slice MUST supply per-command ArgPolicy
+// mirroring the broker PtyArgumentPolicy (ping -t forbidden, -n/-w/-l/-i ranges, netstat closed flag set,
+// required-host operands) BEFORE owner-gated execution — tracked as a release-blocking wiring prerequisite.
 func DefaultAllowlist() map[string]AllowRule {
 	const sys = `C:\Windows\System32\`
 	return map[string]AllowRule{
