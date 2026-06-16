@@ -23,10 +23,11 @@ type ExecPlan struct {
 	CommandLine string
 }
 
-// AllowRule pins an allowlisted command: the absolute trusted binary, plus an optional arg policy. The
-// broker's signed commandHash already binds the exact commandId+argv (the operation gate enforces it), so a
-// nil ArgPolicy is sound; a policy adds defense-in-depth (e.g. forbid flags, cap arg count) against future
-// mapping drift.
+// AllowRule pins an allowlisted command: the absolute trusted binary, plus an optional arg policy. A nil
+// ArgPolicy performs NO local argv validation — it relies solely on the upstream permit commandHash binding
+// (the gate proves the argv matches the SIGNED argv, not that it passed the broker's PtyArgumentPolicy). For
+// owner-gated LIVE execution, callers MUST supply a per-command ArgPolicy mirroring the broker
+// PtyArgumentPolicy wherever broker-compromise / signed-out-of-policy argv is in scope.
 type AllowRule struct {
 	ExePath   string
 	ArgPolicy func(args []string) error // nil ⇒ accept any args (already bound by commandHash)
