@@ -1,6 +1,9 @@
 package operation
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // full stack: the real broker-signed fixture authorizes its bound command, and the gate enforces replay,
 // command-binding, and freshness end-to-end (real ECDSA verify).
@@ -40,6 +43,16 @@ func TestAuthorizePolicyChecks(t *testing.T) {
 
 	if d := newAuthorizer(pass).Authorize(mk("VIEW_ONLY", hostnameHash, "s", 1), "hostname", 1); d.Allowed || d.Reason != ReasonCapabilityNotPTY {
 		t.Errorf("capability gate: allowed=%v reason=%q", d.Allowed, d.Reason)
+	}
+	// raw line over MaxCommandLine → command-too-long (mirrors broker decide() MAX_LINE), refused BEFORE
+	// tokenising/hashing so a signed-but-pathological over-long line is rejected at this layer.
+	if d := newAuthorizer(pass).Authorize(mk(CapabilityConstrainedPTY, hostnameHash, "s", 1), strings.Repeat("a", MaxCommandLine+1), 1); d.Allowed || d.Reason != ReasonCommandTooLong {
+		t.Errorf("over-long line gate: allowed=%v reason=%q", d.Allowed, d.Reason)
+	}
+	// boundary: a line EXACTLY at MaxCommandLine must NOT trip the length guard (it then fails downstream on
+	// hash mismatch, proving the guard itself did not fire at the limit).
+	if d := newAuthorizer(pass).Authorize(mk(CapabilityConstrainedPTY, hostnameHash, "s", 1), strings.Repeat("a", MaxCommandLine), 1); d.Reason == ReasonCommandTooLong {
+		t.Errorf("line exactly at MaxCommandLine must not be command-too-long: reason=%q", d.Reason)
 	}
 	if d := newAuthorizer(pass).Authorize(mk(CapabilityConstrainedPTY, "", "s", 1), "   ", 1); d.Allowed || d.Reason != ReasonEmptyCommand {
 		t.Errorf("empty-command gate: allowed=%v reason=%q", d.Allowed, d.Reason)
