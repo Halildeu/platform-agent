@@ -95,7 +95,8 @@ type Config struct {
 	RemoteBridgeEnabled bool
 	// RemoteBridgeBrokerAddr is the broker gRPC target (host:port).
 	RemoteBridgeBrokerAddr string
-	// RemoteBridgeInsecurePlaintext dials without TLS — lab/loopback only;
+	// RemoteBridgeInsecurePlaintext dials without TLS — lab/loopback ONLY
+	// (enforced: harness.New refuses a non-loopback broker when this is set);
 	// default is TLS with system roots (real mTLS identity lands in T-4).
 	RemoteBridgeInsecurePlaintext bool
 	// RemoteBridgeFirstHeartbeatDeadline bounds initial stream silence;
