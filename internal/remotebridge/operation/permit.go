@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"strings"
 )
 
 const (
@@ -97,10 +98,10 @@ type Verifier struct {
 // Fail-closed: a blank kid, a blank deviceID, an unparseable key, or a non-P-256 key is an error — no insecure
 // verifier is constructed (a blank device binding would silently disable the device check).
 func NewVerifier(brokerPublicKeyB64, expectedKid, expectedDeviceID string) (*Verifier, error) {
-	if expectedKid == "" {
+	if strings.TrimSpace(expectedKid) == "" {
 		return nil, errors.New("operation: expectedKid must not be blank")
 	}
-	if expectedDeviceID == "" {
+	if strings.TrimSpace(expectedDeviceID) == "" {
 		return nil, errors.New("operation: expectedDeviceID must not be blank")
 	}
 	der, err := base64.StdEncoding.DecodeString(brokerPublicKeyB64)

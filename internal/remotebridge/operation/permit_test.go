@@ -148,6 +148,28 @@ func TestVerifyRejectsForeignKey(t *testing.T) {
 	}
 }
 
+// device binding is enforced INDEPENDENTLY of the signature: a VALIDLY-signed permit whose bound DeviceID does
+// not match the verifier's expected device is rejected. This isolates the new device check — the signature
+// itself still verifies, so a removed device check would let this through.
+func TestVerifyRejectsWrongDeviceWithValidSignature(t *testing.T) {
+	v := loadVector(t)
+	ver, err := NewVerifier(v.BrokerPublicKeyB64, v.Kid, "some-other-device")
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	if ver.Verify(v.permit(), freshNow) {
+		t.Fatal("a validly-signed permit for a DIFFERENT device must be rejected (device binding not enforced)")
+	}
+	// control: the SAME (validly-signed) permit verifies when the verifier expects the permit's real device.
+	okVer, err := NewVerifier(v.BrokerPublicKeyB64, v.Kid, v.DeviceID)
+	if err != nil {
+		t.Fatalf("NewVerifier (control): %v", err)
+	}
+	if !okVer.Verify(v.permit(), freshNow) {
+		t.Fatal("the permit must verify under its own device (control) — base broken")
+	}
+}
+
 // IsFresh malformed-window guards, in isolation (no signature confound).
 func TestIsFreshGuards(t *testing.T) {
 	if !(OperationPermit{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1300}).IsFresh(1100) {

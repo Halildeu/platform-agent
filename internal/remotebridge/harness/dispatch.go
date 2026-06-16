@@ -77,14 +77,15 @@ func decodeDispatch(d *pb.OperationDispatch) (operation.OperationPermit, string,
 // dispatcher emitted only a terminal EndStream on DATA), and the transport stays up.
 func (h *Harness) dispatchOperation(ctx context.Context, conn *grpc.ClientConn,
 	permit operation.OperationPermit, commandLine, deviceID string, sender *controlSender) {
-	// Device binding (defense-in-depth). gate.go explicitly defers the
-	// permit.DeviceID check to the harness — which alone holds the agent's
-	// enrolled identity. A broker-signed permit carries its target DeviceID as a
-	// SIGNED CanonicalPayload field; refuse to execute one minted for a DIFFERENT
-	// device even with a valid broker signature, so a misrouted or leaked permit
-	// never runs here. Fail-closed (no DATA stream, no execution, no oracle beyond
-	// a bounded CONTROL code). deviceID is the identity this stream presented in
-	// AgentHello and is non-empty (connectOnce only dispatches with one).
+	// Device binding — the PRIMARY, dynamic (re-enrollment-aware) check; the
+	// harness alone holds the live agent identity. A broker-signed permit carries
+	// its target DeviceID as a SIGNED CanonicalPayload field; refuse to execute one
+	// minted for a DIFFERENT device even with a valid broker signature, so a
+	// misrouted or leaked permit never runs here. (operation.Verifier ALSO binds
+	// DeviceID statically as a gate/executor-path backstop.) Fail-closed (no DATA
+	// stream, no execution, no oracle beyond a bounded CONTROL code). deviceID is
+	// the identity this stream presented in AgentHello and is non-empty (connectOnce
+	// only dispatches with one).
 	if deviceID == "" || permit.DeviceID != deviceID {
 		_ = sender.sendError("operation-device-mismatch", false)
 		return
