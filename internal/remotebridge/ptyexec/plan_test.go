@@ -103,6 +103,29 @@ func TestDefaultAllowlistPosture(t *testing.T) {
 			t.Errorf("default allowlist must NOT contain shell/write/admin tool %q", forbidden)
 		}
 	}
+	// Broker-excluded recon / credential-on-command-line commands must NOT be re-permitted by the agent's
+	// last-line execution allowlist — it must stay a subset of the broker PILOT issuance set.
+	for _, excluded := range []string{"systeminfo", "tasklist", "ipconfig", "gpresult", "getmac", "driverquery"} {
+		if _, ok := allow[excluded]; ok {
+			t.Errorf("default allowlist must NOT re-permit broker-excluded recon command %q", excluded)
+		}
+	}
+	// Drift guard: the agent default MUST equal the broker PILOT_DEFAULT_ALLOWLIST runnable set (minus the
+	// shell-only `ver`). Catches both re-adding a dangerous command and dropping an allowed one.
+	want := map[string]bool{"hostname": true, "whoami": true, "netstat": true, "ping": true, "tracert": true}
+	if len(allow) != len(want) {
+		t.Errorf("default allowlist size %d != reconciled broker-runnable set size %d", len(allow), len(want))
+	}
+	for id := range want {
+		if _, ok := allow[id]; !ok {
+			t.Errorf("default allowlist missing reconciled command %q", id)
+		}
+	}
+	for id := range allow {
+		if !want[id] {
+			t.Errorf("default allowlist has unexpected command %q (outside the reconciled broker-runnable set)", id)
+		}
+	}
 	// a default-allowlisted command builds a plan
 	if _, err := BuildExecPlan(operation.ParseCommand("hostname"), allow); err != nil {
 		t.Errorf("default-allowlisted hostname should build: %v", err)
