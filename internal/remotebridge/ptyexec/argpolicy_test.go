@@ -290,20 +290,37 @@ func TestArgPolicyThroughBuildExecPlan(t *testing.T) {
 }
 
 // TestArgPolicyCaseInsensitiveFlags — ParseCommand lowercases argv[0] but NOT the args; the policy must
-// lowercase flags for matching (mirrors the broker). An uppercase forbidden flag is still forbidden.
+// ASCII-lowercase flags/enum values for matching (mirrors the broker on the ASCII surface). ASCII uppercase
+// folds; a non-ASCII char does NOT (asciiLower vs Go strings.ToLower) so the agent stays stricter-or-equal,
+// never more permissive than the broker's Locale.ROOT folding.
 func TestArgPolicyCaseInsensitiveFlags(t *testing.T) {
 	allow := DefaultAllowlist()
-	// "PING" → commandID "ping"; "-T" → forbidden -t.
+
+	// ASCII uppercase folds exactly like the broker.
 	if _, err := BuildExecPlan(operation.ParseCommand("PING -T 8.8.8.8"), allow); !errors.Is(err, ErrArgForbiddenFlag) {
 		t.Errorf("uppercase -T must be the forbidden -t: %v", err)
 	}
-	// "WHOAMI /ALL" → "/all" valueless flag → allowed.
 	if _, err := BuildExecPlan(operation.ParseCommand("WHOAMI /ALL"), allow); err != nil {
 		t.Errorf("uppercase /ALL must be the allowed /all: %v", err)
 	}
-	// enum value case-insensitive.
 	if _, err := BuildExecPlan(operation.ParseCommand("whoami /fo CSV"), allow); err != nil {
 		t.Errorf("uppercase enum CSV must be accepted: %v", err)
+	}
+	if _, err := BuildExecPlan(operation.ParseCommand("netstat -P TCP"), allow); err != nil {
+		t.Errorf("uppercase -P TCP must fold to -p tcp: %v", err)
+	}
+
+	// Non-ASCII edge (U+0130 İ): Go strings.ToLower would fold "İ"→"i" and MATCH an ASCII key (a bypass the
+	// broker's Locale.ROOT folding does NOT permit). asciiLower leaves it unchanged ⇒ no match ⇒ deny,
+	// matching the broker. These MUST be refused.
+	if _, err := BuildExecPlan(operation.ParseCommand("ping -İ 1 8.8.8.8"), allow); !errors.Is(err, ErrArgUnknownFlag) {
+		t.Errorf("non-ASCII -İ must NOT fold to -i (unknown flag): %v", err)
+	}
+	if _, err := BuildExecPlan(operation.ParseCommand("netstat -p İP"), allow); !errors.Is(err, ErrArgDisallowedValue) {
+		t.Errorf("non-ASCII enum İP must NOT fold to ip (disallowed value): %v", err)
+	}
+	if _, err := BuildExecPlan(operation.ParseCommand("whoami /fo LİST"), allow); !errors.Is(err, ErrArgDisallowedValue) {
+		t.Errorf("non-ASCII enum LİST must NOT fold to list (disallowed value): %v", err)
 	}
 }
 

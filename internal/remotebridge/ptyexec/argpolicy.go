@@ -86,7 +86,7 @@ func intRange(min, max int64) argValueSpec { return argValueSpec{integer: true, 
 func oneOf(values ...string) argValueSpec {
 	m := make(map[string]struct{}, len(values))
 	for _, v := range values {
-		m[strings.ToLower(v)] = struct{}{}
+		m[asciiLower(v)] = struct{}{}
 	}
 	return argValueSpec{enum: m}
 }
@@ -107,7 +107,7 @@ func (s argValueSpec) accepts(value string) bool {
 		}
 		return n >= s.min && n <= s.max
 	}
-	_, ok := s.enum[strings.ToLower(value)]
+	_, ok := s.enum[asciiLower(value)]
 	return ok
 }
 
@@ -135,7 +135,7 @@ func (s argCommandSpec) evaluate(args []string) error {
 			return ErrArgMalformed
 		}
 		if isArgFlag(tok) {
-			flag := strings.ToLower(tok)
+			flag := asciiLower(tok)
 			if _, bad := s.forbiddenFlags[flag]; bad {
 				return ErrArgForbiddenFlag // metered probe (distinct outcome)
 			}
@@ -179,6 +179,31 @@ func (s argCommandSpec) policyFunc() func(args []string) error {
 // isArgFlag mirrors broker isFlag: a token beginning with '/' or '-'.
 func isArgFlag(token string) bool {
 	return strings.HasPrefix(token, "/") || strings.HasPrefix(token, "-")
+}
+
+// asciiLower lowercases ONLY ASCII A-Z (byte-wise), leaving every other byte unchanged. This is used for ALL
+// flag/enum normalisation instead of Go's Unicode strings.ToLower, because Go's case-folding is NOT
+// byte-equivalent to the broker's Java toLowerCase(Locale.ROOT) on non-ASCII input. Go folds some non-ASCII
+// letters (e.g. U+0130 İ) to a plain ASCII letter, which would then match an ASCII policy key/enum that the
+// broker's Locale.ROOT folding does NOT match (it yields a non-ASCII form) — making the agent MORE permissive
+// than the broker (a signed-out-of-policy argv bypass under broker-compromise). ASCII-only folding leaves
+// every non-ASCII byte unchanged, so it can never match an ASCII key/enum ⇒ the agent is byte-identical to
+// the broker on the ASCII command surface (the D-2 safe class) and stricter-or-equal everywhere else, never a
+// bypass. (Codex 019ed29c.)
+func asciiLower(s string) string {
+	var b []byte
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 'A' && c <= 'Z' {
+			if b == nil {
+				b = []byte(s)
+			}
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	if b == nil {
+		return s
+	}
+	return string(b)
 }
 
 // pilotArgPolicies mirrors broker PtyArgumentPolicy.PILOT_DEFAULT_POLICY for the commands the agent can
@@ -233,7 +258,7 @@ func pilotArgPolicies() map[string]argCommandSpec {
 func stringSet(items ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(items))
 	for _, it := range items {
-		m[strings.ToLower(it)] = struct{}{}
+		m[asciiLower(it)] = struct{}{}
 	}
 	return m
 }
