@@ -167,6 +167,8 @@ Import-InstallHelper -Name "Get-HmacCredentialStorePath"
 Import-InstallHelper -Name "Assert-HmacEnrollmentTokenStorePolicy"
 Import-InstallHelper -Name "Backup-HmacCredentialStoreForFreshEnroll"
 Import-InstallHelper -Name "Assert-EnrollmentTokenLength"
+Import-InstallHelper -Name "Assert-RemoteBridgeInstallConfig"
+Import-InstallHelper -Name "Add-RemoteBridgeServiceEnvironment"
 
 Describe "Assert-EnrollmentTokenLength (#120 truncated-paste guard)" {
     It "throws on a 1-char token (the MKR-A1 live-pilot truncated paste)" {
@@ -241,6 +243,55 @@ Describe "Add-ServiceEnvironmentBaseVariables" {
         $values["ProgramData"] | Should Be "D:\ProgramData"
         $values["TEMP"] | Should Be "D:\Temp"
         $values["TMP"] | Should Be "D:\Tmp"
+    }
+}
+
+Describe "Remote bridge installer env gating" {
+    It "rejects enabled bridge without a broker address" {
+        { Assert-RemoteBridgeInstallConfig -Enabled $true -BrokerAddr "" -InsecurePlaintext $false } |
+            Should Throw "-RemoteBridgeEnabled requires -RemoteBridgeBrokerAddr"
+    }
+
+    It "rejects a broker address when the bridge is disabled" {
+        { Assert-RemoteBridgeInstallConfig -Enabled $false -BrokerAddr "broker.example:443" -InsecurePlaintext $false } |
+            Should Throw "-RemoteBridgeBrokerAddr requires -RemoteBridgeEnabled"
+    }
+
+    It "rejects plaintext mode when the bridge is disabled" {
+        { Assert-RemoteBridgeInstallConfig -Enabled $false -BrokerAddr "" -InsecurePlaintext $true } |
+            Should Throw "-RemoteBridgeInsecurePlaintext requires -RemoteBridgeEnabled"
+    }
+
+    It "writes only explicit remote bridge service environment values" {
+        $values = @{
+            "ENDPOINT_AGENT_LOG_DIR" = "C:\ProgramData\EndpointAgent\logs"
+        }
+
+        Add-RemoteBridgeServiceEnvironment `
+            -Values $values `
+            -Enabled $true `
+            -BrokerAddr "mtls.testai.acik.com:443" `
+            -InsecurePlaintext $false
+
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED"] | Should Be "true"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR"] | Should Be "mtls.testai.acik.com:443"
+        $values.ContainsKey("ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT") | Should Be $false
+    }
+
+    It "does not add remote bridge service environment values when disabled" {
+        $values = @{
+            "ENDPOINT_AGENT_LOG_DIR" = "C:\ProgramData\EndpointAgent\logs"
+        }
+
+        Add-RemoteBridgeServiceEnvironment `
+            -Values $values `
+            -Enabled $false `
+            -BrokerAddr "" `
+            -InsecurePlaintext $false
+
+        $values.ContainsKey("ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED") | Should Be $false
+        $values.ContainsKey("ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR") | Should Be $false
+        $values.ContainsKey("ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT") | Should Be $false
     }
 }
 

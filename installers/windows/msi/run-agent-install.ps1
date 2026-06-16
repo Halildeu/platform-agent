@@ -97,6 +97,9 @@ $keyMap = @{
     'AUTO_ENROLL_CERT_SUBJECT_SUFFIX'= @{ Param = 'AutoEnrollCertSubjectSuffix';Kind = 'value'  }
     'AUTO_ENROLL_CERT_SAN_URI_PREFIX'= @{ Param = 'AutoEnrollCertSANURIPrefix'; Kind = 'value'  }
     'AUTO_ENROLL_JITTER_SECONDS'     = @{ Param = 'AutoEnrollJitterSeconds';    Kind = 'int'    }
+    'REMOTE_BRIDGE_ENABLED'          = @{ Param = 'RemoteBridgeEnabled';        Kind = 'switch' }
+    'REMOTE_BRIDGE_BROKER_ADDR'      = @{ Param = 'RemoteBridgeBrokerAddr';     Kind = 'value'  }
+    'REMOTE_BRIDGE_INSECURE_PLAINTEXT'= @{ Param = 'RemoteBridgeInsecurePlaintext'; Kind = 'switch' }
 }
 
 function Test-TruthyFlag {

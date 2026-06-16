@@ -40,6 +40,9 @@ param(
     [string]$AutoEnrollCertSubjectSuffix = "",
     [string]$AutoEnrollCertSANURIPrefix = "adcomputer:",
     [int]$AutoEnrollJitterSeconds = 0,
+    [switch]$RemoteBridgeEnabled,
+    [string]$RemoteBridgeBrokerAddr = "",
+    [switch]$RemoteBridgeInsecurePlaintext,
     [ValidateRange(1, 600)]
     [int]$ServiceStartTimeoutSeconds = 30,
     [switch]$Start,
@@ -141,7 +144,10 @@ $configKeys = @(
     "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256",
     "ENDPOINT_AGENT_AUTO_ENROLL_API_URL",
     "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX",
-    "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX"
+    "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT"
 )
 
 function Write-Step {
@@ -393,6 +399,45 @@ function Add-ServiceEnvironmentBaseVariables {
     }
     if (-not $Values.ContainsKey("TMP")) {
         $Values["TMP"] = $temp
+    }
+}
+
+function Assert-RemoteBridgeInstallConfig {
+    param(
+        [bool]$Enabled,
+        [string]$BrokerAddr,
+        [bool]$InsecurePlaintext
+    )
+    if ($Enabled) {
+        if ([string]::IsNullOrWhiteSpace($BrokerAddr)) {
+            throw "-RemoteBridgeEnabled requires -RemoteBridgeBrokerAddr."
+        }
+        return
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($BrokerAddr)) {
+        throw "-RemoteBridgeBrokerAddr requires -RemoteBridgeEnabled."
+    }
+    if ($InsecurePlaintext) {
+        throw "-RemoteBridgeInsecurePlaintext requires -RemoteBridgeEnabled."
+    }
+}
+
+function Add-RemoteBridgeServiceEnvironment {
+    param(
+        [hashtable]$Values,
+        [bool]$Enabled,
+        [string]$BrokerAddr,
+        [bool]$InsecurePlaintext
+    )
+    if (-not $Enabled) {
+        return
+    }
+
+    $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED"] = "true"
+    $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR"] = $BrokerAddr
+    if ($InsecurePlaintext) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT"] = "true"
     }
 }
 
@@ -768,6 +813,11 @@ if ($AutoEnroll) {
     Assert-EnrollmentTokenLength -Token $EnrollmentToken -MinLength $MinEnrollmentTokenLength
 }
 
+Assert-RemoteBridgeInstallConfig `
+    -Enabled ([bool]$RemoteBridgeEnabled) `
+    -BrokerAddr $RemoteBridgeBrokerAddr `
+    -InsecurePlaintext ([bool]$RemoteBridgeInsecurePlaintext)
+
 # ----------------------------------------------------------------------
 # Faz 22.1.0 release-foundation - URL download + signature verify
 # (Codex 019e8284 PARTIAL->AGREE plan). Runs ONLY when -BinaryUrl is
@@ -1083,6 +1133,12 @@ try {
             "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" = $resolvedMaintenanceTokenHash
         }
     }
+
+    Add-RemoteBridgeServiceEnvironment `
+        -Values $serviceEnv `
+        -Enabled ([bool]$RemoteBridgeEnabled) `
+        -BrokerAddr $RemoteBridgeBrokerAddr `
+        -InsecurePlaintext ([bool]$RemoteBridgeInsecurePlaintext)
 
     Write-Step "installing service: $ServiceName"
     Invoke-AgentServiceCommand -ExePath $targetBinary -Arguments @(

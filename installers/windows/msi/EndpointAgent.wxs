@@ -74,6 +74,10 @@
     <Property Id="AUTO_ENROLL_CERT_SUBJECT_SUFFIX" Secure="yes" />
     <Property Id="AUTO_ENROLL_CERT_SAN_URI_PREFIX" Secure="yes" />
     <Property Id="AUTO_ENROLL_JITTER_SECONDS" Secure="yes" />
+    <!-- Optional outbound remote-bridge harness (disabled unless explicitly set). -->
+    <Property Id="REMOTE_BRIDGE_ENABLED" Secure="yes" />
+    <Property Id="REMOTE_BRIDGE_BROKER_ADDR" Secure="yes" />
+    <Property Id="REMOTE_BRIDGE_INSECURE_PLAINTEXT" Secure="yes" />
     <!-- Path to a pre-staged SYSTEM/Admins-only file holding the LAB HMAC token
          (non-secret PATH; the secret never enters the MSI). -->
     <Property Id="ENROLL_RESPONSE_FILE" Secure="yes" />
@@ -143,7 +147,7 @@
                  Before="EaRunInstall"
                  Sequence="execute"
                  Condition="NOT REMOVE"
-                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode install -ConfigData &quot;API_URL=[API_URL];LOG_DIR=[LOG_DIR];INSTALL_ID=[INSTALL_ID];MAINTENANCE_TOKEN_HASH=[MAINTENANCE_TOKEN_HASH];SERVICE_NAME=[SERVICE_NAME];AUTO_ENROLL=[AUTO_ENROLL];AUTO_ENROLL_API_URL=[AUTO_ENROLL_API_URL];AUTO_ENROLL_CERT_SUBJECT_SUFFIX=[AUTO_ENROLL_CERT_SUBJECT_SUFFIX];AUTO_ENROLL_CERT_SAN_URI_PREFIX=[AUTO_ENROLL_CERT_SAN_URI_PREFIX];AUTO_ENROLL_JITTER_SECONDS=[AUTO_ENROLL_JITTER_SECONDS]&quot; -ResponseFile &quot;[ENROLL_RESPONSE_FILE]&quot;" />
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[STAGEDIR]run-agent-install.ps1&quot; -Mode install -ConfigData &quot;API_URL=[API_URL];LOG_DIR=[LOG_DIR];INSTALL_ID=[INSTALL_ID];MAINTENANCE_TOKEN_HASH=[MAINTENANCE_TOKEN_HASH];SERVICE_NAME=[SERVICE_NAME];AUTO_ENROLL=[AUTO_ENROLL];AUTO_ENROLL_API_URL=[AUTO_ENROLL_API_URL];AUTO_ENROLL_CERT_SUBJECT_SUFFIX=[AUTO_ENROLL_CERT_SUBJECT_SUFFIX];AUTO_ENROLL_CERT_SAN_URI_PREFIX=[AUTO_ENROLL_CERT_SAN_URI_PREFIX];AUTO_ENROLL_JITTER_SECONDS=[AUTO_ENROLL_JITTER_SECONDS];REMOTE_BRIDGE_ENABLED=[REMOTE_BRIDGE_ENABLED];REMOTE_BRIDGE_BROKER_ADDR=[REMOTE_BRIDGE_BROKER_ADDR];REMOTE_BRIDGE_INSECURE_PLAINTEXT=[REMOTE_BRIDGE_INSECURE_PLAINTEXT]&quot; -ResponseFile &quot;[ENROLL_RESPONSE_FILE]&quot;" />
     <CustomAction Id="EaRunInstall"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"

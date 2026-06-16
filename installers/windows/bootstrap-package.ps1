@@ -19,6 +19,9 @@ param(
     [string]$AutoEnrollCertSubjectSuffix = "",
     [string]$AutoEnrollCertSANURIPrefix = "adcomputer:",
     [int]$AutoEnrollJitterSeconds = 0,
+    [switch]$RemoteBridgeEnabled,
+    [string]$RemoteBridgeBrokerAddr = "",
+    [switch]$RemoteBridgeInsecurePlaintext,
     [string]$WorkDir = (Join-Path $env:TEMP "EndpointEnes"),
     [string]$ZipPath = (Join-Path $env:TEMP "EndpointAgent.zip"),
     [string]$EnrollmentToken = "",
@@ -129,6 +132,18 @@ if ($AutoEnroll -and -not [string]::IsNullOrWhiteSpace($EnrollmentToken)) {
 if ($AutoEnroll -and $ResetCredentialStore) {
     throw "-ResetCredentialStore is only valid for the HMAC enrollment-token fallback path."
 }
+if ($RemoteBridgeEnabled) {
+    if ([string]::IsNullOrWhiteSpace($RemoteBridgeBrokerAddr)) {
+        throw "-RemoteBridgeEnabled requires -RemoteBridgeBrokerAddr."
+    }
+} else {
+    if (-not [string]::IsNullOrWhiteSpace($RemoteBridgeBrokerAddr)) {
+        throw "-RemoteBridgeBrokerAddr requires -RemoteBridgeEnabled."
+    }
+    if ($RemoteBridgeInsecurePlaintext) {
+        throw "-RemoteBridgeInsecurePlaintext requires -RemoteBridgeEnabled."
+    }
+}
 
 $installArgs = @{}
 if ($AutoEnroll) {
@@ -153,6 +168,13 @@ if ($Force) {
 }
 if ($ResetCredentialStore) {
     $installArgs["ResetCredentialStore"] = $true
+}
+if ($RemoteBridgeEnabled) {
+    $installArgs["RemoteBridgeEnabled"] = $true
+    $installArgs["RemoteBridgeBrokerAddr"] = $RemoteBridgeBrokerAddr
+    if ($RemoteBridgeInsecurePlaintext) {
+        $installArgs["RemoteBridgeInsecurePlaintext"] = $true
+    }
 }
 
 try {
