@@ -63,9 +63,8 @@ function Assert-Sha256 {
 function Get-PackageUrlHost {
     param([Parameter(Mandatory)] [string]$Url)
 
-    try {
-        $uri = New-Object System.Uri($Url)
-    } catch {
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Url, [System.UriKind]::RelativeOrAbsolute, [ref]$uri)) {
         throw "invalid -PackageUrl: $Url"
     }
 
