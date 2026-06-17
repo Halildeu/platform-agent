@@ -40,6 +40,12 @@ altinda statik servis edilir (GitOps: platform-k8s-gitops `artifact-host` nginx 
 release'i gosterir; immutable release yolu da
 `https://testai.acik.com/artifacts/endpoint-agent/<VERSION>/` seklindedir.
 `-ExpectedZipSha256` degerini `.../EndpointAgent.zip.sha256` dosyasindan alin.
+Bootstrap scripti `-ApiUrl` verilmediginde API hostunu `-PackageUrl` hostundan
+turetir: `https://<host>/api/v1/endpoint-agent`. Auto-enroll mTLS hostu da
+`https://mtls.<host>/api/v1/endpoint-agent` olur. Ornek: test artifact'i
+`testai.acik.com` ise test API/mTLS, prod artifact'i `ai.acik.com` ise prod
+API/mTLS kullanilir. Explicit `-ApiUrl` / `-AutoEnrollApiUrl` degerleri override
+eder.
 
 **Retention**: artifact host AYNI ANDA yalnizca pinli (current) release surumunu
 servis eder; image yeni surume rollover edince eski `/artifacts/<old-tag>/` URL'leri
@@ -62,7 +68,6 @@ powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap
   -PackageUrl $PackageUrl `
   -ExpectedZipSha256 $ExpectedZipSha256 `
   -AutoEnroll `
-  -AutoEnrollApiUrl "https://mtls.testai.acik.com/api/v1/endpoint-agent" `
   -AutoEnrollCertSANURIPrefix "adcomputer:" `
   -Start `
   -Force
@@ -85,7 +90,6 @@ iwr -UseBasicParsing `
 powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
   -PackageUrl $PackageUrl `
   -ExpectedZipSha256 $ExpectedZipSha256 `
-  -ApiUrl "https://testai.acik.com/api/v1/endpoint-agent" `
   -Start
 ```
 
@@ -107,7 +111,6 @@ fail-fast eder ve eski store'un sessizce kullanilmasini onler:
 powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap.ps1" `
   -PackageUrl $PackageUrl `
   -ExpectedZipSha256 $ExpectedZipSha256 `
-  -ApiUrl "https://testai.acik.com/api/v1/endpoint-agent" `
   -ResetCredentialStore `
   -Start `
   -Force
