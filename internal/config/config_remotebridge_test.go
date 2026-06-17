@@ -25,6 +25,15 @@ func TestRemoteBridgeDefaultsDisabled(t *testing.T) {
 	if cfg.RemoteBridgeBackoffMin != time.Second || cfg.RemoteBridgeBackoffMax != 5*time.Minute {
 		t.Errorf("backoff defaults %s/%s", cfg.RemoteBridgeBackoffMin, cfg.RemoteBridgeBackoffMax)
 	}
+	if cfg.RemoteBridgeOperationsEnabled {
+		t.Fatal("remote-bridge operations must default to false")
+	}
+	if cfg.RemoteBridgePermitBrokerPublicKeyB64 != "" || cfg.RemoteBridgePermitKeyID != "" {
+		t.Fatal("remote-bridge broker permit trust anchors must default empty")
+	}
+	if cfg.RemoteBridgeAttestationEvidenceB64 != "" {
+		t.Fatal("remote-bridge attestation evidence must default empty")
+	}
 }
 
 func TestRemoteBridgeEnvOverrides(t *testing.T) {
@@ -41,6 +50,7 @@ func TestRemoteBridgeEnvOverrides(t *testing.T) {
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME", "bridge.example")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX", ".acik.local")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX", "adcomputer:")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_EVIDENCE_B64", "ZGlnZXN0fGJ1aWxkZXJ8cG9saWN5fHNpZw==")
 	cfg := LoadFromEnv()
 	if !cfg.RemoteBridgeEnabled || cfg.RemoteBridgeBrokerAddr != "broker.example:8443" ||
 		!cfg.RemoteBridgeInsecurePlaintext ||
@@ -53,7 +63,8 @@ func TestRemoteBridgeEnvOverrides(t *testing.T) {
 		cfg.RemoteBridgePermitKeyID != "kid-1" ||
 		cfg.RemoteBridgeTLSServerName != "bridge.example" ||
 		cfg.RemoteBridgeMTLSCertSubjectSuffix != ".acik.local" ||
-		cfg.RemoteBridgeMTLSCertSANURIPrefix != "adcomputer:" {
+		cfg.RemoteBridgeMTLSCertSANURIPrefix != "adcomputer:" ||
+		cfg.RemoteBridgeAttestationEvidenceB64 != "ZGlnZXN0fGJ1aWxkZXJ8cG9saWN5fHNpZw==" {
 		t.Fatalf("env overrides not applied: %+v", cfg)
 	}
 }

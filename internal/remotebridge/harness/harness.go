@@ -18,7 +18,10 @@ package harness
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -61,6 +64,11 @@ const (
 	// rather than empty. The base64 decodes to "t3-idle-no-attestation".
 	helloCertFingerprintUnavailable = "unavailable"
 	helloAttestationPlaceholder     = "dDMtaWRsZS1uby1hdHRlc3RhdGlvbg=="
+
+	// maxAttestationEvidenceB64Len bounds the configured evidence blob before
+	// it is copied into every AgentHello. The live broker re-verifies the
+	// content; this guard catches obvious operator/config mistakes locally.
+	maxAttestationEvidenceB64Len = 16 * 1024
 )
 
 // Config parameterises the harness. Zero values take the documented
@@ -88,6 +96,11 @@ type Config struct {
 	// GetClientCertificate), making operation-capable remote-ops outbound mTLS
 	// rather than server-auth-only TLS. InsecureSkipVerify is always rejected.
 	TLSConfig *tls.Config
+	// AttestationEvidenceB64 optionally carries broker-verifiable provenance
+	// evidence for AgentHello. Empty keeps the explicit T-3 placeholder. The
+	// agent never receives or uses the signing private key; callers provide
+	// only the already-signed, standard-base64 evidence blob.
+	AttestationEvidenceB64 string
 	// FirstHeartbeatDeadline bounds how long a fresh stream may stay silent
 	// before the harness treats the connection as dead (default 15s).
 	FirstHeartbeatDeadline time.Duration
@@ -187,6 +200,9 @@ func New(cfg Config, logger *log.Logger) (*Harness, error) {
 	}
 	if cfg.Dialer == nil && cfg.TLSConfig != nil && cfg.TLSConfig.InsecureSkipVerify {
 		return nil, errors.New("remote-bridge harness refuses TLS config with InsecureSkipVerify")
+	}
+	if err := validateAttestationEvidenceB64(cfg.AttestationEvidenceB64); err != nil {
+		return nil, err
 	}
 	if cfg.Dialer == nil && cfg.PTYDispatcher != nil {
 		if cfg.InsecurePlaintext {
@@ -305,11 +321,10 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 	if err := sender.sendHello(&pb.AgentHello{
 		AgentVersion:           h.cfg.AgentVersion,
 		DeviceId:               deviceID,
-		CertFingerprint:        helloCertFingerprintUnavailable,
-		AttestationEvidenceB64: helloAttestationPlaceholder,
+		CertFingerprint:        helloCertFingerprint(h.cfg.TLSConfig),
+		AttestationEvidenceB64: configuredAttestationEvidenceB64(h.cfg),
 		ProtocolVersion:        ProtocolVersion,
-		// AdvertisedCapabilities stays EMPTY: the idle harness has no real
-		// VIEW_ONLY/PTY surface and the hello is advisory (Codex T-3 Q4).
+		AdvertisedCapabilities: advertisedCapabilities(h.cfg),
 	}); err != nil {
 		return false, fmt.Errorf("send agent hello: %w", err)
 	}
@@ -514,6 +529,46 @@ func (h *Harness) handleInbound(env *pb.Envelope, seqGuard *inboundSeqGuard) (in
 	default:
 		return actionDefectClose, "unsupported-payload-in-idle"
 	}
+}
+
+func advertisedCapabilities(cfg Config) []pb.Capability {
+	if cfg.PTYDispatcher == nil {
+		return nil
+	}
+	return []pb.Capability{pb.Capability_CONSTRAINED_PTY}
+}
+
+func helloCertFingerprint(cfg *tls.Config) string {
+	if cfg == nil || len(cfg.Certificates) == 0 || len(cfg.Certificates[0].Certificate) == 0 {
+		return helloCertFingerprintUnavailable
+	}
+	sum := sha256.Sum256(cfg.Certificates[0].Certificate[0])
+	return hex.EncodeToString(sum[:])
+}
+
+func configuredAttestationEvidenceB64(cfg Config) string {
+	value := strings.TrimSpace(cfg.AttestationEvidenceB64)
+	if value == "" {
+		return helloAttestationPlaceholder
+	}
+	return value
+}
+
+func validateAttestationEvidenceB64(raw string) error {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil
+	}
+	if len(value) > maxAttestationEvidenceB64Len {
+		return fmt.Errorf("remote-bridge attestation evidence exceeds %d bytes", maxAttestationEvidenceB64Len)
+	}
+	if strings.ContainsAny(value, " \t\r\n") {
+		return errors.New("remote-bridge attestation evidence must be single-line standard base64")
+	}
+	if _, err := base64.StdEncoding.DecodeString(value); err != nil {
+		return fmt.Errorf("remote-bridge attestation evidence must be valid standard base64: %w", err)
+	}
+	return nil
 }
 
 // obeyKill terminates local session state immediately. T-3 keeps no live
