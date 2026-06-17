@@ -234,7 +234,17 @@ func capture() (RawFrame, error) {
 	defer procDeleteObject.Call(hBmp)
 
 	old, _, _ := procSelectObject.Call(hMem, hBmp)
-	defer procSelectObject.Call(hMem, old) // restore before DeleteDC
+	if old == 0 || old == ^uintptr(0) {
+		return RawFrame{}, fmt.Errorf("dataplane: SelectObject bitmap failed")
+	}
+	selected := true
+	restoreSelected := func() {
+		if selected {
+			procSelectObject.Call(hMem, old)
+			selected = false
+		}
+	}
+	defer restoreSelected()
 
 	// CAPTUREBLT includes layered/transparent windows in the grab.
 	ret, _, _ := procBitBlt.Call(hMem, 0, 0, uintptr(wdt), uintptr(hgt),
@@ -242,6 +252,8 @@ func capture() (RawFrame, error) {
 	if ret == 0 {
 		return RawFrame{}, fmt.Errorf("dataplane: BitBlt failed")
 	}
+	// GetDIBits requires the target bitmap to be deselected from the DC.
+	restoreSelected()
 
 	stride := wdt * 4
 	buf := make([]byte, stride*hgt)
