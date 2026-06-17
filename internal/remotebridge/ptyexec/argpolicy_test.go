@@ -1,12 +1,41 @@
 package ptyexec
 
 import (
+	_ "embed"
+	"encoding/json"
 	"errors"
 	"sort"
 	"testing"
 
 	"platform-agent/internal/remotebridge/operation"
 )
+
+//go:embed testdata/pty-arg-policy-vector.json
+var brokerArgPolicyVectorJSON []byte
+
+type brokerArgPolicyVector struct {
+	SchemaVersion int                             `json:"schemaVersion"`
+	PolicyVersion string                          `json:"policyVersion"`
+	MaxLine       int                             `json:"maxLine"`
+	MaxValueLen   int                             `json:"maxValueLen"`
+	Commands      map[string]brokerArgCommandSpec `json:"commands"`
+}
+
+type brokerArgCommandSpec struct {
+	ValuelessFlags []string                      `json:"valuelessFlags"`
+	ValueFlags     map[string]brokerArgValueSpec `json:"valueFlags"`
+	ForbiddenFlags []string                      `json:"forbiddenFlags"`
+	OperandRule    string                        `json:"operandRule"`
+	MaxOperands    int                           `json:"maxOperands"`
+}
+
+type brokerArgValueSpec struct {
+	Type      string   `json:"type"`
+	Min       int64    `json:"min"`
+	Max       int64    `json:"max"`
+	Values    []string `json:"values"`
+	Sensitive bool     `json:"sensitive"`
+}
 
 // sortedKeys returns the lowercased set keys, sorted — for stable comparison in the drift guard.
 func sortedKeys(m map[string]struct{}) []string {
@@ -30,19 +59,76 @@ func eqStrings(a, b []string) bool {
 	return true
 }
 
-// TestPilotArgPolicyParity is the DRIFT GUARD. It re-states the broker PtyArgumentPolicy PILOT_DEFAULT_POLICY
+// TestPilotArgPolicyMatchesBrokerGoldenVector is the cross-repo DRIFT GUARD. The JSON fixture is emitted by
+// the broker repo and committed byte-for-byte here; this test asserts the agent mirror equals that broker
+// contract before owner-gated LIVE execution can rely on it.
+func TestPilotArgPolicyMatchesBrokerGoldenVector(t *testing.T) {
+	var vector brokerArgPolicyVector
+	if err := json.Unmarshal(brokerArgPolicyVectorJSON, &vector); err != nil {
+		t.Fatalf("parse broker arg-policy vector: %v", err)
+	}
+	if vector.SchemaVersion != 1 {
+		t.Fatalf("unexpected arg-policy vector schemaVersion=%d", vector.SchemaVersion)
+	}
+	if vector.PolicyVersion != "pilot-default-v1" {
+		t.Fatalf("unexpected arg-policy vector policyVersion=%q", vector.PolicyVersion)
+	}
+	if vector.MaxValueLen != argMaxValueLen {
+		t.Fatalf("argMaxValueLen=%d, broker vector maxValueLen=%d", argMaxValueLen, vector.MaxValueLen)
+	}
+	if vector.MaxLine != operation.MaxCommandLine {
+		t.Fatalf("operation.MaxCommandLine=%d, broker vector maxLine=%d", operation.MaxCommandLine, vector.MaxLine)
+	}
+
+	got := pilotArgPolicies()
+	gotCommands := make([]string, 0, len(got))
+	for id := range got {
+		gotCommands = append(gotCommands, id)
+	}
+	sort.Strings(gotCommands)
+	wantCommands := make([]string, 0, len(vector.Commands))
+	for id := range vector.Commands {
+		wantCommands = append(wantCommands, id)
+	}
+	sort.Strings(wantCommands)
+	if !eqStrings(gotCommands, wantCommands) {
+		t.Fatalf("pilot policy commands = %v, broker vector commands = %v", gotCommands, wantCommands)
+	}
+
+	for command, want := range vector.Commands {
+		spec := got[command]
+		if !eqStrings(sortedKeys(spec.valuelessFlags), sortedStrings(want.ValuelessFlags)) {
+			t.Errorf("%s valueless flags = %v, broker vector = %v", command, sortedKeys(spec.valuelessFlags), sortedStrings(want.ValuelessFlags))
+		}
+		if !eqStrings(valueFlagKeys(spec), sortedValueFlagKeys(want.ValueFlags)) {
+			t.Errorf("%s value flag keys = %v, broker vector = %v", command, valueFlagKeys(spec), sortedValueFlagKeys(want.ValueFlags))
+		}
+		if !eqStrings(sortedKeys(spec.forbiddenFlags), sortedStrings(want.ForbiddenFlags)) {
+			t.Errorf("%s forbidden flags = %v, broker vector = %v", command, sortedKeys(spec.forbiddenFlags), sortedStrings(want.ForbiddenFlags))
+		}
+		if operandRuleName(spec.operandRule) != want.OperandRule {
+			t.Errorf("%s operand rule = %s, broker vector = %s", command, operandRuleName(spec.operandRule), want.OperandRule)
+		}
+		if spec.maxOperands != want.MaxOperands {
+			t.Errorf("%s maxOperands = %d, broker vector = %d", command, spec.maxOperands, want.MaxOperands)
+		}
+		for flag, wantValue := range want.ValueFlags {
+			gotValue, ok := spec.valueFlags[flag]
+			if !ok {
+				t.Errorf("%s missing value flag %s", command, flag)
+				continue
+			}
+			assertValueSpecMatchesBrokerVector(t, command, flag, gotValue, wantValue)
+		}
+	}
+}
+
+// TestPilotArgPolicyParity re-states the broker PtyArgumentPolicy PILOT_DEFAULT_POLICY
 // values explicitly (the authoritative endpoint-admin-service table) and asserts the agent mirror equals them
 // EXHAUSTIVELY — exact valueless-flag set, exact value-flag KEY set, exact forbidden set, exact enum
 // membership (size + contents), exact ranges, exact operand rule + max. The exhaustiveness matters: it
 // catches an agent-side WIDENING (an extra flag/value-flag/enum value — the broker-compromise-bypass
 // direction), not just a narrowing.
-//
-// SCOPE of the guard (honest): the broker repo is not present here, so this CANNOT auto-detect a broker-side
-// change — it pins the AGENT side to the re-stated broker values, so any agent edit must update this test
-// deliberately, and a reviewer comparing this table to the broker on a broker-side change sees the divergence.
-// A fully automatic cross-repo guard (a committed broker-emitted policy golden vector, like the existing
-// cross-language pty-permit-vector.json) is the permanent follow-up (PR #201 follow-up 2). The agent set is
-// the broker pilot set MINUS the shell-only `ver`.
 func TestPilotArgPolicyParity(t *testing.T) {
 	p := pilotArgPolicies()
 
@@ -141,6 +227,73 @@ func valueFlagKeys(s argCommandSpec) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func sortedStrings(values []string) []string {
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+	return out
+}
+
+func sortedValueFlagKeys(values map[string]brokerArgValueSpec) []string {
+	out := make([]string, 0, len(values))
+	for k := range values {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func enumValues(v argValueSpec) []string {
+	out := make([]string, 0, len(v.enum))
+	for k := range v.enum {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func operandRuleName(rule argOperandRule) string {
+	switch rule {
+	case operandNone:
+		return "NONE"
+	case operandOptionalHost:
+		return "OPTIONAL_HOST"
+	case operandRequiredHost:
+		return "REQUIRED_HOST"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+func assertValueSpecMatchesBrokerVector(t *testing.T, command, flag string, got argValueSpec, want brokerArgValueSpec) {
+	t.Helper()
+	if got.sensitive != want.Sensitive {
+		t.Errorf("%s %s sensitivity = %v, broker vector = %v", command, flag, got.sensitive, want.Sensitive)
+	}
+	switch want.Type {
+	case "integer":
+		if !got.integer {
+			t.Errorf("%s %s type = enum, broker vector = integer", command, flag)
+			return
+		}
+		if got.min != want.Min || got.max != want.Max {
+			t.Errorf("%s %s range = [%d,%d], broker vector = [%d,%d]", command, flag, got.min, got.max, want.Min, want.Max)
+		}
+		if len(want.Values) != 0 {
+			t.Errorf("%s %s integer vector unexpectedly carries enum values: %v", command, flag, want.Values)
+		}
+	case "enum":
+		if got.integer {
+			t.Errorf("%s %s type = integer, broker vector = enum", command, flag)
+			return
+		}
+		if !eqStrings(enumValues(got), sortedStrings(want.Values)) {
+			t.Errorf("%s %s enum = %v, broker vector = %v", command, flag, enumValues(got), sortedStrings(want.Values))
+		}
+	default:
+		t.Errorf("%s %s unknown broker vector type %q", command, flag, want.Type)
+	}
 }
 
 // assertEnumExactly checks an enum value-flag accepts EXACTLY the given members (size + each) and nothing
