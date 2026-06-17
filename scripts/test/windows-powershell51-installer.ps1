@@ -13,6 +13,7 @@ $parseTargets = @(
     "installers\windows\bootstrap-package.ps1",
     "installers\windows\install.ps1",
     "installers\windows\uninstall.ps1",
+    "installers\windows\bootstrap-package.Tests.ps1",
     "installers\windows\install.Tests.ps1"
 )
 
@@ -53,14 +54,21 @@ if (-not $pester) {
 Write-Host "Using Pester $($pester.Version) from $($pester.Path)"
 Import-Module $pester.Path -Force
 
-$result = Invoke-Pester -Path (Join-Path $repoRoot "installers\windows\install.Tests.ps1") -PassThru
-
 $failedCount = 0
-if ($null -ne $result) {
-    if ($result.PSObject.Properties.Name -contains "FailedCount") {
-        $failedCount = [int]$result.FailedCount
-    } elseif ($result.PSObject.Properties.Name -contains "Failed") {
-        $failedCount = [int]$result.Failed
+$pesterTargets = @(
+    "installers\windows\bootstrap-package.Tests.ps1",
+    "installers\windows\install.Tests.ps1"
+)
+
+foreach ($relativeTestPath in $pesterTargets) {
+    $result = Invoke-Pester -Path (Join-Path $repoRoot $relativeTestPath) -PassThru
+
+    if ($null -ne $result) {
+        if ($result.PSObject.Properties.Name -contains "FailedCount") {
+            $failedCount += [int]$result.FailedCount
+        } elseif ($result.PSObject.Properties.Name -contains "Failed") {
+            $failedCount += [int]$result.Failed
+        }
     }
 }
 

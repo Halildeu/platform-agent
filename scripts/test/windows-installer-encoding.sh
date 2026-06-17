@@ -47,7 +47,10 @@ required_install_markers = [
 required_bootstrap_markers = [
     "[switch]$AutoEnroll",
     "[switch]$ResetCredentialStore",
-    'https://mtls.testai.acik.com/api/v1/endpoint-agent',
+    "function Get-PackageUrlHost",
+    "function Resolve-BootstrapApiUrls",
+    '"https://$hostName/api/v1/endpoint-agent"',
+    '"https://mtls.$hostName/api/v1/endpoint-agent"',
     '$installArgs["AutoEnroll"] = $true',
     '$installArgs["AutoEnrollApiUrl"] = $AutoEnrollApiUrl',
     '$installArgs["AutoEnrollCertSANURIPrefix"] = $AutoEnrollCertSANURIPrefix',
