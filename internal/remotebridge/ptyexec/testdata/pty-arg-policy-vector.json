@@ -1,0 +1,95 @@
+{
+  "_comment": "Faz 22.6 CONSTRAINED_PTY broker-emitted argument-policy golden vector. AUTHORITATIVE source = endpoint-admin-service PtyArgumentPolicy.PILOT_DEFAULT_POLICY. platform-backend asserts this fixture equals broker constants; platform-agent asserts its ptyexec mirror equals this same fixture. Update both repos deliberately when broker policy changes.",
+  "schemaVersion": 1,
+  "policyVersion": "pilot-default-v1",
+  "source": "endpoint-admin-service:PtyArgumentPolicy.PILOT_DEFAULT_POLICY",
+  "maxLine": 4096,
+  "maxValueLen": 64,
+  "commands": {
+    "hostname": {
+      "valuelessFlags": [],
+      "valueFlags": {},
+      "forbiddenFlags": [],
+      "operandRule": "NONE",
+      "maxOperands": 0
+    },
+    "netstat": {
+      "valuelessFlags": ["-a", "-b", "-e", "-f", "-n", "-o", "-q", "-r", "-s", "-y"],
+      "valueFlags": {
+        "-p": {
+          "type": "enum",
+          "values": ["icmp", "icmpv6", "ip", "ipv6", "tcp", "tcpv6", "udp", "udpv6"],
+          "sensitive": false
+        }
+      },
+      "forbiddenFlags": [],
+      "operandRule": "NONE",
+      "maxOperands": 0
+    },
+    "ping": {
+      "valuelessFlags": ["-4", "-6", "-a", "-f"],
+      "valueFlags": {
+        "-i": {
+          "type": "integer",
+          "min": 1,
+          "max": 255,
+          "sensitive": false
+        },
+        "-l": {
+          "type": "integer",
+          "min": 1,
+          "max": 8192,
+          "sensitive": false
+        },
+        "-n": {
+          "type": "integer",
+          "min": 1,
+          "max": 10,
+          "sensitive": false
+        },
+        "-w": {
+          "type": "integer",
+          "min": 1,
+          "max": 60000,
+          "sensitive": false
+        }
+      },
+      "forbiddenFlags": ["-t"],
+      "operandRule": "REQUIRED_HOST",
+      "maxOperands": 1
+    },
+    "tracert": {
+      "valuelessFlags": ["-4", "-6", "-d"],
+      "valueFlags": {
+        "-h": {
+          "type": "integer",
+          "min": 1,
+          "max": 255,
+          "sensitive": false
+        },
+        "-w": {
+          "type": "integer",
+          "min": 1,
+          "max": 60000,
+          "sensitive": false
+        }
+      },
+      "forbiddenFlags": [],
+      "operandRule": "REQUIRED_HOST",
+      "maxOperands": 1
+    },
+    "whoami": {
+      "valuelessFlags": ["/all", "/fqdn", "/groups", "/logonid", "/nh", "/priv", "/upn", "/user"],
+      "valueFlags": {
+        "/fo": {
+          "type": "enum",
+          "values": ["csv", "list", "table"],
+          "sensitive": false
+        }
+      },
+      "forbiddenFlags": [],
+      "operandRule": "NONE",
+      "maxOperands": 0
+    }
+  }
+}

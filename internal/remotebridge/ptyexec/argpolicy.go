@@ -77,6 +77,10 @@ type argValueSpec struct {
 	min     int64
 	max     int64
 	enum    map[string]struct{} // lowercased; nil/empty ⇒ not an enum spec
+	// sensitive mirrors broker ValueSpec.sensitive. The pilot marks none sensitive, but carrying the bit in
+	// the mirror lets the golden-vector test catch a future broker redaction-contract change instead of
+	// silently dropping it.
+	sensitive bool
 }
 
 // intRange mirrors broker ValueSpec.intRange.
