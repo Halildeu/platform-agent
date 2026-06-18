@@ -32,6 +32,7 @@ const (
 
 	ncryptPadPKCS1Flag = 0x2 // NCRYPT_PAD_PKCS1_FLAG
 	ncryptPadPSSFlag   = 0x8 // NCRYPT_PAD_PSS_FLAG
+	ncryptMachineKey   = 0x20
 
 	ncryptAlgorithmProperty = "Algorithm Name" // NCRYPT_ALGORITHM_PROPERTY
 )
@@ -44,8 +45,28 @@ var (
 	procSign    = ncryptMod.NewProc("NCryptSignHash")
 	procFreeObj = ncryptMod.NewProc("NCryptFreeObject")
 	procGetProp = ncryptMod.NewProc("NCryptGetProperty")
+	procOpenSP  = ncryptMod.NewProc("NCryptOpenStorageProvider")
+	procOpenKey = ncryptMod.NewProc("NCryptOpenKey")
 	procRelCtx  = advapi32Mod.NewProc("CryptReleaseContext")
 )
+
+type cryptKeyProvInfo struct {
+	ContainerName *uint16
+	ProvName      *uint16
+	ProvType      uint32
+	Flags         uint32
+	ProvParamLen  uint32
+	ProvParam     uintptr
+	KeySpec       uint32
+}
+
+type keyProviderInfo struct {
+	ContainerName string
+	ProviderName  string
+	ProviderType  uint32
+	Flags         uint32
+	KeySpec       uint32
+}
 
 type bcryptPKCS1PaddingInfo struct{ AlgID *uint16 }
 
@@ -67,6 +88,7 @@ type bcryptPSSPaddingInfo struct {
 // bounded leak rather than a crash-prone cleanup path.
 type cngSigner struct {
 	handle     uintptr
+	provider   uintptr
 	callerFree bool // pfCallerFreeProvOrNCryptKey — only then may we free
 	ctx        *windows.CertContext
 	pub        crypto.PublicKey
@@ -81,7 +103,11 @@ func (s *cngSigner) Close() {
 	if s.handle != 0 && s.callerFree {
 		_, _, _ = procFreeObj.Call(s.handle) // NCRYPT key spec only (legacy rejected at acquire)
 	}
+	if s.provider != 0 {
+		_, _, _ = procFreeObj.Call(s.provider)
+	}
 	s.handle = 0
+	s.provider = 0
 	s.ctx = nil
 }
 
@@ -152,16 +178,22 @@ func bcryptHashAlgID(h crypto.Hash) (string, error) {
 	}
 }
 
-// acquireSigner obtains a crypto.Signer for the cert's CNG private key using the
-// .NET-equivalent flags (SILENT | PREFER_NCRYPT, no cache). pub is the leaf's
-// public key (used for crypto.Signer.Public()). #147: this replaces the
-// certtostore.CertKey path that access-violates on valid PCP/TPM keys. The
-// caller-free + key-spec ownership contract is honored: a legacy CSP handle is
-// released (CryptReleaseContext) and rejected; only an NCrypt handle is kept.
+// acquireSigner obtains a crypto.Signer for the cert's CNG private key. AgentPC2
+// live evidence (#1643) proved that CryptAcquireCertificatePrivateKey can still
+// access-violate on valid AD CS CNG machine certs. Prefer the explicit provider
+// path: read CERT_KEY_PROV_INFO, open the KSP, then NCryptOpenKey by container.
+// This avoids the crash-prone native acquire helper entirely for normal AD CS
+// machine certificates.
 func acquireSigner(ctx *windows.CertContext, pub crypto.PublicKey) (crypto.Signer, error) {
 	if !hasPrivateKeyBinding(ctx) {
 		return nil, errors.New("certificate has no private-key binding")
 	}
+	if signer, err := acquireSignerFromKeyProvInfo(ctx, pub); err == nil {
+		return signer, nil
+	} else if !errors.Is(err, errNoKeyProvInfo) {
+		return nil, err
+	}
+
 	var (
 		kh         uintptr
 		keySpec    uint32
@@ -193,6 +225,95 @@ func acquireSigner(ctx *windows.CertContext, pub crypto.PublicKey) (crypto.Signe
 	// callerFree) and retains the cert context for process lifetime. See
 	// cngSigner doc.
 	return &cngSigner{handle: kh, callerFree: callerFree != 0, ctx: ctx, pub: pub}, nil
+}
+
+var errNoKeyProvInfo = errors.New("certificate has no CERT_KEY_PROV_INFO")
+
+func acquireSignerFromKeyProvInfo(ctx *windows.CertContext, pub crypto.PublicKey) (crypto.Signer, error) {
+	info, err := keyProvInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	providerName := info.ProviderName
+	containerName := info.ContainerName
+	if providerName == "" || containerName == "" {
+		return nil, fmt.Errorf("CERT_KEY_PROV_INFO missing provider/container name")
+	}
+	if info.ProviderType != 0 {
+		return nil, fmt.Errorf("certificate private key provider is legacy CSP, not CNG/KSP (provider=%q type=%d keySpec=0x%x)",
+			providerName, info.ProviderType, info.KeySpec)
+	}
+	providerNamePtr, err := windows.UTF16PtrFromString(providerName)
+	if err != nil {
+		return nil, fmt.Errorf("encode KSP provider name: %w", err)
+	}
+	containerNamePtr, err := windows.UTF16PtrFromString(containerName)
+	if err != nil {
+		return nil, fmt.Errorf("encode KSP container name: %w", err)
+	}
+
+	var provider uintptr
+	r, _, _ := procOpenSP.Call(
+		uintptr(unsafe.Pointer(&provider)),
+		uintptr(unsafe.Pointer(providerNamePtr)),
+		0,
+	)
+	if r != 0 {
+		return nil, fmt.Errorf("NCryptOpenStorageProvider(%q) failed: NTSTATUS 0x%x", providerName, r)
+	}
+	var key uintptr
+	r, _, _ = procOpenKey.Call(
+		provider,
+		uintptr(unsafe.Pointer(&key)),
+		uintptr(unsafe.Pointer(containerNamePtr)),
+		uintptr(info.KeySpec),
+		ncryptMachineKey,
+	)
+	if r != 0 {
+		_, _, _ = procFreeObj.Call(provider)
+		return nil, fmt.Errorf("NCryptOpenKey(provider=%q container=%q keySpec=0x%x machine=true) failed: NTSTATUS 0x%x",
+			providerName, containerName, info.KeySpec, r)
+	}
+	if !ncryptHandleUsable(key) {
+		_, _, _ = procFreeObj.Call(key)
+		_, _, _ = procFreeObj.Call(provider)
+		return nil, fmt.Errorf("NCryptOpenKey(provider=%q container=%q) returned unusable key handle", providerName, containerName)
+	}
+	return &cngSigner{handle: key, provider: provider, callerFree: true, ctx: ctx, pub: pub}, nil
+}
+
+func keyProvInfo(ctx *windows.CertContext) (*keyProviderInfo, error) {
+	var size uint32
+	r, _, _ := procCertGetCertificateContextProperty.Call(
+		uintptr(unsafe.Pointer(ctx)),
+		certKeyProvInfoPropID,
+		0,
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if r == 0 || size == 0 {
+		return nil, errNoKeyProvInfo
+	}
+	buf := make([]byte, size)
+	r, _, err := procCertGetCertificateContextProperty.Call(
+		uintptr(unsafe.Pointer(ctx)),
+		certKeyProvInfoPropID,
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if r == 0 {
+		return nil, fmt.Errorf("CertGetCertificateContextProperty(CERT_KEY_PROV_INFO): %w", err)
+	}
+	if uintptr(len(buf)) < unsafe.Sizeof(cryptKeyProvInfo{}) {
+		return nil, fmt.Errorf("CERT_KEY_PROV_INFO too small: %d bytes", len(buf))
+	}
+	raw := (*cryptKeyProvInfo)(unsafe.Pointer(&buf[0]))
+	return &keyProviderInfo{
+		ContainerName: windows.UTF16PtrToString(raw.ContainerName),
+		ProviderName:  windows.UTF16PtrToString(raw.ProvName),
+		ProviderType:  raw.ProvType,
+		Flags:         raw.Flags,
+		KeySpec:       raw.KeySpec,
+	}, nil
 }
 
 func acquireResultIsNCrypt(keySpec uint32, ncryptProbeOK bool) bool {
