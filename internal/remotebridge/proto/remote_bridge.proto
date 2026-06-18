@@ -81,8 +81,8 @@ enum ChannelType {
 //
 // Channel/payload compatibility (enforced by the T-2a adapter, tested):
 //   CONTROL : agent_hello, session_request, consent_prompt, consent_result,
-//             operation_request, operation_permit, kill, audit_event,
-//             heartbeat, error
+//             operation_request, operation_permit, operation_dispatch, kill,
+//             audit_event, heartbeat, error
 //   DATA    : data_frame, heartbeat, error
 // ---------------------------------------------------------------------------
 message Envelope {
@@ -107,6 +107,7 @@ message Envelope {
     Heartbeat heartbeat = 18;
     DataFrame data_frame = 19;
     ErrorFrame error = 20;
+    OperationDispatch operation_dispatch = 21;
   }
 }
 
@@ -181,6 +182,19 @@ message OperationPermit {
   int64 expires_at_epoch_millis = 13;
   int64 seq = 14;                    // monotonic per-session (replay guard)
   string signature_b64 = 15;         // broker signature over fields 1-14
+}
+
+// Broker → agent (CONTROL, T-4 CONSTRAINED_PTY): a signed permit paired with the
+// plaintext command to execute. The raw command travels toward the agent ONLY here
+// (never inside the permit, which carries only command_hash); it is authorization-
+// NEUTRAL — the agent trusts it only after re-deriving
+// CanonicalCommand.hash(command_line) == permit.command_hash against the SIGNED
+// permit. command_line is empty for VIEW_ONLY. The nested permit's signed bytes are
+// unchanged by this wrapper: verify the INNER permit, never the wrapper. (Wire
+// shadow-spec: docs/remote-bridge-wire-contract.md; Codex 019ecd07 B2.)
+message OperationDispatch {
+  OperationPermit permit = 1;
+  string command_line = 2;
 }
 
 // Broker → agent (CONTROL): terminate the session now. Sub-second delivery is

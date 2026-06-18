@@ -13,12 +13,15 @@ Read-Host -AsSecureString.
 param(
     [Parameter(Mandatory)] [string]$PackageUrl,
     [Parameter(Mandatory)] [string]$ExpectedZipSha256,
-    [string]$ApiUrl = "https://testai.acik.com/api/v1/endpoint-agent",
+    [string]$ApiUrl = "",
     [switch]$AutoEnroll,
-    [string]$AutoEnrollApiUrl = "https://mtls.testai.acik.com/api/v1/endpoint-agent",
+    [string]$AutoEnrollApiUrl = "",
     [string]$AutoEnrollCertSubjectSuffix = "",
     [string]$AutoEnrollCertSANURIPrefix = "adcomputer:",
     [int]$AutoEnrollJitterSeconds = 0,
+    [switch]$RemoteBridgeEnabled,
+    [string]$RemoteBridgeBrokerAddr = "",
+    [switch]$RemoteBridgeInsecurePlaintext,
     [string]$WorkDir = (Join-Path $env:TEMP "EndpointEnes"),
     [string]$ZipPath = (Join-Path $env:TEMP "EndpointAgent.zip"),
     [string]$EnrollmentToken = "",
@@ -54,6 +57,49 @@ function Assert-Sha256 {
     $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $Expected.ToLowerInvariant()) {
         throw "SHA256 mismatch for $Path. Expected=$Expected Actual=$actual"
+    }
+}
+
+function Get-PackageUrlHost {
+    param([Parameter(Mandatory)] [string]$Url)
+
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Url, [System.UriKind]::RelativeOrAbsolute, [ref]$uri)) {
+        throw "invalid -PackageUrl: $Url"
+    }
+
+    if (-not $uri.IsAbsoluteUri -or [string]::IsNullOrWhiteSpace($uri.Host)) {
+        throw "-PackageUrl must be an absolute URL with a host."
+    }
+
+    return $uri.Host.ToLowerInvariant()
+}
+
+function Resolve-BootstrapApiUrls {
+    param(
+        [Parameter(Mandatory)] [string]$PackageUrl,
+        [string]$ApiUrl,
+        [string]$AutoEnrollApiUrl,
+        [bool]$ApiUrlExplicit,
+        [bool]$AutoEnrollApiUrlExplicit
+    )
+
+    $hostName = Get-PackageUrlHost -Url $PackageUrl
+    $resolvedApiUrl = $ApiUrl
+    $resolvedAutoEnrollApiUrl = $AutoEnrollApiUrl
+
+    if ((-not $ApiUrlExplicit) -or [string]::IsNullOrWhiteSpace($resolvedApiUrl)) {
+        $resolvedApiUrl = "https://$hostName/api/v1/endpoint-agent"
+    }
+
+    if ((-not $AutoEnrollApiUrlExplicit) -or [string]::IsNullOrWhiteSpace($resolvedAutoEnrollApiUrl)) {
+        $resolvedAutoEnrollApiUrl = "https://mtls.$hostName/api/v1/endpoint-agent"
+    }
+
+    return [PSCustomObject]@{
+        PackageHost = $hostName
+        ApiUrl = $resolvedApiUrl
+        AutoEnrollApiUrl = $resolvedAutoEnrollApiUrl
     }
 }
 
@@ -102,6 +148,15 @@ function Get-EnrollmentToken {
 
 Assert-Administrator
 
+$resolvedUrls = Resolve-BootstrapApiUrls `
+    -PackageUrl $PackageUrl `
+    -ApiUrl $ApiUrl `
+    -AutoEnrollApiUrl $AutoEnrollApiUrl `
+    -ApiUrlExplicit $PSBoundParameters.ContainsKey("ApiUrl") `
+    -AutoEnrollApiUrlExplicit $PSBoundParameters.ContainsKey("AutoEnrollApiUrl")
+$ApiUrl = $resolvedUrls.ApiUrl
+$AutoEnrollApiUrl = $resolvedUrls.AutoEnrollApiUrl
+
 Write-Step "preparing work directory: $WorkDir"
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
@@ -129,6 +184,18 @@ if ($AutoEnroll -and -not [string]::IsNullOrWhiteSpace($EnrollmentToken)) {
 if ($AutoEnroll -and $ResetCredentialStore) {
     throw "-ResetCredentialStore is only valid for the HMAC enrollment-token fallback path."
 }
+if ($RemoteBridgeEnabled) {
+    if ([string]::IsNullOrWhiteSpace($RemoteBridgeBrokerAddr)) {
+        throw "-RemoteBridgeEnabled requires -RemoteBridgeBrokerAddr."
+    }
+} else {
+    if (-not [string]::IsNullOrWhiteSpace($RemoteBridgeBrokerAddr)) {
+        throw "-RemoteBridgeBrokerAddr requires -RemoteBridgeEnabled."
+    }
+    if ($RemoteBridgeInsecurePlaintext) {
+        throw "-RemoteBridgeInsecurePlaintext requires -RemoteBridgeEnabled."
+    }
+}
 
 $installArgs = @{}
 if ($AutoEnroll) {
@@ -153,6 +220,13 @@ if ($Force) {
 }
 if ($ResetCredentialStore) {
     $installArgs["ResetCredentialStore"] = $true
+}
+if ($RemoteBridgeEnabled) {
+    $installArgs["RemoteBridgeEnabled"] = $true
+    $installArgs["RemoteBridgeBrokerAddr"] = $RemoteBridgeBrokerAddr
+    if ($RemoteBridgeInsecurePlaintext) {
+        $installArgs["RemoteBridgeInsecurePlaintext"] = $true
+    }
 }
 
 try {

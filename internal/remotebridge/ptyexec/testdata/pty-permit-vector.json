@@ -1,0 +1,21 @@
+{
+  "_comment": "Faz 22.6 CONSTRAINED_PTY cross-language permit test vector. AUTHORITATIVE source = Java broker signer (RemoteBridgePermitSigner, broker-private/agent-public). The Go agent verifier (platform-agent) and the Java drift-guard test (platform-backend) both assert against THIS exact vector — if either side's canonical serialization drifts, its test breaks. ECDSA P-256 / SHA256withECDSA, DER signature. Minted 2026-06-15.",
+  "alg": "SHA256withECDSA",
+  "kid": "kid-1",
+  "permitVersion": 1,
+  "policyVersion": "policy-1",
+  "decisionId": "dec-1",
+  "sessionId": "sess-1",
+  "operationId": "op-1",
+  "deviceId": "dev-1",
+  "operatorSubject": "operator@x",
+  "capability": "CONSTRAINED_PTY",
+  "commandLine": "hostname",
+  "commandHash": "3fe84fc58498e9c42d44eace812fae06604a7b564fa062b6758df809de01ca2d",
+  "issuedAtEpochMillis": 1000,
+  "expiresAtEpochMillis": 1300,
+  "seq": 7,
+  "canonicalPayloadHex": "0000001e52656d6f74654272696467654f7065726174696f6e5065726d69743a76310000000f534841323536776974684543445341000000056b69642d310000000100000008706f6c6963792d31000000056465632d3100000006736573732d31000000046f702d31000000056465762d310000000a6f70657261746f7240780000000f434f4e53545241494e45445f505459000000403366653834666335383439386539633432643434656163653831326661653036363034613762353634666130363262363735386466383039646530316361326400000000000003e800000000000005140000000000000007",
+  "signatureB64": "MEUCIQCfIHHaqc4C+5JuPQRhTcHs1KhQK/KwD4TQroTMyqSGMQIgB7paDyQgsDzHb1EMbe9r024ZH/aUeQn5RScYmzWcJYQ=",
+  "brokerPublicKeyB64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY7DAtgJHZjLaQdftKvXyhbbNlvYCmbuOjoxfTk5LII9UrdN/xZMmP43qQ6zJtERHS7PpBbIppbPMTNxcPk9aIQ=="
+}

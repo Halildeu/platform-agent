@@ -145,7 +145,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: endpoint-agent-msi-unsigned
+          name: endpoint-agent-msi-unsigned-${{ steps.ver.outputs.version }}
           path: |
             msi-out/*.msi
             msi-out/msi-build-manifest.json
@@ -157,9 +157,16 @@ jobs:
     runs-on: [self-hosted, linux, signing]
     environment: trusted-signing-prod   # required-reviewers + protected-tags gate
     steps:
+      - name: Prepare clean artifact staging directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf incoming signed
+          mkdir -p incoming signed
+
       - uses: actions/download-artifact@v4
         with:
-          name: endpoint-agent-msi-unsigned
+          name: endpoint-agent-msi-unsigned-${{ needs.build-unsigned.outputs.version }}
           path: incoming
 
       - name: Sign via pinned wrapper (key never leaves host; RFC3161; fail-closed)
@@ -189,8 +196,21 @@ jobs:
           # rather than as a confusing "Permission denied" inside osslsigncode.
           perms="$(stat -c '%a' "$RUN_DIR")"
           [ "$perms" = "2770" ] || { echo "::error::RUN_DIR perms $perms != 2770 (codesign group cannot write out.msi)"; exit 1; }
-          IN_MSI="$(ls incoming/*.msi | head -1)"
-          [ -n "$IN_MSI" ] || { echo "::error::no unsigned MSI in artifact"; exit 1; }
+          msi_count="$(find incoming -maxdepth 1 -type f -name '*.msi' -print | wc -l | tr -d ' ')"
+          if [ "$msi_count" -ne 1 ]; then
+            echo "::error::expected exactly one unsigned MSI in artifact, found ${msi_count}"
+            find incoming -maxdepth 1 -type f -name '*.msi' -print | sort
+            exit 1
+          fi
+          IN_MSI="$(find incoming -maxdepth 1 -type f -name '*.msi' -print | sort | head -n 1)"
+          manifest_count="$(find incoming -maxdepth 1 -type f -name 'msi-build-manifest.json' -print | wc -l | tr -d ' ')"
+          if [ "$manifest_count" -ne 1 ]; then
+            echo "::error::expected exactly one msi-build-manifest.json in artifact, found ${manifest_count}"
+            find incoming -maxdepth 1 -type f -name 'msi-build-manifest.json' -print | sort
+            exit 1
+          fi
+          MANIFEST="$(find incoming -maxdepth 1 -type f -name 'msi-build-manifest.json' -print | sort | head -n 1)"
+          export MANIFEST
           # integrity: build-unsigned (-SigningMode none) names the MSI EXACTLY
           # 'EndpointAgent-<ver>-unsigned.msi'. Require the FULL name (not a substring,
           # which would let 0.2.1 match a 0.2.10 build) so a wrong-version MSI can't be
@@ -198,6 +218,12 @@ jobs:
           in_base="$(basename "$IN_MSI")"
           expected_unsigned="EndpointAgent-${VERSION}-unsigned.msi"
           [ "$in_base" = "$expected_unsigned" ] || { echo "::error::unsigned MSI '$in_base' != expected '$expected_unsigned'"; exit 1; }
+          manifest_product="$(python3 -c 'import json, os; print(json.load(open(os.environ["MANIFEST"])).get("product_version", ""))')"
+          manifest_source="$(python3 -c 'import json, os; print(json.load(open(os.environ["MANIFEST"])).get("source_version", ""))')"
+          manifest_file="$(python3 -c 'import json, os; print(json.load(open(os.environ["MANIFEST"])).get("msi_file", ""))')"
+          [ "$manifest_product" = "$VERSION" ] || { echo "::error::manifest product_version '$manifest_product' != expected '$VERSION'"; exit 1; }
+          [ "$manifest_source" = "$VERSION" ] || { echo "::error::manifest source_version '$manifest_source' != expected '$VERSION'"; exit 1; }
+          [ "$manifest_file" = "$expected_unsigned" ] || { echo "::error::manifest msi_file '$manifest_file' != expected '$expected_unsigned'"; exit 1; }
           cp "$IN_MSI" "$RUN_DIR/in.msi"
           OUT="$RUN_DIR/out.msi"
           # the wrapper enforces arg/path/.msi/double-sign + fail-closed timestamp
@@ -208,7 +234,7 @@ jobs:
           # under an honest, version-pinned name instead of the misleading 'unsigned'.
           SIGNED_NAME="EndpointAgent-${VERSION}-signed.msi"
           cp "$OUT" "signed/${SIGNED_NAME}"
-          cp incoming/msi-build-manifest.json signed/msi-build-manifest.json
+          cp "$MANIFEST" signed/msi-build-manifest.json
           # clean the run dir: the wrapper output is codesign-owned, but the work
           # dir is setgid root:codesign 2770 with NO sticky bit, and gh-runner is in
           # the codesign group, so directory-write lets gh-runner remove it directly

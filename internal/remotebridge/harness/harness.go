@@ -24,6 +24,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -74,9 +75,19 @@ type Config struct {
 	DeviceIDProvider func() string
 	// AgentVersion is the advisory hello version string.
 	AgentVersion string
-	// InsecurePlaintext dials without TLS. Lab/loopback only — the default
-	// is TLS with system roots; real mTLS client identity is T-4.
+	// InsecurePlaintext dials without TLS. Lab/loopback ONLY and ENFORCED:
+	// New refuses an InsecurePlaintext config whose BrokerAddr is not a
+	// loopback target (mirrors the broker's own non-loopback-plaintext
+	// refusal), so the "loopback only" promise is machine-enforced, not just
+	// documented. The default is TLS with system roots; real mTLS client
+	// identity is T-4.
 	InsecurePlaintext bool
+	// TLSConfig optionally overrides the client TLS configuration used for the
+	// broker connection. When PTYDispatcher is configured for real network use,
+	// this MUST include client certificate material (Certificates or
+	// GetClientCertificate), making operation-capable remote-ops outbound mTLS
+	// rather than server-auth-only TLS. InsecureSkipVerify is always rejected.
+	TLSConfig *tls.Config
 	// FirstHeartbeatDeadline bounds how long a fresh stream may stay silent
 	// before the harness treats the connection as dead (default 15s).
 	FirstHeartbeatDeadline time.Duration
@@ -94,8 +105,17 @@ type Config struct {
 	// DialTimeout caps a single transport connect attempt (default 10s).
 	DialTimeout time.Duration
 	// Dialer overrides the gRPC connection factory (bufconn test seam). When
-	// set, BrokerAddr is not required.
+	// set, BrokerAddr is not required AND the insecure-plaintext loopback guard
+	// is bypassed (in-process, no real network). MUST remain test/in-process
+	// only — production wiring (internal/app) never sets it; a real-network
+	// Dialer would inherit this bypass.
 	Dialer func(ctx context.Context) (*grpc.ClientConn, error)
+	// PTYDispatcher, when non-nil, ENABLES CONSTRAINED_PTY operation handling:
+	// an inbound operation_dispatch is decoded + executed + its output streamed
+	// on a fresh per-operation DATA stream. nil (the default) keeps the harness
+	// idle — an inbound operation_dispatch is a protocol defect (disabled-by-
+	// default; LIVE activation is owner-gated, ADR-0034 §13/D10).
+	PTYDispatcher PTYDispatcher
 }
 
 func (c Config) withDefaults() Config {
@@ -154,6 +174,28 @@ func New(cfg Config, logger *log.Logger) (*Harness, error) {
 	if cfg.Dialer == nil && strings.TrimSpace(cfg.BrokerAddr) == "" {
 		return nil, errors.New("remote-bridge harness requires a broker address")
 	}
+	// Insecure plaintext is lab/loopback ONLY — enforce it, do not merely
+	// document it. dial() would otherwise hand any BrokerAddr to
+	// insecure.NewCredentials(), sending gRPC in cleartext over the network
+	// against what the config comment promises. The broker refuses
+	// non-loopback plaintext server-side; this is the matching client-side
+	// fail-closed. (A Dialer override is the in-process bufconn test seam — no
+	// real network dial — so the guard does not apply there.)
+	if cfg.Dialer == nil && cfg.InsecurePlaintext && !isLoopbackBrokerAddr(cfg.BrokerAddr) {
+		return nil, fmt.Errorf("remote-bridge harness refuses insecure plaintext to non-loopback broker %q "+
+			"(insecure plaintext is lab/loopback only; use TLS for any remote broker)", cfg.BrokerAddr)
+	}
+	if cfg.Dialer == nil && cfg.TLSConfig != nil && cfg.TLSConfig.InsecureSkipVerify {
+		return nil, errors.New("remote-bridge harness refuses TLS config with InsecureSkipVerify")
+	}
+	if cfg.Dialer == nil && cfg.PTYDispatcher != nil {
+		if cfg.InsecurePlaintext {
+			return nil, errors.New("remote-bridge operation dispatch requires TLS/mTLS; plaintext dispatch is test-only")
+		}
+		if !hasClientCertificateMaterial(cfg.TLSConfig) {
+			return nil, errors.New("remote-bridge operation dispatch requires outbound mTLS client certificate")
+		}
+	}
 	if cfg.DeviceIDProvider == nil {
 		return nil, errors.New("remote-bridge harness requires a device id provider")
 	}
@@ -161,6 +203,30 @@ func New(cfg Config, logger *log.Logger) (*Harness, error) {
 		logger = log.Default()
 	}
 	return &Harness{cfg: cfg, logger: logger, sessions: make(map[string]SessionState)}, nil
+}
+
+// isLoopbackBrokerAddr reports whether addr targets a loopback interface — the
+// ONLY destination for which InsecurePlaintext (no TLS) is permitted. Decided
+// deterministically from the LITERAL address with NO DNS resolution (a name
+// could resolve to a different host at dial time — TOCTOU): the literal
+// "localhost" or an IP that parses as loopback. A hostname or a non-loopback
+// IP is rejected (fail-closed), mirroring the broker's server-side
+// non-loopback-plaintext refusal. NOTE (Codex review): the literal "localhost"
+// is accepted for lab ergonomics; it resolves via the local resolver at dial
+// time, so a hosts-file-poisoned "localhost" is a theoretical bypass — a
+// stricter posture (post-pilot) would accept only IP literals.
+func isLoopbackBrokerAddr(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No "host:port" form (e.g. a bare host) — treat the whole string as host.
+		host = addr
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Run drives the connect/reconnect loop until ctx is cancelled. It never
@@ -288,6 +354,20 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 				}
 			case actionTransportKill:
 				return healthy, errTransportKilled
+			case actionDispatch:
+				// A broker-authorized CONSTRAINED_PTY operation. Decode SYNCHRONOUSLY (a malformed broker
+				// frame is a protocol defect → close the stream), then execute + stream the output OFF the
+				// recv loop so a long-running command never blocks heartbeats or a KILL.
+				permit, commandLine, derr := decodeDispatch(r.env.GetOperationDispatch())
+				if derr != nil {
+					h.mu.Lock()
+					h.defects++
+					h.mu.Unlock()
+					_ = sender.sendError(derr.Error(), false)
+					_ = stream.CloseSend()
+					return healthy, fmt.Errorf("protocol defect: %s", derr.Error())
+				}
+				go h.dispatchOperation(sctx, conn, permit, commandLine, deviceID, sender)
 			case actionDefectClose:
 				h.mu.Lock()
 				h.defects++
@@ -306,14 +386,36 @@ func (h *Harness) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	if h.cfg.Dialer != nil {
 		return h.cfg.Dialer(ctx)
 	}
-	creds := credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if h.cfg.TLSConfig != nil {
+		tlsConfig = h.cfg.TLSConfig.Clone()
+		if tlsConfig.MinVersion == 0 {
+			tlsConfig.MinVersion = tls.VersionTLS12
+		}
+	}
+	if tlsConfig.InsecureSkipVerify {
+		return nil, errors.New("remote-bridge refuses TLS config with InsecureSkipVerify")
+	}
+	creds := credentials.NewTLS(tlsConfig)
 	if h.cfg.InsecurePlaintext {
+		// Defense-in-depth (Codex review): New already refuses InsecurePlaintext
+		// to a non-loopback broker, but re-assert at the actual transport point
+		// so the no-cleartext-to-remote invariant holds regardless of how the
+		// Harness was constructed (a future intra-package caller or test). Run
+		// absorbs this error into backoff; it can never fire via New.
+		if !isLoopbackBrokerAddr(h.cfg.BrokerAddr) {
+			return nil, fmt.Errorf("remote-bridge refuses insecure plaintext to non-loopback broker %q", h.cfg.BrokerAddr)
+		}
 		creds = insecure.NewCredentials()
 	}
 	return grpc.NewClient(h.cfg.BrokerAddr,
 		grpc.WithTransportCredentials(creds),
 		grpc.WithConnectParams(grpc.ConnectParams{MinConnectTimeout: h.cfg.DialTimeout}),
 	)
+}
+
+func hasClientCertificateMaterial(cfg *tls.Config) bool {
+	return cfg != nil && (len(cfg.Certificates) > 0 || cfg.GetClientCertificate != nil)
 }
 
 type inboundAction int
@@ -323,6 +425,10 @@ const (
 	actionHeartbeat
 	actionTransportKill
 	actionDefectClose
+	// actionDispatch: a broker-authorized CONSTRAINED_PTY operation_dispatch arrived and a PTY dispatcher is
+	// wired — connectOnce decodes it and runs it off the recv loop. Without a dispatcher this never occurs
+	// (handleInbound defect-closes operation_dispatch — disabled-by-default).
+	actionDispatch
 )
 
 // inboundSeqGuard tracks the broker-push sequencing mode of one stream. The
@@ -397,6 +503,14 @@ func (h *Harness) handleInbound(env *pb.Envelope, seqGuard *inboundSeqGuard) (in
 		h.logger.Printf("remote-bridge: broker error frame code=%q retryable=%v",
 			env.GetError().GetCode(), env.GetError().GetRetryable())
 		return actionContinue, ""
+	case env.GetOperationDispatch() != nil:
+		// A CONSTRAINED_PTY operation push (T-4). DISABLED-BY-DEFAULT: with no PTY dispatcher wired the agent
+		// has no execution machinery, so — like any other broker payload in idle mode — it is a protocol
+		// defect. When a dispatcher IS configured, connectOnce decodes + executes it off the recv loop.
+		if h.cfg.PTYDispatcher == nil {
+			return actionDefectClose, "unsupported-payload-in-idle"
+		}
+		return actionDispatch, ""
 	default:
 		return actionDefectClose, "unsupported-payload-in-idle"
 	}

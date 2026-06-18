@@ -363,6 +363,14 @@ jobs:
           docker push "$IMAGE:$TAG"; docker push "$IMAGE:sha-$SHORT_SHA"
           DIGEST=$(docker buildx imagetools inspect "$IMAGE:$TAG" | awk '/^Digest:/ {print $2; exit}')
           test -n "$DIGEST"
+          # The artifact-host image cannot contain its own final digest without
+          # changing that digest. Record the immutable pin in the GitHub Release
+          # manifest, which is the durable archive used by GitOps promotion.
+          jq --arg digest "$DIGEST" \
+             '.artifact_host_digest = $digest
+              | .artifact_host_image_ref = (.artifact_host_image + "@" + $digest)' \
+             dist/release-manifest.json > dist/release-manifest.json.tmp
+          mv dist/release-manifest.json.tmp dist/release-manifest.json
           echo "## Artifact-host image" >> "$GITHUB_STEP_SUMMARY"
           echo "\`$IMAGE:$TAG@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
           echo "gitops digest pin: kustomize/base/apps/artifact-host → \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
