@@ -86,12 +86,12 @@ type Config struct {
 	SelfUpdateActivationTimeout time.Duration
 	SelfUpdateServiceName       string
 
-	// Faz 22.6 T-3 remote-bridge idle transport harness (ADR-0038). All of
+	// Faz 22.6 remote-bridge transport harness (ADR-0038). All of
 	// this is INERT unless RemoteBridgeEnabled is explicitly set — the agent
 	// never auto-connects on start (disabled-by-default until the
-	// owner-gated pilot, ADR-0034 §13/D10). T-3 carries NO capture/PTY: the
-	// harness only maintains the outbound CONTROL stream (AgentHello +
-	// heartbeat-obey + KILL-obey).
+	// owner-gated pilot, ADR-0034 §13/D10). By default this remains the
+	// idle CONTROL stream (AgentHello + heartbeat-obey + KILL-obey). The
+	// constrained PTY executor is a second explicit opt-in below.
 	RemoteBridgeEnabled bool
 	// RemoteBridgeBrokerAddr is the broker gRPC target (host:port).
 	RemoteBridgeBrokerAddr string
@@ -113,6 +113,26 @@ type Config struct {
 	RemoteBridgeIdentityPollInterval time.Duration
 	// RemoteBridgeDialTimeout caps a single transport connect attempt.
 	RemoteBridgeDialTimeout time.Duration
+	// RemoteBridgeOperationsEnabled enables broker-signed CONSTRAINED_PTY
+	// operation dispatch. It is disabled by default and requires outbound mTLS
+	// client certificate material plus a pinned broker permit public key.
+	RemoteBridgeOperationsEnabled bool
+	// RemoteBridgePermitBrokerPublicKeyB64 is the base64 SPKI public key used
+	// to verify broker-minted OperationPermit signatures. Blank means no
+	// operation-capable dispatcher can be constructed.
+	RemoteBridgePermitBrokerPublicKeyB64 string
+	// RemoteBridgePermitKeyID pins the expected broker permit key id.
+	RemoteBridgePermitKeyID string
+	// RemoteBridgeTLSServerName optionally overrides SNI/hostname validation
+	// for the broker TLS connection. Blank means derive it from BrokerAddr.
+	RemoteBridgeTLSServerName string
+	// RemoteBridgeMTLSCertSubjectSuffix and RemoteBridgeMTLSCertSANURIPrefix
+	// narrow the LocalMachine\My client certificate used for operation-capable
+	// mTLS. Blank values fall back to the auto-enroll cert disambiguation
+	// fields; at least one effective disambiguator is required when operations
+	// are enabled.
+	RemoteBridgeMTLSCertSubjectSuffix string
+	RemoteBridgeMTLSCertSANURIPrefix  string
 }
 
 // BuildVersion is overridden at build time via
@@ -204,6 +224,12 @@ func LoadFromEnv() Config {
 	cfg.RemoteBridgeBackoffMax = envDuration("ENDPOINT_AGENT_REMOTE_BRIDGE_BACKOFF_MAX", cfg.RemoteBridgeBackoffMax)
 	cfg.RemoteBridgeIdentityPollInterval = envDuration("ENDPOINT_AGENT_REMOTE_BRIDGE_IDENTITY_POLL_INTERVAL", cfg.RemoteBridgeIdentityPollInterval)
 	cfg.RemoteBridgeDialTimeout = envDuration("ENDPOINT_AGENT_REMOTE_BRIDGE_DIAL_TIMEOUT", cfg.RemoteBridgeDialTimeout)
+	cfg.RemoteBridgeOperationsEnabled = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED", cfg.RemoteBridgeOperationsEnabled)
+	cfg.RemoteBridgePermitBrokerPublicKeyB64 = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64", cfg.RemoteBridgePermitBrokerPublicKeyB64)
+	cfg.RemoteBridgePermitKeyID = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID", cfg.RemoteBridgePermitKeyID)
+	cfg.RemoteBridgeTLSServerName = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME", cfg.RemoteBridgeTLSServerName)
+	cfg.RemoteBridgeMTLSCertSubjectSuffix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX", cfg.RemoteBridgeMTLSCertSubjectSuffix)
+	cfg.RemoteBridgeMTLSCertSANURIPrefix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX", cfg.RemoteBridgeMTLSCertSANURIPrefix)
 	return cfg
 }
 
