@@ -35,13 +35,25 @@ func TestRemoteBridgeEnvOverrides(t *testing.T) {
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_HEARTBEAT_MISS_FACTOR", "5")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_BACKOFF_MIN", "2s")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_BACKOFF_MAX", "10m")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED", "true")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64", "pub")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID", "kid-1")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME", "bridge.example")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX", ".acik.local")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX", "adcomputer:")
 	cfg := LoadFromEnv()
 	if !cfg.RemoteBridgeEnabled || cfg.RemoteBridgeBrokerAddr != "broker.example:8443" ||
 		!cfg.RemoteBridgeInsecurePlaintext ||
 		cfg.RemoteBridgeFirstHeartbeatDeadline != 20*time.Second ||
 		cfg.RemoteBridgeHeartbeatMissFactor != 5 ||
 		cfg.RemoteBridgeBackoffMin != 2*time.Second ||
-		cfg.RemoteBridgeBackoffMax != 10*time.Minute {
+		cfg.RemoteBridgeBackoffMax != 10*time.Minute ||
+		!cfg.RemoteBridgeOperationsEnabled ||
+		cfg.RemoteBridgePermitBrokerPublicKeyB64 != "pub" ||
+		cfg.RemoteBridgePermitKeyID != "kid-1" ||
+		cfg.RemoteBridgeTLSServerName != "bridge.example" ||
+		cfg.RemoteBridgeMTLSCertSubjectSuffix != ".acik.local" ||
+		cfg.RemoteBridgeMTLSCertSANURIPrefix != "adcomputer:" {
 		t.Fatalf("env overrides not applied: %+v", cfg)
 	}
 }
