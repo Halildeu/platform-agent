@@ -2,10 +2,13 @@
 #
 # Serves the packaged one-command bootstrap artifacts as STATIC files at
 #   /artifacts/endpoint-agent/<VERSION>/
+#     ├─ endpoint-agent.exe        (signed self-update binary)
 #     ├─ bootstrap-package.ps1     (the one-command bootstrap client)
+#     ├─ install.ps1               (patched installer)
+#     ├─ uninstall.ps1             (uninstaller)
 #     ├─ EndpointAgent.zip         (signed exe + install/uninstall + SHA256SUMS)
 #     ├─ EndpointAgent.zip.sha256  (value for -ExpectedZipSha256)
-#     ├─ SHA256SUMS                (hashes of the SERVED files: zip+ps1+manifest)
+#     ├─ SHA256SUMS                (hashes of the SERVED files)
 #     └─ release-manifest.json     (machine-readable release contract)
 #
 # Built + pushed by .github/workflows/release.yml (publish job) to

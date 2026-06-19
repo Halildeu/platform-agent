@@ -348,12 +348,7 @@ jobs:
           IMAGE="ghcr.io/$OWNER/platform-agent-artifacts"
           SHORT_SHA=$(git rev-parse --short HEAD); REVISION=$(git rev-parse HEAD)
           ASSETS=deploy/artifact-host/build-assets
-          rm -rf "$ASSETS"; mkdir -p "$ASSETS"
-          cp dist/windows/EndpointAgent.zip "$ASSETS/"
-          cp dist/windows/EndpointAgent.zip.sha256 "$ASSETS/"
-          cp dist/bootstrap-package.ps1 "$ASSETS/"
-          cp dist/release-manifest.json "$ASSETS/"
-          ( cd "$ASSETS" && shasum -a 256 EndpointAgent.zip bootstrap-package.ps1 release-manifest.json > SHA256SUMS )
+          ./scripts/release/stage-artifact-host-assets.sh dist "$ASSETS"
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
           docker build deploy/artifact-host \
             --build-arg VERSION="$TAG" --build-arg REVISION="$REVISION" \
