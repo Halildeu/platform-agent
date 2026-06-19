@@ -262,6 +262,25 @@ Describe "Remote bridge installer env gating" {
             Should Throw "-RemoteBridgeInsecurePlaintext requires -RemoteBridgeEnabled"
     }
 
+    It "rejects operation-mode config when the bridge is disabled" {
+        { Assert-RemoteBridgeInstallConfig -Enabled $false -BrokerAddr "" -InsecurePlaintext $false -OperationsEnabled $true } |
+            Should Throw "-RemoteBridgeOperationsEnabled requires -RemoteBridgeEnabled"
+
+        { Assert-RemoteBridgeInstallConfig -Enabled $false -BrokerAddr "" -InsecurePlaintext $false -PermitBrokerPublicKeyB64 "pub" } |
+            Should Throw "-RemoteBridgePermitBrokerPublicKeyB64 requires -RemoteBridgeEnabled"
+
+        { Assert-RemoteBridgeInstallConfig -Enabled $false -BrokerAddr "" -InsecurePlaintext $false -TLSServerName "remote-bridge-mtls.testai.acik.com" } |
+            Should Throw "-RemoteBridgeTLSServerName requires -RemoteBridgeEnabled"
+    }
+
+    It "rejects constrained operations without broker permit trust anchors" {
+        { Assert-RemoteBridgeInstallConfig -Enabled $true -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" -InsecurePlaintext $false -OperationsEnabled $true -PermitBrokerPublicKeyB64 "" -PermitKeyID "kid-1" } |
+            Should Throw "-RemoteBridgeOperationsEnabled requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID"
+
+        { Assert-RemoteBridgeInstallConfig -Enabled $true -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" -InsecurePlaintext $false -OperationsEnabled $true -PermitBrokerPublicKeyB64 "pub" -PermitKeyID "" } |
+            Should Throw "-RemoteBridgeOperationsEnabled requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID"
+    }
+
     It "writes only explicit remote bridge service environment values" {
         $values = @{
             "ENDPOINT_AGENT_LOG_DIR" = "C:\ProgramData\EndpointAgent\logs"
@@ -270,12 +289,26 @@ Describe "Remote bridge installer env gating" {
         Add-RemoteBridgeServiceEnvironment `
             -Values $values `
             -Enabled $true `
-            -BrokerAddr "mtls.testai.acik.com:443" `
-            -InsecurePlaintext $false
+            -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" `
+            -InsecurePlaintext $false `
+            -CertSubjectSuffix ".acik.local" `
+            -CertSANURIPrefix "adcomputer:" `
+            -AttestationEvidenceB64 "attestation-b64" `
+            -OperationsEnabled $true `
+            -PermitBrokerPublicKeyB64 "pub-key-b64" `
+            -PermitKeyID "kid-1" `
+            -TLSServerName "remote-bridge-mtls.testai.acik.com"
 
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED"] | Should Be "true"
-        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR"] | Should Be "mtls.testai.acik.com:443"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR"] | Should Be "remote-bridge-mtls.testai.acik.com:443"
         $values.ContainsKey("ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT") | Should Be $false
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX"] | Should Be ".acik.local"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX"] | Should Be "adcomputer:"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_EVIDENCE_B64"] | Should Be "attestation-b64"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED"] | Should Be "true"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64"] | Should Be "pub-key-b64"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID"] | Should Be "kid-1"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME"] | Should Be "remote-bridge-mtls.testai.acik.com"
     }
 
     It "does not add remote bridge service environment values when disabled" {

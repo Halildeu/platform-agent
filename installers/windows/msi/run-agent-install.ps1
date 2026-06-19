@@ -100,6 +100,13 @@ $keyMap = @{
     'REMOTE_BRIDGE_ENABLED'          = @{ Param = 'RemoteBridgeEnabled';        Kind = 'switch' }
     'REMOTE_BRIDGE_BROKER_ADDR'      = @{ Param = 'RemoteBridgeBrokerAddr';     Kind = 'value'  }
     'REMOTE_BRIDGE_INSECURE_PLAINTEXT'= @{ Param = 'RemoteBridgeInsecurePlaintext'; Kind = 'switch' }
+    'REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX'= @{ Param = 'RemoteBridgeMTLSCertSubjectSuffix'; Kind = 'value' }
+    'REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX'= @{ Param = 'RemoteBridgeMTLSCertSANURIPrefix'; Kind = 'value' }
+    'REMOTE_BRIDGE_ATTESTATION_EVIDENCE_B64'= @{ Param = 'RemoteBridgeAttestationEvidenceB64'; Kind = 'value' }
+    'REMOTE_BRIDGE_OPERATIONS_ENABLED'      = @{ Param = 'RemoteBridgeOperationsEnabled';     Kind = 'switch' }
+    'REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64'= @{ Param = 'RemoteBridgePermitBrokerPublicKeyB64'; Kind = 'value' }
+    'REMOTE_BRIDGE_PERMIT_KEY_ID'= @{ Param = 'RemoteBridgePermitKeyID'; Kind = 'value' }
+    'REMOTE_BRIDGE_TLS_SERVER_NAME'= @{ Param = 'RemoteBridgeTLSServerName'; Kind = 'value' }
 }
 
 function Test-TruthyFlag {

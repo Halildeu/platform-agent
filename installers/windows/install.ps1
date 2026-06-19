@@ -43,6 +43,13 @@ param(
     [switch]$RemoteBridgeEnabled,
     [string]$RemoteBridgeBrokerAddr = "",
     [switch]$RemoteBridgeInsecurePlaintext,
+    [string]$RemoteBridgeMTLSCertSubjectSuffix = "",
+    [string]$RemoteBridgeMTLSCertSANURIPrefix = "",
+    [string]$RemoteBridgeAttestationEvidenceB64 = "",
+    [switch]$RemoteBridgeOperationsEnabled,
+    [string]$RemoteBridgePermitBrokerPublicKeyB64 = "",
+    [string]$RemoteBridgePermitKeyID = "",
+    [string]$RemoteBridgeTLSServerName = "",
     [ValidateRange(1, 600)]
     [int]$ServiceStartTimeoutSeconds = 30,
     [switch]$Start,
@@ -147,7 +154,14 @@ $configKeys = @(
     "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX",
     "ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED",
     "ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR",
-    "ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT"
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_EVIDENCE_B64",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME"
 )
 
 function Write-Step {
@@ -406,11 +420,23 @@ function Assert-RemoteBridgeInstallConfig {
     param(
         [bool]$Enabled,
         [string]$BrokerAddr,
-        [bool]$InsecurePlaintext
+        [bool]$InsecurePlaintext,
+        [string]$CertSubjectSuffix = "",
+        [string]$CertSANURIPrefix = "",
+        [string]$AttestationEvidenceB64 = "",
+        [bool]$OperationsEnabled = $false,
+        [string]$PermitBrokerPublicKeyB64 = "",
+        [string]$PermitKeyID = "",
+        [string]$TLSServerName = ""
     )
     if ($Enabled) {
         if ([string]::IsNullOrWhiteSpace($BrokerAddr)) {
             throw "-RemoteBridgeEnabled requires -RemoteBridgeBrokerAddr."
+        }
+        if ($OperationsEnabled) {
+            if ([string]::IsNullOrWhiteSpace($PermitBrokerPublicKeyB64) -or [string]::IsNullOrWhiteSpace($PermitKeyID)) {
+                throw "-RemoteBridgeOperationsEnabled requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID."
+            }
         }
         return
     }
@@ -421,6 +447,27 @@ function Assert-RemoteBridgeInstallConfig {
     if ($InsecurePlaintext) {
         throw "-RemoteBridgeInsecurePlaintext requires -RemoteBridgeEnabled."
     }
+    if (-not [string]::IsNullOrWhiteSpace($CertSubjectSuffix)) {
+        throw "-RemoteBridgeMTLSCertSubjectSuffix requires -RemoteBridgeEnabled."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CertSANURIPrefix)) {
+        throw "-RemoteBridgeMTLSCertSANURIPrefix requires -RemoteBridgeEnabled."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AttestationEvidenceB64)) {
+        throw "-RemoteBridgeAttestationEvidenceB64 requires -RemoteBridgeEnabled."
+    }
+    if ($OperationsEnabled) {
+        throw "-RemoteBridgeOperationsEnabled requires -RemoteBridgeEnabled."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PermitBrokerPublicKeyB64)) {
+        throw "-RemoteBridgePermitBrokerPublicKeyB64 requires -RemoteBridgeEnabled."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PermitKeyID)) {
+        throw "-RemoteBridgePermitKeyID requires -RemoteBridgeEnabled."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($TLSServerName)) {
+        throw "-RemoteBridgeTLSServerName requires -RemoteBridgeEnabled."
+    }
 }
 
 function Add-RemoteBridgeServiceEnvironment {
@@ -428,7 +475,14 @@ function Add-RemoteBridgeServiceEnvironment {
         [hashtable]$Values,
         [bool]$Enabled,
         [string]$BrokerAddr,
-        [bool]$InsecurePlaintext
+        [bool]$InsecurePlaintext,
+        [string]$CertSubjectSuffix = "",
+        [string]$CertSANURIPrefix = "",
+        [string]$AttestationEvidenceB64 = "",
+        [bool]$OperationsEnabled = $false,
+        [string]$PermitBrokerPublicKeyB64 = "",
+        [string]$PermitKeyID = "",
+        [string]$TLSServerName = ""
     )
     if (-not $Enabled) {
         return
@@ -438,6 +492,27 @@ function Add-RemoteBridgeServiceEnvironment {
     $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR"] = $BrokerAddr
     if ($InsecurePlaintext) {
         $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT"] = "true"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CertSubjectSuffix)) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX"] = $CertSubjectSuffix
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CertSANURIPrefix)) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX"] = $CertSANURIPrefix
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AttestationEvidenceB64)) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_EVIDENCE_B64"] = $AttestationEvidenceB64
+    }
+    if ($OperationsEnabled) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED"] = "true"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PermitBrokerPublicKeyB64)) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64"] = $PermitBrokerPublicKeyB64
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PermitKeyID)) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID"] = $PermitKeyID
+    }
+    if (-not [string]::IsNullOrWhiteSpace($TLSServerName)) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME"] = $TLSServerName
     }
 }
 
@@ -816,7 +891,14 @@ if ($AutoEnroll) {
 Assert-RemoteBridgeInstallConfig `
     -Enabled ([bool]$RemoteBridgeEnabled) `
     -BrokerAddr $RemoteBridgeBrokerAddr `
-    -InsecurePlaintext ([bool]$RemoteBridgeInsecurePlaintext)
+    -InsecurePlaintext ([bool]$RemoteBridgeInsecurePlaintext) `
+    -CertSubjectSuffix $RemoteBridgeMTLSCertSubjectSuffix `
+    -CertSANURIPrefix $RemoteBridgeMTLSCertSANURIPrefix `
+    -AttestationEvidenceB64 $RemoteBridgeAttestationEvidenceB64 `
+    -OperationsEnabled ([bool]$RemoteBridgeOperationsEnabled) `
+    -PermitBrokerPublicKeyB64 $RemoteBridgePermitBrokerPublicKeyB64 `
+    -PermitKeyID $RemoteBridgePermitKeyID `
+    -TLSServerName $RemoteBridgeTLSServerName
 
 # ----------------------------------------------------------------------
 # Faz 22.1.0 release-foundation - URL download + signature verify
@@ -1138,7 +1220,14 @@ try {
         -Values $serviceEnv `
         -Enabled ([bool]$RemoteBridgeEnabled) `
         -BrokerAddr $RemoteBridgeBrokerAddr `
-        -InsecurePlaintext ([bool]$RemoteBridgeInsecurePlaintext)
+        -InsecurePlaintext ([bool]$RemoteBridgeInsecurePlaintext) `
+        -CertSubjectSuffix $RemoteBridgeMTLSCertSubjectSuffix `
+        -CertSANURIPrefix $RemoteBridgeMTLSCertSANURIPrefix `
+        -AttestationEvidenceB64 $RemoteBridgeAttestationEvidenceB64 `
+        -OperationsEnabled ([bool]$RemoteBridgeOperationsEnabled) `
+        -PermitBrokerPublicKeyB64 $RemoteBridgePermitBrokerPublicKeyB64 `
+        -PermitKeyID $RemoteBridgePermitKeyID `
+        -TLSServerName $RemoteBridgeTLSServerName
 
     Write-Step "installing service: $ServiceName"
     Invoke-AgentServiceCommand -ExePath $targetBinary -Arguments @(
