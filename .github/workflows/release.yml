@@ -524,18 +524,12 @@ jobs:
           SHORT_SHA=$(git rev-parse --short HEAD)
           REVISION=$(git rev-parse HEAD)
 
-          # Stage the SERVED assets (one version folder per image). Codex
-          # 019eac74 must-fix: do NOT serve the loose release SHA256SUMS — it
-          # hashes endpoint-agent.exe/install.ps1/uninstall.ps1 which are NOT at
-          # this path and omits EndpointAgent.zip. Generate an HONEST SHA256SUMS
-          # over exactly what this directory serves instead.
+          # Stage the SERVED assets (one version folder per image). Generate an
+          # HONEST SHA256SUMS over exactly what this directory serves; this must
+          # include the loose signed exe because catalog-bound UPDATE_AGENT
+          # downloads the release binary directly from this allowlisted host.
           ASSETS=deploy/artifact-host/build-assets
-          rm -rf "$ASSETS"; mkdir -p "$ASSETS"
-          cp dist/windows/EndpointAgent.zip          "$ASSETS/"
-          cp dist/windows/EndpointAgent.zip.sha256   "$ASSETS/"
-          cp dist/bootstrap-package.ps1              "$ASSETS/"
-          cp dist/release-manifest.json              "$ASSETS/"
-          ( cd "$ASSETS" && shasum -a 256 EndpointAgent.zip bootstrap-package.ps1 release-manifest.json > SHA256SUMS )
+          ./scripts/release/stage-artifact-host-assets.sh dist "$ASSETS"
 
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
           docker build deploy/artifact-host \
