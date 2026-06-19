@@ -133,6 +133,11 @@ type Config struct {
 	// are enabled.
 	RemoteBridgeMTLSCertSubjectSuffix string
 	RemoteBridgeMTLSCertSANURIPrefix  string
+	// RemoteBridgeAttestationEvidenceB64 carries an already-signed provenance
+	// evidence blob for the remote-bridge AgentHello. The endpoint never
+	// receives the signing private key; the broker verifies this advisory
+	// evidence against its configured public key and policy.
+	RemoteBridgeAttestationEvidenceB64 string
 }
 
 // BuildVersion is overridden at build time via
@@ -230,6 +235,7 @@ func LoadFromEnv() Config {
 	cfg.RemoteBridgeTLSServerName = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME", cfg.RemoteBridgeTLSServerName)
 	cfg.RemoteBridgeMTLSCertSubjectSuffix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX", cfg.RemoteBridgeMTLSCertSubjectSuffix)
 	cfg.RemoteBridgeMTLSCertSANURIPrefix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX", cfg.RemoteBridgeMTLSCertSANURIPrefix)
+	cfg.RemoteBridgeAttestationEvidenceB64 = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_EVIDENCE_B64", cfg.RemoteBridgeAttestationEvidenceB64)
 	return cfg
 }
 

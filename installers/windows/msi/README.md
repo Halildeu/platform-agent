@@ -51,6 +51,12 @@ that stays `install.ps1`'s job (ADR-0029 Katman 4).
 | `AUTO_ENROLL_CERT_SUBJECT_SUFFIX` / `AUTO_ENROLL_CERT_SAN_URI_PREFIX` | matching params | cert-store query narrowing |
 | `AUTO_ENROLL_JITTER_SECONDS` | `-AutoEnrollJitterSeconds` | wave de-sync |
 | `LOG_DIR`, `INSTALL_ID`, `MAINTENANCE_TOKEN_HASH`, `SERVICE_NAME` | matching params | |
+| `REMOTE_BRIDGE_ENABLED`, `REMOTE_BRIDGE_BROKER_ADDR` | matching params | disabled unless explicitly enabled |
+| `REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX` / `REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX` | matching params | mTLS client-cert query narrowing; empty falls back to auto-enroll filters |
+| `REMOTE_BRIDGE_TLS_SERVER_NAME` | `-RemoteBridgeTLSServerName` | optional SNI / TLS verification name; use the dedicated broker hostname for 443 rollout |
+| `REMOTE_BRIDGE_OPERATIONS_ENABLED` | `-RemoteBridgeOperationsEnabled` | enables the constrained executor path; requires permit trust anchors |
+| `REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64`, `REMOTE_BRIDGE_PERMIT_KEY_ID` | matching params | public permit-verifier trust anchor and key id; no private key material |
+| `REMOTE_BRIDGE_ATTESTATION_EVIDENCE_B64` | matching param | optional signed provenance blob; never carries the attestation private key |
 | `ENROLL_RESPONSE_FILE` | (lab token file path) | non-secret path |
 | `PURGE_CONFIG` | uninstall purge gate | `1` ⇒ purge credential/config |
 

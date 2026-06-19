@@ -69,6 +69,7 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		BackoffMax:             cfg.RemoteBridgeBackoffMax,
 		IdentityPollInterval:   cfg.RemoteBridgeIdentityPollInterval,
 		DialTimeout:            cfg.RemoteBridgeDialTimeout,
+		AttestationEvidenceB64: cfg.RemoteBridgeAttestationEvidenceB64,
 	}
 	if !cfg.RemoteBridgeOperationsEnabled {
 		return hcfg, nil

@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"log"
 	"net"
@@ -118,6 +119,70 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestConfiguredAttestationEvidenceIsSentInHello(t *testing.T) {
+	configured := base64.StdEncoding.EncodeToString([]byte("digest|builder|policy|signature"))
+	hellos := make(chan *pb.Envelope, 1)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		env, err := s.Recv()
+		if err != nil {
+			return err
+		}
+		hellos <- env
+		return io.EOF
+	}
+	start(t, script, func(cfg *Config) {
+		cfg.AttestationEvidenceB64 = configured
+	})
+
+	select {
+	case env := <-hellos:
+		if got := env.GetAgentHello().GetAttestationEvidenceB64(); got != configured {
+			t.Fatalf("attestation evidence %q, want configured value", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no AgentHello within 3s")
+	}
+}
+
+func TestConfiguredPTYDispatcherAdvertisesConstrainedPTY(t *testing.T) {
+	hellos := make(chan *pb.Envelope, 1)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		env, err := s.Recv()
+		if err != nil {
+			return err
+		}
+		hellos <- env
+		return io.EOF
+	}
+	start(t, script, func(cfg *Config) {
+		cfg.PTYDispatcher = noopPTYDispatcher{}
+	})
+
+	select {
+	case env := <-hellos:
+		caps := env.GetAgentHello().GetAdvertisedCapabilities()
+		if len(caps) != 1 || caps[0] != pb.Capability_CONSTRAINED_PTY {
+			t.Fatalf("advertised capabilities = %v, want [CONSTRAINED_PTY]", caps)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no AgentHello within 3s")
+	}
+}
+
+func TestNewRejectsMalformedConfiguredAttestationEvidence(t *testing.T) {
+	_, err := New(Config{
+		BrokerAddr:             "localhost:8443",
+		DeviceIDProvider:       func() string { return "device" },
+		InsecurePlaintext:      true,
+		AttestationEvidenceB64: "not base64",
+		FirstHeartbeatDeadline: time.Second,
+		HeartbeatMissFactor:    3,
+	}, log.New(io.Discard, "", 0))
+	if err == nil {
+		t.Fatal("New accepted malformed attestation evidence")
+	}
 }
 
 // TestHelloFirstSeqContiguousAndDefectClose covers the contract test: the
