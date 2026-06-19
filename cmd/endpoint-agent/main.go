@@ -141,6 +141,9 @@ func main() {
 				if err != nil {
 					return err
 				}
+				app.StartRemoteBridge(ctx, cfg, func() string {
+					return runner.DeviceID(ctx)
+				}, logger)
 				return runner.RunLoop(ctx)
 			}); err != nil {
 				logger.Fatalf("auto-enroll service run failed: %v", err)
@@ -159,6 +162,9 @@ func main() {
 			}
 			return
 		}
+		app.StartRemoteBridge(ctx, cfg, func() string {
+			return runner.DeviceID(ctx)
+		}, logger)
 		if err := runner.RunLoop(ctx); err != nil && err != context.Canceled {
 			logger.Fatalf("auto-enroll loop failed: %v", err)
 		}
