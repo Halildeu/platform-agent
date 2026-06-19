@@ -58,6 +58,21 @@ type Runner struct {
 	loadedCert CertMaterial
 }
 
+// DeviceID returns the currently persisted auto-enroll device identity.
+// Remote-bridge uses this as its identity provider in auto-enroll mode: before
+// first enrollment it returns empty, so the bridge harness waits instead of
+// dialing with an unbound identity.
+func (r *Runner) DeviceID(ctx context.Context) string {
+	if r == nil || r.ConfigStore == nil {
+		return ""
+	}
+	persisted, err := r.ConfigStore.Read(ctx)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(persisted.DeviceID)
+}
+
 // Config groups the knobs the Runner reads at construction. Values come
 // from internal/config plus the registry; secrets do NOT belong here
 // (Codex F3 absorb).

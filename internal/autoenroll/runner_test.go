@@ -148,6 +148,22 @@ func TestDefaults_UsesCanonicalTestMTLSEdge(t *testing.T) {
 	}
 }
 
+func TestRunnerDeviceIDReadsPersistedAutoEnrollIdentity(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	runner := &Runner{ConfigStore: store}
+
+	if got := runner.DeviceID(ctx); got != "" {
+		t.Fatalf("fresh DeviceID() = %q, want empty", got)
+	}
+	if err := store.Write(ctx, PersistedConfig{DeviceID: "  dev-auto-1  ", CertThumbprintSHA256: "thumb"}); err != nil {
+		t.Fatalf("write persisted config: %v", err)
+	}
+	if got := runner.DeviceID(ctx); got != "dev-auto-1" {
+		t.Fatalf("DeviceID() = %q, want dev-auto-1", got)
+	}
+}
+
 // Standard handler that maps enrollment + heartbeat + commands + token
 // refresh paths to configurable responses. recorder logs every hit.
 type handlerConfig struct {
