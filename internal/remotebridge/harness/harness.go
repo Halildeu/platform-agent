@@ -3,8 +3,8 @@
 // endpoint-admin-service RemoteBridge service, T-2b), opens the long-lived
 // CONTROL bidi stream, introduces itself with an advisory AgentHello, obeys
 // server-push heartbeats and KILL envelopes, and reconnects with jittered
-// exponential backoff. It deliberately carries NO capture/PTY/consent
-// machinery — those are T-4 and owner-pilot-gated (ADR-0034 §13/D10); a
+// exponential backoff. It deliberately carries NO capture/PTY machinery by
+// default; those paths are T-4 and owner-pilot-gated (ADR-0034 §13/D10). A
 // broker-authoritative payload arriving while idle is a protocol defect and
 // closes the stream (Codex T-3 revision: defect-close, never silently
 // consume).
@@ -129,7 +129,17 @@ type Config struct {
 	// idle — an inbound operation_dispatch is a protocol defect (disabled-by-
 	// default; LIVE activation is owner-gated, ADR-0034 §13/D10).
 	PTYDispatcher PTYDispatcher
+	// ConsentResponder, when non-nil, may answer a broker ConsentPrompt with a
+	// ConsentResult. nil keeps the idle harness fail-closed: consent_prompt is a
+	// protocol defect unless an owner-gated product path explicitly wires a
+	// responder.
+	ConsentResponder ConsentResponder
 }
+
+// ConsentResponder is the endpoint-side policy hook for broker consent prompts.
+// It is intentionally absent by default; production UI/attended consent and
+// bounded pilot auto-consent must opt in through app-level config.
+type ConsentResponder func(ctx context.Context, prompt *pb.ConsentPrompt) (*pb.ConsentResult, error)
 
 func (c Config) withDefaults() Config {
 	if c.FirstHeartbeatDeadline <= 0 {
@@ -383,6 +393,8 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 					return healthy, fmt.Errorf("protocol defect: %s", derr.Error())
 				}
 				go h.dispatchOperation(sctx, conn, permit, commandLine, deviceID, sender)
+			case actionConsentPrompt:
+				go h.respondToConsent(sctx, r.env.GetConsentPrompt(), sender)
 			case actionDefectClose:
 				h.mu.Lock()
 				h.defects++
@@ -444,6 +456,7 @@ const (
 	// wired — connectOnce decodes it and runs it off the recv loop. Without a dispatcher this never occurs
 	// (handleInbound defect-closes operation_dispatch — disabled-by-default).
 	actionDispatch
+	actionConsentPrompt
 )
 
 // inboundSeqGuard tracks the broker-push sequencing mode of one stream. The
@@ -483,7 +496,8 @@ func (g *inboundSeqGuard) admit(seq int64) string {
 // handleInbound validates ONE broker envelope and dispatches it. The agent
 // mirrors the broker's directional discipline: on the CONTROL stream it
 // accepts only what the broker legitimately pushes while idle — heartbeat,
-// kill, error. Everything else (consent_prompt, operation_permit, the
+// kill, error, and consent_prompt only when a responder is explicitly wired.
+// Everything else (operation_permit, the
 // operator-console payloads, data_frame, a reflected agent_hello…) is a
 // protocol defect: T-3 has no machinery to honour them, and silently
 // consuming them would hide a broker bug or a premature enablement
@@ -518,6 +532,11 @@ func (h *Harness) handleInbound(env *pb.Envelope, seqGuard *inboundSeqGuard) (in
 		h.logger.Printf("remote-bridge: broker error frame code=%q retryable=%v",
 			env.GetError().GetCode(), env.GetError().GetRetryable())
 		return actionContinue, ""
+	case env.GetConsentPrompt() != nil:
+		if h.cfg.ConsentResponder == nil {
+			return actionDefectClose, "unsupported-payload-in-idle"
+		}
+		return actionConsentPrompt, ""
 	case env.GetOperationDispatch() != nil:
 		// A CONSTRAINED_PTY operation push (T-4). DISABLED-BY-DEFAULT: with no PTY dispatcher wired the agent
 		// has no execution machinery, so — like any other broker payload in idle mode — it is a protocol
@@ -528,6 +547,30 @@ func (h *Harness) handleInbound(env *pb.Envelope, seqGuard *inboundSeqGuard) (in
 		return actionDispatch, ""
 	default:
 		return actionDefectClose, "unsupported-payload-in-idle"
+	}
+}
+
+func (h *Harness) respondToConsent(ctx context.Context, prompt *pb.ConsentPrompt, sender *controlSender) {
+	if prompt == nil {
+		_ = sender.sendError("nil-consent-prompt", false)
+		return
+	}
+	result, err := h.cfg.ConsentResponder(ctx, prompt)
+	if err != nil {
+		h.logger.Printf("remote-bridge: consent responder failed session=%q err=%v", prompt.GetSessionId(), err)
+		_ = sender.sendError("consent-responder-failed", false)
+		return
+	}
+	if result == nil {
+		_ = sender.sendError("consent-responder-empty-result", false)
+		return
+	}
+	if result.GetSessionId() != prompt.GetSessionId() {
+		_ = sender.sendError("consent-result-session-mismatch", false)
+		return
+	}
+	if err := sender.sendConsentResult(result); err != nil {
+		h.logger.Printf("remote-bridge: send consent result failed session=%q err=%v", result.GetSessionId(), err)
 	}
 }
 

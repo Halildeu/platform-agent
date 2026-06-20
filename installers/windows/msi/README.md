@@ -56,6 +56,7 @@ that stays `install.ps1`'s job (ADR-0029 Katman 4).
 | `REMOTE_BRIDGE_TLS_SERVER_NAME` | `-RemoteBridgeTLSServerName` | optional SNI / TLS verification name; use the dedicated broker hostname for 443 rollout |
 | `REMOTE_BRIDGE_OPERATIONS_ENABLED` | `-RemoteBridgeOperationsEnabled` | enables the constrained executor path; requires permit trust anchors |
 | `REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64`, `REMOTE_BRIDGE_PERMIT_KEY_ID` | matching params | public permit-verifier trust anchor and key id; no private key material |
+| `REMOTE_BRIDGE_PILOT_AUTO_CONSENT` | `-RemoteBridgePilotAutoConsent` | bounded pilot only; requires constrained operations and auto-answers broker consent prompts |
 | `REMOTE_BRIDGE_ATTESTATION_EVIDENCE_B64` | matching param | optional signed provenance blob; never carries the attestation private key |
 | `ENROLL_RESPONSE_FILE` | (lab token file path) | non-secret path |
 | `PURGE_CONFIG` | uninstall purge gate | `1` ⇒ purge credential/config |

@@ -36,6 +36,13 @@ func (s *controlSender) sendError(code string, retryable bool) error {
 	}}})
 }
 
+func (s *controlSender) sendConsentResult(result *pb.ConsentResult) error {
+	return s.send(&pb.Envelope{
+		SessionId: result.GetSessionId(),
+		Payload:   &pb.Envelope_ConsentResult{ConsentResult: result},
+	})
+}
+
 // send stamps channel/seq/sentAt and writes. The payload must already be on
 // the agent-allowed CONTROL set.
 func (s *controlSender) send(env *pb.Envelope) error {

@@ -123,6 +123,11 @@ type Config struct {
 	RemoteBridgePermitBrokerPublicKeyB64 string
 	// RemoteBridgePermitKeyID pins the expected broker permit key id.
 	RemoteBridgePermitKeyID string
+	// RemoteBridgePilotAutoConsent is a bounded-pilot escape hatch that lets a
+	// consent prompt activate an owner-approved CONSTRAINED_PTY smoke without an
+	// interactive desktop prompt. It is disabled by default and valid only when
+	// RemoteBridgeOperationsEnabled is also true.
+	RemoteBridgePilotAutoConsent bool
 	// RemoteBridgeTLSServerName optionally overrides SNI/hostname validation
 	// for the broker TLS connection. Blank means derive it from BrokerAddr.
 	RemoteBridgeTLSServerName string
@@ -232,6 +237,7 @@ func LoadFromEnv() Config {
 	cfg.RemoteBridgeOperationsEnabled = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED", cfg.RemoteBridgeOperationsEnabled)
 	cfg.RemoteBridgePermitBrokerPublicKeyB64 = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64", cfg.RemoteBridgePermitBrokerPublicKeyB64)
 	cfg.RemoteBridgePermitKeyID = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID", cfg.RemoteBridgePermitKeyID)
+	cfg.RemoteBridgePilotAutoConsent = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT", cfg.RemoteBridgePilotAutoConsent)
 	cfg.RemoteBridgeTLSServerName = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME", cfg.RemoteBridgeTLSServerName)
 	cfg.RemoteBridgeMTLSCertSubjectSuffix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX", cfg.RemoteBridgeMTLSCertSubjectSuffix)
 	cfg.RemoteBridgeMTLSCertSANURIPrefix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX", cfg.RemoteBridgeMTLSCertSANURIPrefix)
