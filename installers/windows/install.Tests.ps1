@@ -271,6 +271,9 @@ Describe "Remote bridge installer env gating" {
 
         { Assert-RemoteBridgeInstallConfig -Enabled $false -BrokerAddr "" -InsecurePlaintext $false -TLSServerName "remote-bridge-mtls.testai.acik.com" } |
             Should Throw "-RemoteBridgeTLSServerName requires -RemoteBridgeEnabled"
+
+        { Assert-RemoteBridgeInstallConfig -Enabled $false -BrokerAddr "" -InsecurePlaintext $false -PilotAutoConsent $true } |
+            Should Throw "-RemoteBridgePilotAutoConsent requires -RemoteBridgeEnabled"
     }
 
     It "rejects constrained operations without broker permit trust anchors" {
@@ -279,6 +282,11 @@ Describe "Remote bridge installer env gating" {
 
         { Assert-RemoteBridgeInstallConfig -Enabled $true -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" -InsecurePlaintext $false -OperationsEnabled $true -PermitBrokerPublicKeyB64 "pub" -PermitKeyID "" } |
             Should Throw "-RemoteBridgeOperationsEnabled requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID"
+    }
+
+    It "rejects pilot auto-consent without constrained operation mode" {
+        { Assert-RemoteBridgeInstallConfig -Enabled $true -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" -InsecurePlaintext $false -PilotAutoConsent $true } |
+            Should Throw "-RemoteBridgePilotAutoConsent requires -RemoteBridgeOperationsEnabled"
     }
 
     It "writes only explicit remote bridge service environment values" {
@@ -297,6 +305,7 @@ Describe "Remote bridge installer env gating" {
             -OperationsEnabled $true `
             -PermitBrokerPublicKeyB64 "pub-key-b64" `
             -PermitKeyID "kid-1" `
+            -PilotAutoConsent $true `
             -TLSServerName "remote-bridge-mtls.testai.acik.com"
 
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED"] | Should Be "true"
@@ -308,6 +317,7 @@ Describe "Remote bridge installer env gating" {
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED"] | Should Be "true"
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64"] | Should Be "pub-key-b64"
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID"] | Should Be "kid-1"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT"] | Should Be "true"
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME"] | Should Be "remote-bridge-mtls.testai.acik.com"
     }
 

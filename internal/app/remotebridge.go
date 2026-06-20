@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"platform-agent/internal/autoenroll"
 	"platform-agent/internal/config"
@@ -72,6 +73,9 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		AttestationEvidenceB64: cfg.RemoteBridgeAttestationEvidenceB64,
 	}
 	if !cfg.RemoteBridgeOperationsEnabled {
+		if cfg.RemoteBridgePilotAutoConsent {
+			return harness.Config{}, errors.New("remote-bridge pilot auto-consent requires ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED")
+		}
 		return hcfg, nil
 	}
 	if cfg.RemoteBridgeInsecurePlaintext {
@@ -97,7 +101,44 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		cfg.RemoteBridgePermitKeyID,
 		deviceID,
 	)
+	if cfg.RemoteBridgePilotAutoConsent {
+		hcfg.ConsentResponder = pilotAutoConsentResponder
+	}
 	return hcfg, nil
+}
+
+func pilotAutoConsentResponder(ctx context.Context, prompt *pb.ConsentPrompt) (*pb.ConsentResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if prompt == nil || strings.TrimSpace(prompt.GetSessionId()) == "" {
+		return nil, errors.New("remote-bridge pilot auto-consent requires a session id")
+	}
+	now := time.Now().UnixMilli()
+	expiry := prompt.GetExpiryEpochMillis()
+	if expiry <= 0 {
+		expiry = time.Now().Add(5 * time.Minute).UnixMilli()
+	}
+	granted := expiry > now && constrainedPTYOnly(prompt.GetCapabilities())
+	return &pb.ConsentResult{
+		SessionId:                 prompt.GetSessionId(),
+		Granted:                   granted,
+		WindowsInteractiveSession: "pilot-auto-consent",
+		GrantedAtEpochMillis:      now,
+		ExpiryEpochMillis:         expiry,
+	}, nil
+}
+
+func constrainedPTYOnly(caps []pb.Capability) bool {
+	if len(caps) == 0 {
+		return false
+	}
+	for _, cap := range caps {
+		if cap != pb.Capability_CONSTRAINED_PTY {
+			return false
+		}
+	}
+	return true
 }
 
 func remoteBridgeMTLSConfig(ctx context.Context, cfg config.Config) (*tls.Config, error) {

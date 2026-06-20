@@ -106,6 +106,7 @@ $keyMap = @{
     'REMOTE_BRIDGE_OPERATIONS_ENABLED'      = @{ Param = 'RemoteBridgeOperationsEnabled';     Kind = 'switch' }
     'REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64'= @{ Param = 'RemoteBridgePermitBrokerPublicKeyB64'; Kind = 'value' }
     'REMOTE_BRIDGE_PERMIT_KEY_ID'= @{ Param = 'RemoteBridgePermitKeyID'; Kind = 'value' }
+    'REMOTE_BRIDGE_PILOT_AUTO_CONSENT'= @{ Param = 'RemoteBridgePilotAutoConsent'; Kind = 'switch' }
     'REMOTE_BRIDGE_TLS_SERVER_NAME'= @{ Param = 'RemoteBridgeTLSServerName'; Kind = 'value' }
 }
 

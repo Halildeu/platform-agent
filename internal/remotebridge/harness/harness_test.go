@@ -278,6 +278,61 @@ func TestHelloFirstSeqContiguousAndDefectClose(t *testing.T) {
 	})
 }
 
+func TestConfiguredConsentResponderSendsConsentResult(t *testing.T) {
+	agentFrames := make(chan *pb.Envelope, 16)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		_ = s.Send(heartbeatEnv(60_000, 0))
+		_ = s.Send(&pb.Envelope{
+			ChannelType: pb.ChannelType_CONTROL,
+			Payload: &pb.Envelope_ConsentPrompt{ConsentPrompt: &pb.ConsentPrompt{
+				SessionId:           "sess-consent",
+				OperatorDisplayName: "pilot-operator",
+				Capabilities:        []pb.Capability{pb.Capability_CONSTRAINED_PTY},
+				ExpiryEpochMillis:   time.Now().Add(time.Minute).UnixMilli(),
+			}},
+		})
+		frame, err := s.Recv()
+		if err != nil {
+			return err
+		}
+		agentFrames <- frame
+		return io.EOF
+	}
+	start(t, script, func(cfg *Config) {
+		cfg.ConsentResponder = func(ctx context.Context, prompt *pb.ConsentPrompt) (*pb.ConsentResult, error) {
+			return &pb.ConsentResult{
+				SessionId:                 prompt.GetSessionId(),
+				Granted:                   true,
+				WindowsInteractiveSession: "pilot-auto-consent",
+				GrantedAtEpochMillis:      time.Now().UnixMilli(),
+				ExpiryEpochMillis:         prompt.GetExpiryEpochMillis(),
+			}, nil
+		}
+	})
+
+	var result *pb.Envelope
+	select {
+	case result = <-agentFrames:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no ConsentResult within 3s")
+	}
+	if result.GetConsentResult() == nil {
+		t.Fatalf("agent frame is %T, want ConsentResult", result.GetPayload())
+	}
+	if got := result.GetConsentResult().GetSessionId(); got != "sess-consent" {
+		t.Fatalf("ConsentResult sessionId = %q", got)
+	}
+	if !result.GetConsentResult().GetGranted() {
+		t.Fatal("ConsentResult granted=false, want true")
+	}
+	if result.GetFrameSeq() != 1 {
+		t.Fatalf("ConsentResult frameSeq = %d, want 1", result.GetFrameSeq())
+	}
+}
+
 // TestKillObeySubSecond: a session-scoped kill mutates local session state
 // in well under a second and does NOT tear down the transport.
 func TestKillObeySubSecond(t *testing.T) {

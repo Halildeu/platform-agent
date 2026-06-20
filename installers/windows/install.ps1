@@ -49,6 +49,7 @@ param(
     [switch]$RemoteBridgeOperationsEnabled,
     [string]$RemoteBridgePermitBrokerPublicKeyB64 = "",
     [string]$RemoteBridgePermitKeyID = "",
+    [switch]$RemoteBridgePilotAutoConsent,
     [string]$RemoteBridgeTLSServerName = "",
     [ValidateRange(1, 600)]
     [int]$ServiceStartTimeoutSeconds = 30,
@@ -161,6 +162,7 @@ $configKeys = @(
     "ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED",
     "ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64",
     "ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT",
     "ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME"
 )
 
@@ -427,6 +429,7 @@ function Assert-RemoteBridgeInstallConfig {
         [bool]$OperationsEnabled = $false,
         [string]$PermitBrokerPublicKeyB64 = "",
         [string]$PermitKeyID = "",
+        [bool]$PilotAutoConsent = $false,
         [string]$TLSServerName = ""
     )
     if ($Enabled) {
@@ -437,6 +440,8 @@ function Assert-RemoteBridgeInstallConfig {
             if ([string]::IsNullOrWhiteSpace($PermitBrokerPublicKeyB64) -or [string]::IsNullOrWhiteSpace($PermitKeyID)) {
                 throw "-RemoteBridgeOperationsEnabled requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID."
             }
+        } elseif ($PilotAutoConsent) {
+            throw "-RemoteBridgePilotAutoConsent requires -RemoteBridgeOperationsEnabled."
         }
         return
     }
@@ -465,6 +470,9 @@ function Assert-RemoteBridgeInstallConfig {
     if (-not [string]::IsNullOrWhiteSpace($PermitKeyID)) {
         throw "-RemoteBridgePermitKeyID requires -RemoteBridgeEnabled."
     }
+    if ($PilotAutoConsent) {
+        throw "-RemoteBridgePilotAutoConsent requires -RemoteBridgeEnabled."
+    }
     if (-not [string]::IsNullOrWhiteSpace($TLSServerName)) {
         throw "-RemoteBridgeTLSServerName requires -RemoteBridgeEnabled."
     }
@@ -482,6 +490,7 @@ function Add-RemoteBridgeServiceEnvironment {
         [bool]$OperationsEnabled = $false,
         [string]$PermitBrokerPublicKeyB64 = "",
         [string]$PermitKeyID = "",
+        [bool]$PilotAutoConsent = $false,
         [string]$TLSServerName = ""
     )
     if (-not $Enabled) {
@@ -510,6 +519,9 @@ function Add-RemoteBridgeServiceEnvironment {
     }
     if (-not [string]::IsNullOrWhiteSpace($PermitKeyID)) {
         $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID"] = $PermitKeyID
+    }
+    if ($PilotAutoConsent) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT"] = "true"
     }
     if (-not [string]::IsNullOrWhiteSpace($TLSServerName)) {
         $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME"] = $TLSServerName
@@ -898,6 +910,7 @@ Assert-RemoteBridgeInstallConfig `
     -OperationsEnabled ([bool]$RemoteBridgeOperationsEnabled) `
     -PermitBrokerPublicKeyB64 $RemoteBridgePermitBrokerPublicKeyB64 `
     -PermitKeyID $RemoteBridgePermitKeyID `
+    -PilotAutoConsent ([bool]$RemoteBridgePilotAutoConsent) `
     -TLSServerName $RemoteBridgeTLSServerName
 
 # ----------------------------------------------------------------------
@@ -1227,6 +1240,7 @@ try {
         -OperationsEnabled ([bool]$RemoteBridgeOperationsEnabled) `
         -PermitBrokerPublicKeyB64 $RemoteBridgePermitBrokerPublicKeyB64 `
         -PermitKeyID $RemoteBridgePermitKeyID `
+        -PilotAutoConsent ([bool]$RemoteBridgePilotAutoConsent) `
         -TLSServerName $RemoteBridgeTLSServerName
 
     Write-Step "installing service: $ServiceName"
