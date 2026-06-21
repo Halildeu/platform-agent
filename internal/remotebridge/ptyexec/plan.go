@@ -18,6 +18,7 @@ import (
 // CRT re-parses exactly ExePath + Args (the D-2 no-shell invariant — the binary is run directly, never via
 // cmd /c or any shell).
 type ExecPlan struct {
+	CommandID   string
 	ExePath     string
 	Args        []string
 	CommandLine string
@@ -77,6 +78,7 @@ func BuildExecPlan(cmd operation.CanonicalCommand, allowlist map[string]AllowRul
 	}
 	args := append([]string(nil), cmd.Argv...)
 	return ExecPlan{
+		CommandID:   cmd.CommandID,
 		ExePath:     rule.ExePath,
 		Args:        args,
 		CommandLine: cmdline.BuildCommandLine(rule.ExePath, args),

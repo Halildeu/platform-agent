@@ -4,6 +4,6 @@ package ptyexec
 
 import "context"
 
-func defaultConPTYRunner(ctx context.Context, exePath, commandLine string, cols, rows int16) ([]byte, uint32, error) {
-	return RunConPTY(ctx, exePath, commandLine, cols, rows)
+func defaultConPTYRunner(ctx context.Context, plan ExecPlan, cols, rows int16) ([]byte, uint32, error) {
+	return RunConPTY(ctx, plan.ExePath, plan.CommandLine, cols, rows)
 }

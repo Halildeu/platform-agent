@@ -27,8 +27,9 @@ type Executor struct {
 	allowlist  map[string]AllowRule
 	cols, rows int16
 	// run is the ConPTY runner (RunConPTY); a field so tests can inject a recorder/fake and assert that a
-	// denied command NEVER reaches execution.
-	run func(ctx context.Context, exePath, commandLine string, cols, rows int16) ([]byte, uint32, error)
+	// denied command NEVER reaches execution. It receives the already-authorized ExecPlan so fallback runners
+	// can use the no-shell argv directly instead of reparsing a command-line string.
+	run func(ctx context.Context, plan ExecPlan, cols, rows int16) ([]byte, uint32, error)
 }
 
 // NewExecutor builds the gated executor over a permit verifier + a command allowlist. cols/rows <= 0 take the
@@ -63,9 +64,12 @@ func (e *Executor) Execute(ctx context.Context, permit operation.OperationPermit
 	if err != nil {
 		return ExecResult{}, err
 	}
-	out, code, err := e.run(ctx, plan.ExePath, plan.CommandLine, e.cols, e.rows)
+	out, code, err := e.run(ctx, plan, e.cols, e.rows)
 	if err != nil {
-		return ExecResult{Output: out}, err
+		return ExecResult{Output: out, ExitCode: code}, err
+	}
+	if len(out) == 0 {
+		return ExecResult{Output: out, ExitCode: code}, ErrConPTYEmptyOutput
 	}
 	return ExecResult{Output: out, ExitCode: code}, nil
 }

@@ -381,7 +381,12 @@ func readAllCapped(h windows.Handle, max int) ([]byte, error) {
 			return out, rerr
 		}
 		if n == 0 {
-			return out, nil
+			// A zero-byte successful ReadFile is not EOF for the nonzero-sized pipe reads we issue here.
+			// EOF is signalled as ERROR_BROKEN_PIPE/ERROR_HANDLE_EOF once the writer closes. Treating this
+			// as EOF lets a fast diagnostic be recorded as a successful empty DATA stream and can terminate
+			// the child before conhost/stdout relays the first bytes.
+			time.Sleep(time.Millisecond)
+			continue
 		}
 	}
 }
