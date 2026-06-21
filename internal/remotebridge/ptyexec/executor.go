@@ -39,7 +39,7 @@ func NewExecutor(verifier *operation.Verifier, allowlist map[string]AllowRule, c
 		allowlist: allowlist,
 		cols:      cols,
 		rows:      rows,
-		run:       RunConPTY,
+		run:       defaultConPTYRunner,
 	}
 }
 

@@ -30,6 +30,7 @@ import (
 	winregistry "platform-agent/internal/platform/windows/registry"
 	winservice "platform-agent/internal/platform/windows/service"
 	"platform-agent/internal/protocol"
+	"platform-agent/internal/remotebridge/ptyexec"
 	"platform-agent/internal/security"
 	"platform-agent/internal/software"
 	"platform-agent/internal/state"
@@ -38,6 +39,10 @@ import (
 )
 
 func main() {
+	if handled, code := ptyexec.MaybeRunActiveSessionConPTYHelper(os.Args[1:]); handled {
+		os.Exit(code)
+	}
+
 	once := flag.Bool("once", false, "run one enroll/heartbeat/command iteration and exit")
 	version := flag.Bool("version", false, "print agent version and exit")
 	serviceRunName := flag.String("service-run-name", winservice.DefaultName, "internal Windows service name")
