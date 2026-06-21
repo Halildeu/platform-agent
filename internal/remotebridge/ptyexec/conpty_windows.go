@@ -24,16 +24,27 @@ const (
 	// reader during execution; this only covers the post-exit flush tail. Without it, a fast command's last
 	// line can be dropped (conhost hasn't relayed it yet when ClosePseudoConsole tears conhost down).
 	conhostRelayGrace = 400 * time.Millisecond
+	// activeSessionOutputDrainGrace bounds the post-exit stdout/stderr pipe drain for the Session-0 service path.
+	// The child receives only stdinRead + outputWrite via PROC_THREAD_ATTRIBUTE_HANDLE_LIST, so normal EOF should
+	// be immediate after a short diagnostic exits. This is a final backstop against a child/descendant that keeps
+	// the output handle open despite process termination/cancellation.
+	activeSessionOutputDrainGrace = 2 * time.Second
 )
 
 // ErrConPTYOutputCap is returned when a command's output exceeds maxConPTYOutput (output is truncated to the
 // cap and the child is torn down) — fail-closed against runaway output.
 var ErrConPTYOutputCap = errors.New("ptyexec: conpty output exceeded cap")
 
-// RunConPTY spawns exePath (commandLine = CommandLineToArgvW-compatible, NO shell) inside a Windows
-// pseudo-console, captures the merged PTY output (bounded by maxConPTYOutput), waits for the process to
-// exit, and returns the output + exit code. It runs in the CALLER's session (the session-1
-// CreateProcessAsUser variant is slice-3c). Lifecycle-safe + leak-free per the ConPTY footgun list:
+// RunConPTY spawns exePath (commandLine = CommandLineToArgvW-compatible, NO shell), captures the merged output
+// (bounded by maxConPTYOutput), waits for the process to exit, and returns the output + exit code.
+//
+// When called from the non-interactive services session (Session 0), it uses the same active-session token
+// boundary as the VIEW_ONLY dataplane launcher but redirects stdout/stderr instead of opening a shell. This is
+// the production service-mode path: the service keeps the broker-signed permit / allowlist / arg-policy gates,
+// and the read-only diagnostic command runs in the logged-on user's interactive session without exposing inbound
+// ports or an unrestricted shell. In a normal interactive process it keeps using ConPTY in the caller's session.
+//
+// The direct ConPTY path is lifecycle-safe + leak-free per the ConPTY footgun list:
 //   - the output pipe is DRAINED concurrently while the child runs, so a child writing a full pipe never
 //     deadlocks (which would hang the wait);
 //   - the pseudo-console is closed only AFTER the child exits (its lifetime spans the child), which then
@@ -41,7 +52,192 @@ var ErrConPTYOutputCap = errors.New("ptyexec: conpty output exceeded cap")
 //   - every handle / attribute list is released in reverse order, including on every error path;
 //   - ctx cancellation terminates the child (best-effort) so a cancelled session tears the command down.
 func RunConPTY(ctx context.Context, exePath, commandLine string, cols, rows int16) (output []byte, exitCode uint32, err error) {
+	session, e := currentProcessSessionID()
+	if e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: current process session: %w", e)
+	}
+	if session == 0 {
+		return runActiveSessionCapturedCapped(ctx, exePath, commandLine, maxConPTYOutput)
+	}
 	return runConPTYCapped(ctx, exePath, commandLine, cols, rows, maxConPTYOutput)
+}
+
+var (
+	currentProcessSessionID = func() (uint32, error) {
+		var session uint32
+		if err := windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &session); err != nil {
+			return 0, err
+		}
+		return session, nil
+	}
+	runActiveSessionCapturedCapped = runCapturedInActiveSessionCapped
+)
+
+type activeSessionReadResult struct {
+	data []byte
+	err  error
+}
+
+func closeHandle(h *windows.Handle) {
+	if h == nil || *h == 0 || *h == windows.InvalidHandle {
+		return
+	}
+	_ = windows.CloseHandle(*h)
+	*h = 0
+}
+
+func runCapturedInActiveSessionCapped(ctx context.Context, exePath, commandLine string, maxOutput int) (output []byte, exitCode uint32, err error) {
+	if exePath == "" {
+		return nil, 0, errors.New("ptyexec: empty exePath")
+	}
+	if commandLine == "" {
+		return nil, 0, errors.New("ptyexec: empty command line")
+	}
+	session := windows.WTSGetActiveConsoleSessionId()
+	if session == 0xFFFFFFFF || session == 0 {
+		return nil, 0, errors.New("ptyexec: no active interactive Windows session")
+	}
+
+	var userTok windows.Token
+	if e := windows.WTSQueryUserToken(session, &userTok); e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: WTSQueryUserToken: %w", e)
+	}
+	defer userTok.Close()
+
+	var primaryTok windows.Token
+	if e := windows.DuplicateTokenEx(userTok, windows.TOKEN_DUPLICATE|windows.TOKEN_ASSIGN_PRIMARY|
+		windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT|windows.TOKEN_ADJUST_SESSIONID, nil,
+		windows.SecurityImpersonation, windows.TokenPrimary, &primaryTok); e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: DuplicateTokenEx: %w", e)
+	}
+	defer primaryTok.Close()
+
+	var envBlock *uint16
+	if e := windows.CreateEnvironmentBlock(&envBlock, primaryTok, false); e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: CreateEnvironmentBlock: %w", e)
+	}
+	defer windows.DestroyEnvironmentBlock(envBlock)
+
+	inheritSA := &windows.SecurityAttributes{
+		Length:        uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		InheritHandle: 1,
+	}
+	var stdinRead, stdinWrite, outputRead, outputWrite windows.Handle
+	if e := windows.CreatePipe(&stdinRead, &stdinWrite, inheritSA, 0); e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: active-session stdin pipe: %w", e)
+	}
+	defer closeHandle(&stdinRead)
+	defer closeHandle(&stdinWrite)
+	if e := windows.SetHandleInformation(stdinWrite, windows.HANDLE_FLAG_INHERIT, 0); e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: active-session stdin parent handle: %w", e)
+	}
+	if e := windows.CreatePipe(&outputRead, &outputWrite, inheritSA, 0); e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: active-session output pipe: %w", e)
+	}
+	defer closeHandle(&outputRead)
+	defer closeHandle(&outputWrite)
+	if e := windows.SetHandleInformation(outputRead, windows.HANDLE_FLAG_INHERIT, 0); e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: active-session output parent handle: %w", e)
+	}
+
+	appPtr, e := windows.UTF16PtrFromString(exePath)
+	if e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: active-session exe path: %w", e)
+	}
+	cmdPtr, e := windows.UTF16PtrFromString(commandLine)
+	if e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: active-session command line: %w", e)
+	}
+	deskPtr, e := windows.UTF16PtrFromString(`winsta0\default`)
+	if e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: active-session desktop: %w", e)
+	}
+
+	al, e := windows.NewProcThreadAttributeList(1)
+	if e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: active-session attr list: %w", e)
+	}
+	defer al.Delete()
+	inheritHandles := []windows.Handle{stdinRead, outputWrite}
+	if e := al.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&inheritHandles[0]),
+		uintptr(len(inheritHandles))*unsafe.Sizeof(inheritHandles[0])); e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: active-session handle allowlist: %w", e)
+	}
+
+	var siEx windows.StartupInfoEx
+	siEx.Cb = uint32(unsafe.Sizeof(siEx))
+	siEx.Desktop = deskPtr
+	siEx.Flags = windows.STARTF_USESTDHANDLES
+	siEx.StdInput = stdinRead
+	siEx.StdOutput = outputWrite
+	siEx.StdErr = outputWrite
+	siEx.ProcThreadAttributeList = al.List()
+	var pi windows.ProcessInformation
+	if e := windows.CreateProcessAsUser(primaryTok, appPtr, cmdPtr, nil, nil, true,
+		windows.CREATE_UNICODE_ENVIRONMENT|windows.CREATE_NO_WINDOW|windows.EXTENDED_STARTUPINFO_PRESENT,
+		envBlock, nil, &siEx.StartupInfo, &pi); e != nil {
+		return nil, 0, fmt.Errorf("ptyexec: active-session CreateProcessAsUser: %w", e)
+	}
+	defer windows.CloseHandle(pi.Thread)
+	defer windows.CloseHandle(pi.Process)
+	closeHandle(&stdinRead)
+	closeHandle(&stdinWrite)
+	closeHandle(&outputWrite)
+
+	var actual uint32
+	if e := windows.ProcessIdToSessionId(pi.ProcessId, &actual); e != nil {
+		_ = windows.TerminateProcess(pi.Process, 1)
+		return nil, 0, fmt.Errorf("ptyexec: active-session verify process session: %w", e)
+	}
+	if actual != session {
+		_ = windows.TerminateProcess(pi.Process, 1)
+		return nil, 0, fmt.Errorf("ptyexec: active-session helper landed in session %d, expected %d", actual, session)
+	}
+
+	readCh := make(chan activeSessionReadResult, 1)
+	go func() {
+		data, rerr := readAllCapped(outputRead, maxOutput)
+		readCh <- activeSessionReadResult{data, rerr}
+	}()
+	childExited := make(chan struct{})
+	go func() { _, _ = windows.WaitForSingleObject(pi.Process, windows.INFINITE); close(childExited) }()
+
+	var res activeSessionReadResult
+	select {
+	case <-childExited:
+		res = waitActiveSessionOutput(&outputRead, readCh)
+	case res = <-readCh:
+		_ = windows.TerminateProcess(pi.Process, 1)
+		<-childExited
+	case <-ctx.Done():
+		_ = windows.TerminateProcess(pi.Process, 1)
+		<-childExited
+		res = waitActiveSessionOutput(&outputRead, readCh)
+	}
+
+	var code uint32
+	if e := windows.GetExitCodeProcess(pi.Process, &code); e != nil {
+		return res.data, 0, fmt.Errorf("ptyexec: active-session GetExitCodeProcess: %w", e)
+	}
+	return res.data, code, res.err
+}
+
+func waitActiveSessionOutput(outputRead *windows.Handle, readCh <-chan activeSessionReadResult) activeSessionReadResult {
+	select {
+	case res := <-readCh:
+		return res
+	case <-time.After(activeSessionOutputDrainGrace):
+		if outputRead != nil && *outputRead != 0 && *outputRead != windows.InvalidHandle {
+			_ = windows.CancelIoEx(*outputRead, nil)
+			closeHandle(outputRead)
+		}
+		select {
+		case res := <-readCh:
+			return res
+		default:
+			return activeSessionReadResult{err: errors.New("ptyexec: active-session output drain timed out")}
+		}
+	}
 }
 
 // runConPTYCapped is RunConPTY with an injectable output cap (tests pass a tiny cap to exercise the
