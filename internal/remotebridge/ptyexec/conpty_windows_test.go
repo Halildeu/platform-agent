@@ -15,6 +15,62 @@ import (
 	"platform-agent/internal/remotebridge/dataplane"
 )
 
+func TestRunConPTYServiceSessionUsesActiveSessionCapture(t *testing.T) {
+	oldSessionID := currentProcessSessionID
+	oldRunner := runActiveSessionCapturedCapped
+	t.Cleanup(func() {
+		currentProcessSessionID = oldSessionID
+		runActiveSessionCapturedCapped = oldRunner
+	})
+
+	currentProcessSessionID = func() (uint32, error) { return 0, nil }
+	called := false
+	runActiveSessionCapturedCapped = func(ctx context.Context, exePath, commandLine string, maxOutput int) ([]byte, uint32, error) {
+		called = true
+		if exePath != `C:\Windows\System32\hostname.exe` {
+			t.Fatalf("exePath = %q", exePath)
+		}
+		if !strings.Contains(commandLine, "hostname.exe") {
+			t.Fatalf("commandLine = %q", commandLine)
+		}
+		if maxOutput != maxConPTYOutput {
+			t.Fatalf("maxOutput = %d, want %d", maxOutput, maxConPTYOutput)
+		}
+		return []byte("AGENTPC2\r\n"), 0, nil
+	}
+
+	out, code, err := RunConPTY(context.Background(), `C:\Windows\System32\hostname.exe`, `C:\Windows\System32\hostname.exe`, 120, 30)
+	if err != nil {
+		t.Fatalf("RunConPTY: %v", err)
+	}
+	if !called {
+		t.Fatal("active-session capture runner was not called")
+	}
+	if code != 0 || string(out) != "AGENTPC2\r\n" {
+		t.Fatalf("output/code = %q/%d", string(out), code)
+	}
+}
+
+func TestRunConPTYSessionDetectionErrorFailsClosed(t *testing.T) {
+	oldSessionID := currentProcessSessionID
+	oldRunner := runActiveSessionCapturedCapped
+	t.Cleanup(func() {
+		currentProcessSessionID = oldSessionID
+		runActiveSessionCapturedCapped = oldRunner
+	})
+
+	currentProcessSessionID = func() (uint32, error) { return 0, errors.New("boom") }
+	runActiveSessionCapturedCapped = func(context.Context, string, string, int) ([]byte, uint32, error) {
+		t.Fatal("active-session runner must not run after session detection error")
+		return nil, 0, nil
+	}
+
+	if _, _, err := RunConPTY(context.Background(), `C:\Windows\System32\hostname.exe`, `C:\Windows\System32\hostname.exe`, 120, 30); err == nil ||
+		!strings.Contains(err.Error(), "current process session") {
+		t.Fatalf("RunConPTY error = %v, want current process session failure", err)
+	}
+}
+
 // TestRunConPTYInSession is the ConPTY gold-proof: from SYSTEM (Session 0) it launches THIS binary as a
 // ConPTY helper IN the interactive session (via the session-launcher), where conhost has a window station;
 // the helper runs the allowlisted, NO-shell "hostname" in a pseudo-console and writes the CAPTURED output to
