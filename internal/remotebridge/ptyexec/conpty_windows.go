@@ -31,10 +31,6 @@ const (
 	activeSessionOutputDrainGrace = 2 * time.Second
 )
 
-// ErrConPTYOutputCap is returned when a command's output exceeds maxConPTYOutput (output is truncated to the
-// cap and the child is torn down) — fail-closed against runaway output.
-var ErrConPTYOutputCap = errors.New("ptyexec: conpty output exceeded cap")
-
 // RunConPTY spawns exePath (commandLine = CommandLineToArgvW-compatible, NO shell), captures the merged output
 // (bounded by maxConPTYOutput), waits for the process to exit, and returns the output + exit code.
 //
