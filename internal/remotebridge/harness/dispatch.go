@@ -93,7 +93,7 @@ func (h *Harness) dispatchOperation(ctx context.Context, conn *grpc.ClientConn,
 	// the identity this stream presented in AgentHello and is non-empty (connectOnce
 	// only dispatches with one).
 	if deviceID == "" || permit.DeviceID != deviceID {
-		_ = sender.sendError("operation-device-mismatch", false)
+		_ = sender.sendSessionError(permit.SessionID, "operation-device-mismatch", false)
 		return
 	}
 	opCtx, cancel := context.WithCancel(ctx)
@@ -101,7 +101,7 @@ func (h *Harness) dispatchOperation(ctx context.Context, conn *grpc.ClientConn,
 
 	dataStream, err := pb.NewRemoteBridgeClient(conn).Data(opCtx)
 	if err != nil {
-		_ = sender.sendError("data-stream-open-failed", true)
+		_ = sender.sendSessionError(permit.SessionID, "data-stream-open-failed", true)
 		return
 	}
 	// The DATA-stream sink: each pb.DataFrame travels as an Envelope.data_frame on the DATA channel. The
@@ -134,7 +134,7 @@ func (h *Harness) dispatchOperation(ctx context.Context, conn *grpc.ClientConn,
 	if herr != nil {
 		// The operation failed (gate-deny / allowlist-reject / exec error). The transport is healthy — report on
 		// CONTROL with a bounded, non-revealing code; the DATA stream was already closed with a terminal EndStream.
-		_ = sender.sendError(dispatchErrorCode(herr), false)
+		_ = sender.sendSessionError(permit.SessionID, dispatchErrorCode(herr), false)
 	}
 }
 
@@ -151,6 +151,8 @@ func dispatchErrorCode(err error) string {
 		return "operation-dispatch-failed:arg-policy"
 	case errors.Is(err, ptyexec.ErrInvalidOperation):
 		return "operation-dispatch-failed:invalid-operation"
+	case errors.Is(err, ptyexec.ErrConPTYEmptyOutput):
+		return "operation-dispatch-failed:empty-output"
 	default:
 		return "operation-dispatch-failed:exec-failed"
 	}

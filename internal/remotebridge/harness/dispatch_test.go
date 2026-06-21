@@ -312,7 +312,10 @@ func TestDispatchHandlerErrorSendsControlErrorFrame(t *testing.T) {
 	}}
 	startDispatch(t, broker, disp)
 
-	assertControlError(t, agentFrames, "operation-dispatch-failed:exec-failed")
+	env := assertControlError(t, agentFrames, "operation-dispatch-failed:exec-failed")
+	if got := env.GetSessionId(); got != "sess-1" {
+		t.Fatalf("dispatch handler error session_id = %q, want sess-1", got)
+	}
 }
 
 func TestDispatchErrorCodeClassifiesBoundedReasons(t *testing.T) {
@@ -350,6 +353,11 @@ func TestDispatchErrorCodeClassifiesBoundedReasons(t *testing.T) {
 			name: "invalid operation",
 			err:  fmt.Errorf("%w: unsupported", ptyexec.ErrInvalidOperation),
 			want: "operation-dispatch-failed:invalid-operation",
+		},
+		{
+			name: "empty output",
+			err:  ptyexec.ErrConPTYEmptyOutput,
+			want: "operation-dispatch-failed:empty-output",
 		},
 	}
 
@@ -390,14 +398,17 @@ func TestDispatchDeviceMismatchRefuses(t *testing.T) {
 	}}
 	startDispatch(t, broker, disp)
 
-	assertControlError(t, agentFrames, "operation-device-mismatch")
+	env := assertControlError(t, agentFrames, "operation-device-mismatch")
+	if got := env.GetSessionId(); got != "sess-1" {
+		t.Fatalf("device mismatch error session_id = %q, want sess-1", got)
+	}
 	if called, _, _, _ := disp.snapshot(); called {
 		t.Error("a device-mismatched permit must NOT reach the dispatcher (no execution)")
 	}
 }
 
 // assertControlError waits for an agent→broker CONTROL ErrorFrame with the given code.
-func assertControlError(t *testing.T, frames <-chan *pb.Envelope, wantCode string) {
+func assertControlError(t *testing.T, frames <-chan *pb.Envelope, wantCode string) *pb.Envelope {
 	t.Helper()
 	deadline := time.After(3 * time.Second)
 	for {
@@ -410,7 +421,7 @@ func assertControlError(t *testing.T, frames <-chan *pb.Envelope, wantCode strin
 				if env.GetChannelType() != pb.ChannelType_CONTROL {
 					t.Errorf("error channel %v, want CONTROL", env.GetChannelType())
 				}
-				return
+				return env
 			}
 			// skip non-error agent frames (none expected, but be tolerant)
 		case <-deadline:

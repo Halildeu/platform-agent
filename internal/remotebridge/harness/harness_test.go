@@ -719,8 +719,19 @@ func TestOutboundAllowlistRefusesBrokerAuthority(t *testing.T) {
 	if err := s.sendError("e2", true); err != nil {
 		t.Fatalf("sendError: %v", err)
 	}
-	if len(fs.sent) != 2 || fs.sent[0].GetFrameSeq() != 0 || fs.sent[1].GetFrameSeq() != 1 {
+	if err := s.sendSessionError("sess-1", "e3", false); err != nil {
+		t.Fatalf("sendSessionError: %v", err)
+	}
+	if len(fs.sent) != 3 || fs.sent[0].GetFrameSeq() != 0 || fs.sent[1].GetFrameSeq() != 1 ||
+		fs.sent[2].GetFrameSeq() != 2 {
 		t.Fatalf("outbound seq not contiguous: %v", fs.sent)
+	}
+	if fs.sent[0].GetSessionId() != "" || fs.sent[1].GetSessionId() != "" {
+		t.Fatalf("generic errors unexpectedly carried session ids: %q %q",
+			fs.sent[0].GetSessionId(), fs.sent[1].GetSessionId())
+	}
+	if fs.sent[2].GetSessionId() != "sess-1" {
+		t.Fatalf("session error session_id %q, want sess-1", fs.sent[2].GetSessionId())
 	}
 	for _, e := range fs.sent {
 		if e.GetChannelType() != pb.ChannelType_CONTROL {

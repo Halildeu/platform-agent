@@ -36,6 +36,16 @@ func (s *controlSender) sendError(code string, retryable bool) error {
 	}}})
 }
 
+func (s *controlSender) sendSessionError(sessionID, code string, retryable bool) error {
+	return s.send(&pb.Envelope{
+		SessionId: sessionID,
+		Payload: &pb.Envelope_Error{Error: &pb.ErrorFrame{
+			Code:      code,
+			Retryable: retryable,
+		}},
+	})
+}
+
 func (s *controlSender) sendConsentResult(result *pb.ConsentResult) error {
 	return s.send(&pb.Envelope{
 		SessionId: result.GetSessionId(),
