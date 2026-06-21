@@ -76,6 +76,26 @@ func TestPtyOperationHandlerHappyStreamsOutputThenEnd(t *testing.T) {
 	}
 }
 
+func TestPtyOperationHandlerEmptyOutputReturnsErrorAndOnlyEndStream(t *testing.T) {
+	rec := &recorderRun{retOut: nil, retCode: 0}
+	h, permit, v := authorizedHandler(t, rec, 4, 0)
+	c := &collector{}
+
+	res, err := h.Handle(context.Background(), permit, v.CommandLine, "stream-empty", c.send, execFreshNow)
+	if !errors.Is(err, ErrConPTYEmptyOutput) {
+		t.Fatalf("empty output must propagate as ErrConPTYEmptyOutput, got %v", err)
+	}
+	if !rec.called {
+		t.Error("the runner should have been invoked (gate + allowlist passed)")
+	}
+	if len(res.Output) != 0 || res.ExitCode != 0 {
+		t.Errorf("unexpected result for empty output: out=%q code=%d", res.Output, res.ExitCode)
+	}
+	if len(c.frames) != 1 || !c.frames[0].EndStream || c.frames[0].FrameSeq != 0 || len(c.frames[0].Payload) != 0 {
+		t.Fatalf("empty output error must emit only a terminal EndStream, got %+v", c.frames)
+	}
+}
+
 func TestPtyOperationHandlerDeniedStreamsOnlyEndStreamNoSpawn(t *testing.T) {
 	rec := &recorderRun{retOut: []byte("SHOULD-NEVER-RUN")}
 	h, permit, _ := authorizedHandler(t, rec, 0, 0)
@@ -214,7 +234,7 @@ func TestPtyOperationHandlerExecTimeoutBoundsWedgedChild(t *testing.T) {
 	permit, ver, v := loadExecVector(t)
 	started := make(chan struct{})
 	// A runner that wedges until its ctx is cancelled, then reports ctx.Err() (a real child is terminated).
-	run := func(ctx context.Context, _, _ string, _, _ int16) ([]byte, uint32, error) {
+	run := func(ctx context.Context, _ ExecPlan, _, _ int16) ([]byte, uint32, error) {
 		close(started)
 		<-ctx.Done()
 		return nil, 0, ctx.Err()

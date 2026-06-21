@@ -65,17 +65,19 @@ type recorderRun struct {
 	called  bool
 	gotExe  string
 	gotCmd  string
+	gotArgs []string
 	retOut  []byte
 	retCode uint32
 	retErr  error
 }
 
-func (r *recorderRun) fn(_ context.Context, exePath, commandLine string, _, _ int16) ([]byte, uint32, error) {
+func (r *recorderRun) fn(_ context.Context, plan ExecPlan, _, _ int16) ([]byte, uint32, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.called = true
-	r.gotExe = exePath
-	r.gotCmd = commandLine
+	r.gotExe = plan.ExePath
+	r.gotCmd = plan.CommandLine
+	r.gotArgs = append([]string(nil), plan.Args...)
 	return r.retOut, r.retCode, r.retErr
 }
 
@@ -94,6 +96,9 @@ func TestExecutorHappyAuthorizesThenRuns(t *testing.T) {
 	}
 	if rec.gotExe != `C:\Windows\System32\hostname.exe` {
 		t.Errorf("ran the wrong binary: %q", rec.gotExe)
+	}
+	if len(rec.gotArgs) != 0 {
+		t.Errorf("hostname should run with no args, got %v", rec.gotArgs)
 	}
 	if string(res.Output) != "RENDERED-OUTPUT" || res.ExitCode != 0 {
 		t.Errorf("result not propagated: out=%q code=%d", res.Output, res.ExitCode)
@@ -152,6 +157,23 @@ func TestExecutorRunErrorPropagates(t *testing.T) {
 	}
 	if !rec.called {
 		t.Error("the runner should have been invoked (gate + allowlist passed)")
+	}
+}
+
+func TestExecutorEmptyOutputFailsClosed(t *testing.T) {
+	permit, ver, v := loadExecVector(t)
+	rec := &recorderRun{retOut: nil, retCode: 0}
+	e := NewExecutor(ver, DefaultAllowlist(), 0, 0)
+	e.run = rec.fn
+	res, err := e.Execute(context.Background(), permit, v.CommandLine, execFreshNow)
+	if !errors.Is(err, ErrConPTYEmptyOutput) {
+		t.Fatalf("empty output must fail closed, got %v", err)
+	}
+	if !rec.called {
+		t.Error("the runner should have been invoked (gate + allowlist passed)")
+	}
+	if len(res.Output) != 0 || res.ExitCode != 0 {
+		t.Errorf("unexpected result for empty output: out=%q code=%d", res.Output, res.ExitCode)
 	}
 }
 
