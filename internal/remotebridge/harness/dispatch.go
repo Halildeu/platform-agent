@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -124,6 +125,42 @@ func (h *Harness) dispatchOperation(ctx context.Context, conn *grpc.ClientConn,
 	if herr != nil {
 		// The operation failed (gate-deny / allowlist-reject / exec error). The transport is healthy — report on
 		// CONTROL with a bounded, non-revealing code; the DATA stream was already closed with a terminal EndStream.
-		_ = sender.sendError("operation-dispatch-failed", false)
+		_ = sender.sendError(dispatchErrorCode(herr), false)
 	}
+}
+
+func dispatchErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, ptyexec.ErrNotAuthorized):
+		return "operation-dispatch-failed:" + authzReasonCode(err)
+	case errors.Is(err, ptyexec.ErrNotAllowlisted):
+		return "operation-dispatch-failed:not-allowlisted"
+	case errors.Is(err, ptyexec.ErrArgPolicy):
+		return "operation-dispatch-failed:arg-policy"
+	case errors.Is(err, ptyexec.ErrInvalidOperation):
+		return "operation-dispatch-failed:invalid-operation"
+	default:
+		return "operation-dispatch-failed:exec-failed"
+	}
+}
+
+func authzReasonCode(err error) string {
+	msg := err.Error()
+	for _, reason := range []string{
+		operation.ReasonPermitInvalid,
+		operation.ReasonCapabilityNotPTY,
+		operation.ReasonCommandTooLong,
+		operation.ReasonEmptyCommand,
+		operation.ReasonCommandMismatch,
+		operation.ReasonSeqInvalid,
+		operation.ReasonSeqReplay,
+	} {
+		if strings.Contains(msg, reason) {
+			return reason
+		}
+	}
+	return "not-authorized"
 }
