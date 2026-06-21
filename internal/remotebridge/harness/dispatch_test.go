@@ -150,6 +150,11 @@ func TestDecodeDispatch(t *testing.T) {
 	if _, _, err := decodeDispatch(&pb.OperationDispatch{Permit: noOp, CommandLine: "hostname"}); err == nil {
 		t.Error("empty operationId must fail-closed (no DATA-stream correlation key)")
 	}
+	noSession := ptyPermitProto()
+	noSession.SessionId = ""
+	if _, _, err := decodeDispatch(&pb.OperationDispatch{Permit: noSession, CommandLine: "hostname"}); err == nil {
+		t.Error("empty sessionId must fail-closed (no broker/WORM recording boundary)")
+	}
 	permit, cmd, err := decodeDispatch(&pb.OperationDispatch{Permit: ptyPermitProto(), CommandLine: "hostname"})
 	if err != nil {
 		t.Fatalf("valid dispatch: %v", err)
@@ -212,8 +217,21 @@ func TestDispatchHappyStreamsToDataAndCallsHandler(t *testing.T) {
 		if env.GetChannelType() != pb.ChannelType_DATA {
 			t.Errorf("frame %d channel %v, want DATA", i, env.GetChannelType())
 		}
+		if env.GetSessionId() != "sess-1" {
+			t.Errorf("frame %d session_id %q, want sess-1", i, env.GetSessionId())
+		}
+		if env.GetStreamId() != "op-1" {
+			t.Errorf("frame %d envelope stream_id %q, want op-1", i, env.GetStreamId())
+		}
+		if env.GetSentAtEpochMillis() <= 0 {
+			t.Errorf("frame %d sent_at_epoch_millis %d, want positive", i, env.GetSentAtEpochMillis())
+		}
 		if env.GetDataFrame() == nil {
 			t.Errorf("frame %d payload %T, want data_frame", i, env.GetPayload())
+			continue
+		}
+		if env.GetDataFrame().GetStreamId() != "op-1" {
+			t.Errorf("frame %d data_frame stream_id %q, want op-1", i, env.GetDataFrame().GetStreamId())
 		}
 	}
 	if got := string(frames[0].GetDataFrame().GetPayload()); got != "RENDERED" {
