@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -293,7 +294,54 @@ func TestDispatchHandlerErrorSendsControlErrorFrame(t *testing.T) {
 	}}
 	startDispatch(t, broker, disp)
 
-	assertControlError(t, agentFrames, "operation-dispatch-failed")
+	assertControlError(t, agentFrames, "operation-dispatch-failed:exec-failed")
+}
+
+func TestDispatchErrorCodeClassifiesBoundedReasons(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "generic exec failure",
+			err:  errors.New("spawn failed"),
+			want: "operation-dispatch-failed:exec-failed",
+		},
+		{
+			name: "permit invalid",
+			err:  fmt.Errorf("%w: %s", ptyexec.ErrNotAuthorized, operation.ReasonPermitInvalid),
+			want: "operation-dispatch-failed:permit-invalid",
+		},
+		{
+			name: "command mismatch",
+			err:  fmt.Errorf("%w: %s", ptyexec.ErrNotAuthorized, operation.ReasonCommandMismatch),
+			want: "operation-dispatch-failed:command-mismatch",
+		},
+		{
+			name: "not allowlisted",
+			err:  fmt.Errorf("%w: hostname", ptyexec.ErrNotAllowlisted),
+			want: "operation-dispatch-failed:not-allowlisted",
+		},
+		{
+			name: "arg policy",
+			err:  fmt.Errorf("%w: bad arg", ptyexec.ErrArgPolicy),
+			want: "operation-dispatch-failed:arg-policy",
+		},
+		{
+			name: "invalid operation",
+			err:  fmt.Errorf("%w: unsupported", ptyexec.ErrInvalidOperation),
+			want: "operation-dispatch-failed:invalid-operation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dispatchErrorCode(tt.err); got != tt.want {
+				t.Fatalf("dispatchErrorCode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 // TestDispatchDeviceMismatchRefuses: a broker-signed permit minted for ANOTHER device (DeviceId != this
