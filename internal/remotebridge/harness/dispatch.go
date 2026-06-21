@@ -49,6 +49,11 @@ func decodeDispatch(d *pb.OperationDispatch) (operation.OperationPermit, string,
 	if p.GetOperationId() == "" {
 		return operation.OperationPermit{}, "", errDispatchDecode
 	}
+	// sessionId is the broker/WORM recording boundary for DATA frames. Without it, broker-side audit cannot
+	// bind terminal output to the approved session, so fail closed before execution.
+	if p.GetSessionId() == "" {
+		return operation.OperationPermit{}, "", errDispatchDecode
+	}
 	permit := operation.OperationPermit{
 		Alg:                  p.GetAlg(),
 		Kid:                  p.GetKid(),
@@ -99,12 +104,16 @@ func (h *Harness) dispatchOperation(ctx context.Context, conn *grpc.ClientConn,
 		_ = sender.sendError("data-stream-open-failed", true)
 		return
 	}
-	// The DATA-stream sink: each pb.DataFrame travels as an Envelope.data_frame on the DATA channel. The frame
-	// carries its OWN frame_seq (per the wire rule the DATA Envelope.frame_seq stays 0 and stream_id is empty).
+	// The DATA-stream sink: each pb.DataFrame travels as an Envelope.data_frame on the DATA channel. The
+	// envelope carries the approved session + operation correlation fields required by the broker/WORM
+	// recorder; the frame carries ordered PTY bytes and the terminal EndStream marker.
 	send := func(f *pb.DataFrame) error {
 		return dataStream.Send(&pb.Envelope{
-			ChannelType: pb.ChannelType_DATA,
-			Payload:     &pb.Envelope_DataFrame{DataFrame: f},
+			SessionId:         permit.SessionID,
+			StreamId:          permit.OperationID,
+			ChannelType:       pb.ChannelType_DATA,
+			SentAtEpochMillis: time.Now().UnixMilli(),
+			Payload:           &pb.Envelope_DataFrame{DataFrame: f},
 		})
 	}
 
