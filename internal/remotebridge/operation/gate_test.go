@@ -27,8 +27,8 @@ func TestAuthorizeFullStackWithBrokerVector(t *testing.T) {
 		t.Fatalf("wrong command must be command-mismatch, got allowed=%v reason=%q", d.Allowed, d.Reason)
 	}
 	// expired permit → the crypto gate (verify) fails first
-	if d := NewAuthorizer(ver).Authorize(v.permit(), v.CommandLine, v.ExpiresAtEpochMillis); d.Allowed || d.Reason != ReasonPermitInvalid {
-		t.Fatalf("expired must be permit-invalid, got allowed=%v reason=%q", d.Allowed, d.Reason)
+	if d := NewAuthorizer(ver).Authorize(v.permit(), v.CommandLine, v.ExpiresAtEpochMillis); d.Allowed || d.Reason != ReasonPermitNotFresh {
+		t.Fatalf("expired must be permit-invalid:not-fresh, got allowed=%v reason=%q", d.Allowed, d.Reason)
 	}
 }
 
@@ -89,11 +89,16 @@ func TestAuthorizeFailClosed(t *testing.T) {
 	hostnameHash := ParseCommand("hostname").Hash()
 	good := OperationPermit{Capability: CapabilityConstrainedPTY, CommandHash: hostnameHash, SessionID: "s", Seq: 1}
 
-	if d := NewAuthorizer(nil).Authorize(good, "hostname", 1); d.Allowed || d.Reason != ReasonPermitInvalid {
-		t.Errorf("nil verifier must deny permit-invalid: allowed=%v reason=%q", d.Allowed, d.Reason)
+	if d := NewAuthorizer(nil).Authorize(good, "hostname", 1); d.Allowed || d.Reason != ReasonPermitVerifierUnavailable {
+		t.Errorf("nil verifier must deny verifier-unavailable: allowed=%v reason=%q", d.Allowed, d.Reason)
 	}
 	if d := newAuthorizer(func(OperationPermit, int64) bool { return false }).Authorize(good, "hostname", 1); d.Allowed || d.Reason != ReasonPermitInvalid {
 		t.Errorf("verify-false must deny permit-invalid: allowed=%v reason=%q", d.Allowed, d.Reason)
+	}
+	if d := newReasonedAuthorizer(func(OperationPermit, int64) (bool, string) {
+		return false, ReasonPermitSignatureInvalid
+	}).Authorize(good, "hostname", 1); d.Allowed || d.Reason != ReasonPermitSignatureInvalid {
+		t.Errorf("reasoned verifier must preserve sub-reason: allowed=%v reason=%q", d.Allowed, d.Reason)
 	}
 	var nilAz *Authorizer
 	if d := nilAz.Authorize(good, "hostname", 1); d.Allowed {

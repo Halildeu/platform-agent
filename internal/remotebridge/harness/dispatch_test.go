@@ -335,6 +335,11 @@ func TestDispatchErrorCodeClassifiesBoundedReasons(t *testing.T) {
 			want: "operation-dispatch-failed:permit-invalid",
 		},
 		{
+			name: "permit invalid sub-reason",
+			err:  fmt.Errorf("%w: %s", ptyexec.ErrNotAuthorized, operation.ReasonPermitSignatureInvalid),
+			want: "operation-dispatch-failed:permit-invalid:signature-invalid",
+		},
+		{
 			name: "command mismatch",
 			err:  fmt.Errorf("%w: %s", ptyexec.ErrNotAuthorized, operation.ReasonCommandMismatch),
 			want: "operation-dispatch-failed:command-mismatch",

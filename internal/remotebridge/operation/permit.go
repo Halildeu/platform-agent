@@ -128,26 +128,45 @@ func NewVerifier(brokerPublicKeyB64, expectedKid, expectedDeviceID string) (*Ver
 // verifies over canonicalPayload(). Fail-closed: ANY mismatch / tamper / expiry / crypto error → false.
 // (Public-key verification is not secret-dependent, so no constant-time comparison is needed.)
 func (v *Verifier) Verify(p OperationPermit, nowEpochMillis int64) bool {
+	ok, _ := v.VerifyWithReason(p, nowEpochMillis)
+	return ok
+}
+
+// VerifyWithReason is the diagnostic form of Verify. It preserves the same fail-closed security decision but
+// returns a bounded, non-secret reason code for broker/operator audit when a live endpoint rejects a permit.
+func (v *Verifier) VerifyWithReason(p OperationPermit, nowEpochMillis int64) (bool, string) {
 	if v == nil || v.pub == nil {
-		return false
+		return false, ReasonPermitVerifierUnavailable
 	}
-	if p.Kid != v.expectedKid || p.Alg != PermitAlg || p.SignatureB64 == "" {
-		return false
+	if p.Kid != v.expectedKid {
+		return false, ReasonPermitKidMismatch
+	}
+	if p.Alg != PermitAlg {
+		return false, ReasonPermitAlgMismatch
+	}
+	if p.SignatureB64 == "" {
+		return false, ReasonPermitSignatureMissing
 	}
 	// Schema-version pin + device binding (both signed CanonicalPayload fields;
 	// restored defense-in-depth the lean verifier had dropped vs permit.Verifier).
-	if p.PermitVersion != permitVersionPinned || p.DeviceID != v.expectedDeviceID {
-		return false
+	if p.PermitVersion != permitVersionPinned {
+		return false, ReasonPermitVersionMismatch
+	}
+	if p.DeviceID != v.expectedDeviceID {
+		return false, ReasonPermitDeviceMismatch
 	}
 	if !p.IsFresh(nowEpochMillis) {
-		return false
+		return false, ReasonPermitNotFresh
 	}
 	sig, err := base64.StdEncoding.DecodeString(p.SignatureB64)
 	if err != nil || len(sig) == 0 {
-		return false
+		return false, ReasonPermitSignatureDecode
 	}
 	digest := sha256.Sum256(p.canonicalPayload())
-	return ecdsa.VerifyASN1(v.pub, digest[:], sig)
+	if !ecdsa.VerifyASN1(v.pub, digest[:], sig) {
+		return false, ReasonPermitSignatureInvalid
+	}
+	return true, ""
 }
 
 // --- byte-exact serialization helpers (mirror Java DataOutputStream); shared with command.go ---
