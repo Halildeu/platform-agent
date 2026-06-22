@@ -23,51 +23,51 @@ type HighWaterWriter interface {
 
 // ActivationOutcome is path-free evidence for the activation phase.
 type ActivationOutcome struct {
-	Status                 ActivationStatus `json:"status"`
-	ActivationPlanID       string           `json:"activationPlanId,omitempty"`
-	TargetVersion          string           `json:"targetVersion,omitempty"`
-	NewSha256              string           `json:"newSha256,omitempty"`
-	BackupSha256           string           `json:"backupSha256,omitempty"`
-	ServiceRunningVerified bool             `json:"serviceRunningVerified,omitempty"`
-	EvidencePersisted      bool             `json:"evidencePersisted"`
-	Reason                 string           `json:"reason,omitempty"`
+	Status                   ActivationStatus `json:"status"`
+	ActivationPlanID         string           `json:"activationPlanId,omitempty"`
+	TargetVersion            string           `json:"targetVersion,omitempty"`
+	NewSha256                string           `json:"newSha256,omitempty"`
+	BackupSha256             string           `json:"backupSha256,omitempty"`
+	ServiceRunningVerified   bool             `json:"serviceRunningVerified,omitempty"`
+	EvidencePersisted        bool             `json:"evidencePersisted"`
+	EvidencePersistenceError string           `json:"evidencePersistenceError,omitempty"`
+	Reason                   string           `json:"reason,omitempty"`
 }
 
 // ActivatePreparedUpdate applies an already-staged self-update. It is called
 // after the staging command result has been submitted to the backend.
 func ActivatePreparedUpdate(ctx context.Context, root, stagingID string, maxBytes int64, service ActivationServiceController, highWater HighWaterWriter) ActivationOutcome {
 	if service == nil {
-		return activationFailed("", "", "", "activation service controller is required")
+		return persistActivationOutcome(ctx, root, stagingID, activationFailed(validActivationPlanIDOrEmpty(stagingID), "", "", "activation service controller is required"))
 	}
 	plan, code, reason := LoadActivationPlan(root, stagingID)
 	if code != "" {
-		return activationFailed(stagingID, "", "", reason)
+		return persistActivationOutcome(ctx, root, stagingID, activationFailed(stagingID, "", "", reason))
 	}
 	if _, code, reason := VerifyActivationPlanReady(root, stagingID, maxBytes); code != "" {
-		return activationFailed(plan.ActivationPlanID, plan.TargetVersion, "", reason)
+		return persistActivationOutcome(ctx, root, stagingID, activationFailed(plan.ActivationPlanID, plan.TargetVersion, "", reason))
 	}
 	backupHash, code, reason := copyBinaryWithExpectedHash(plan.CurrentBinaryPath, activationBackupNameFor(root, stagingID), "", maxBytes)
 	if code != "" {
-		return activationFailed(plan.ActivationPlanID, plan.TargetVersion, "", reason)
+		return persistActivationOutcome(ctx, root, stagingID, activationFailed(plan.ActivationPlanID, plan.TargetVersion, "", reason))
 	}
 	if err := service.Stop(ctx, plan.ServiceName); err != nil {
-		return activationFailed(plan.ActivationPlanID, plan.TargetVersion, backupHash.ActualSha256, "stop service failed")
+		return persistActivationOutcome(ctx, root, stagingID, activationFailed(plan.ActivationPlanID, plan.TargetVersion, backupHash.ActualSha256, "stop service failed"))
 	}
 	newHash, code, reason := copyBinaryWithExpectedHash(plan.StagedBinaryPath, plan.CurrentBinaryPath+".ag029.tmp", plan.ActualSha256, maxBytes)
 	if code != "" {
-		return rollbackAfterActivationFailure(ctx, service, plan, backupHash.ActualSha256, "binary activation failed: "+reason, maxBytes)
+		return rollbackAfterActivationFailure(ctx, root, stagingID, service, plan, backupHash.ActualSha256, "binary activation failed: "+reason, maxBytes)
 	}
 	if err := replaceFile(plan.CurrentBinaryPath+".ag029.tmp", plan.CurrentBinaryPath); err != nil {
-		return rollbackAfterActivationFailure(ctx, service, plan, backupHash.ActualSha256, "binary activation promote failed", maxBytes)
+		return rollbackAfterActivationFailure(ctx, root, stagingID, service, plan, backupHash.ActualSha256, "binary activation promote failed", maxBytes)
 	}
 	if err := service.Start(ctx, plan.ServiceName); err != nil {
-		return rollbackAfterActivationFailure(ctx, service, plan, backupHash.ActualSha256, "start service failed", maxBytes)
+		return rollbackAfterActivationFailure(ctx, root, stagingID, service, plan, backupHash.ActualSha256, "start service failed", maxBytes)
 	}
 	if highWater != nil {
 		if err := highWater.WriteMaxSeen(ctx, plan.TargetVersion); err != nil {
 			out := activationFailed(plan.ActivationPlanID, plan.TargetVersion, backupHash.ActualSha256, "high-water persistence failed")
-			_ = WriteActivationOutcome(ctx, root, stagingID, out)
-			return out
+			return persistActivationOutcome(ctx, root, stagingID, out)
 		}
 	}
 	out := ActivationOutcome{
@@ -88,6 +88,27 @@ func ActivatePreparedUpdate(ctx context.Context, root, stagingID string, maxByte
 		return out
 	}
 	return persistedOut
+}
+
+func persistActivationOutcome(ctx context.Context, root, stagingID string, outcome ActivationOutcome) ActivationOutcome {
+	if !validStagingID(stagingID) {
+		outcome.EvidencePersistenceError = "invalid activation outcome identifier"
+		return outcome
+	}
+	persistedOut := outcome
+	persistedOut.EvidencePersisted = true
+	if err := WriteActivationOutcome(ctx, root, stagingID, persistedOut); err != nil {
+		outcome.EvidencePersistenceError = sanitizeReason("activation outcome persistence failed: " + err.Error())
+		return outcome
+	}
+	return persistedOut
+}
+
+func validActivationPlanIDOrEmpty(stagingID string) string {
+	if !validStagingID(stagingID) {
+		return ""
+	}
+	return stagingID
 }
 
 func WriteActivationOutcome(ctx context.Context, root, stagingID string, outcome ActivationOutcome) error {
@@ -120,25 +141,25 @@ func LoadActivationOutcome(root, stagingID string) (ActivationOutcome, ErrorCode
 	return out, "", ""
 }
 
-func rollbackAfterActivationFailure(ctx context.Context, service ActivationServiceController, plan ActivationPlan, backupSha, reason string, maxBytes int64) ActivationOutcome {
+func rollbackAfterActivationFailure(ctx context.Context, root, stagingID string, service ActivationServiceController, plan ActivationPlan, backupSha, reason string, maxBytes int64) ActivationOutcome {
 	backupPath := activationBackupNameFor(filepath.Dir(plan.StagedBinaryPath), plan.StagingID)
 	if _, code, restoreReason := copyBinaryWithExpectedHash(backupPath, plan.CurrentBinaryPath+".ag029.rollback.tmp", backupSha, maxBytes); code != "" {
-		return activationFailed(plan.ActivationPlanID, plan.TargetVersion, backupSha, "rollback restore failed: "+restoreReason)
+		return persistActivationOutcome(ctx, root, stagingID, activationFailed(plan.ActivationPlanID, plan.TargetVersion, backupSha, "rollback restore failed: "+restoreReason))
 	}
 	if err := replaceFile(plan.CurrentBinaryPath+".ag029.rollback.tmp", plan.CurrentBinaryPath); err != nil {
-		return activationFailed(plan.ActivationPlanID, plan.TargetVersion, backupSha, "rollback promote failed")
+		return persistActivationOutcome(ctx, root, stagingID, activationFailed(plan.ActivationPlanID, plan.TargetVersion, backupSha, "rollback promote failed"))
 	}
 	if err := service.Start(ctx, plan.ServiceName); err != nil {
-		return activationFailed(plan.ActivationPlanID, plan.TargetVersion, backupSha, "rollback start failed")
+		return persistActivationOutcome(ctx, root, stagingID, activationFailed(plan.ActivationPlanID, plan.TargetVersion, backupSha, "rollback start failed"))
 	}
-	return ActivationOutcome{
+	return persistActivationOutcome(ctx, root, stagingID, ActivationOutcome{
 		Status:                 ActivationRolledBack,
 		ActivationPlanID:       plan.ActivationPlanID,
 		TargetVersion:          plan.TargetVersion,
 		BackupSha256:           backupSha,
 		ServiceRunningVerified: true,
 		Reason:                 sanitizeReason(reason + "; rollback restored"),
-	}
+	})
 }
 
 func activationFailed(planID, targetVersion, backupSha, reason string) ActivationOutcome {
