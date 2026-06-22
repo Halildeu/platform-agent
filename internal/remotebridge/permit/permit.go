@@ -28,6 +28,10 @@ const Domain = "RemoteBridgeOperationPermit:v1"
 const (
 	CapabilityViewOnly       = "VIEW_ONLY"
 	CapabilityConstrainedPTY = "CONSTRAINED_PTY"
+	// MaxPermitValidityMillis caps one broker-issued operation permit at 15 minutes.
+	MaxPermitValidityMillis int64 = 15 * 60 * 1000
+	// PermitClockSkewMillis is bounded wall-clock leeway for broker/endpoint drift.
+	PermitClockSkewMillis int64 = 2 * 60 * 1000
 )
 
 // Permit mirrors the 15-field OperationPermit record (wire-contract field
@@ -52,10 +56,17 @@ type Permit struct {
 	SignatureB64         string
 }
 
-// IsFresh reports whether now is within [issuedAt, expiresAt) — the same
-// half-open window the Java OperationPermit.isFresh enforces.
+// IsFresh reports whether now is within issuedAt-skew <= now < expiresAt+skew,
+// while still rejecting malformed windows and permits whose signed validity
+// exceeds MaxPermitValidityMillis.
 func (p *Permit) IsFresh(nowEpochMillis int64) bool {
-	return nowEpochMillis >= p.IssuedAtEpochMillis && nowEpochMillis < p.ExpiresAtEpochMillis
+	return p != nil &&
+		p.IssuedAtEpochMillis > 0 &&
+		p.ExpiresAtEpochMillis > 0 &&
+		p.IssuedAtEpochMillis < p.ExpiresAtEpochMillis &&
+		p.ExpiresAtEpochMillis-p.IssuedAtEpochMillis <= MaxPermitValidityMillis &&
+		nowEpochMillis+PermitClockSkewMillis >= p.IssuedAtEpochMillis &&
+		nowEpochMillis < p.ExpiresAtEpochMillis+PermitClockSkewMillis
 }
 
 // CanonicalPayload returns the exact byte sequence the broker signs: the

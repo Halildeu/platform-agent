@@ -29,9 +29,9 @@ const (
 	// even if a broker bug signs an over-broad window.
 	MaxPermitValidityMillis int64 = 15 * 60 * 1000
 	// PermitClockSkewMillis tolerates a small broker/endpoint wall-clock skew on
-	// the not-before side of a freshly minted permit. This matches common
-	// signed-token validation practice without extending the permit's expiry
-	// window: replay lifetime remains bounded by expiresAtEpochMillis.
+	// both sides of the signed permit window. This matches common signed-token
+	// validation practice (bounded leeway for nbf/exp) while the signed validity
+	// cap and seq replay guard keep the pilot operation single-use and short-lived.
 	PermitClockSkewMillis int64 = 2 * 60 * 1000
 )
 
@@ -79,15 +79,16 @@ func (p OperationPermit) canonicalPayload() []byte {
 	return b.Bytes()
 }
 
-// IsFresh reports issuedAt-skew <= now < expiresAt with malformed-window guards: both bounds must be positive
-// (rejects zero/negative epochs) and issuedAt < expiresAt (rejects a degenerate/inverted window). The skew is
-// intentionally not applied to expiresAt, so a clock-lag tolerance cannot become a replay extension.
+// IsFresh reports issuedAt-skew <= now < expiresAt+skew with malformed-window guards: both bounds must be
+// positive (rejects zero/negative epochs) and issuedAt < expiresAt (rejects a degenerate/inverted window).
+// The signed validity window is still capped by MaxPermitValidityMillis; skew is only a bounded wall-clock
+// leeway for broker/endpoint drift, not permission to mint long-lived permits.
 func (p OperationPermit) IsFresh(nowEpochMillis int64) bool {
 	return p.IssuedAtEpochMillis > 0 && p.ExpiresAtEpochMillis > 0 &&
 		p.IssuedAtEpochMillis < p.ExpiresAtEpochMillis &&
 		p.ExpiresAtEpochMillis-p.IssuedAtEpochMillis <= MaxPermitValidityMillis &&
 		nowEpochMillis+PermitClockSkewMillis >= p.IssuedAtEpochMillis &&
-		nowEpochMillis < p.ExpiresAtEpochMillis
+		nowEpochMillis < p.ExpiresAtEpochMillis+PermitClockSkewMillis
 }
 
 // Verifier holds ONLY the broker's PUBLIC key + the expected kid — it verifies a permit but never mints one.
