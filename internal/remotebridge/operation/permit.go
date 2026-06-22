@@ -28,6 +28,11 @@ const (
 	// much shorter permits for attended sessions; this agent-side ceiling makes TTL a local fail-closed guard
 	// even if a broker bug signs an over-broad window.
 	MaxPermitValidityMillis int64 = 15 * 60 * 1000
+	// PermitClockSkewMillis tolerates a small broker/endpoint wall-clock skew on
+	// the not-before side of a freshly minted permit. This matches common
+	// signed-token validation practice without extending the permit's expiry
+	// window: replay lifetime remains bounded by expiresAtEpochMillis.
+	PermitClockSkewMillis int64 = 2 * 60 * 1000
 )
 
 // OperationPermit mirrors the broker's signed OperationPermit (broker-private / agent-public). The agent only
@@ -74,14 +79,15 @@ func (p OperationPermit) canonicalPayload() []byte {
 	return b.Bytes()
 }
 
-// IsFresh reports issuedAt <= now < expiresAt with malformed-window guards: both bounds must be positive
-// (rejects zero/negative epochs) and issuedAt < expiresAt (rejects a degenerate/inverted window). This is
-// defense-in-depth beyond the broker's isFresh — never weaker; a real permit's epoch-millis are always > 0.
+// IsFresh reports issuedAt-skew <= now < expiresAt with malformed-window guards: both bounds must be positive
+// (rejects zero/negative epochs) and issuedAt < expiresAt (rejects a degenerate/inverted window). The skew is
+// intentionally not applied to expiresAt, so a clock-lag tolerance cannot become a replay extension.
 func (p OperationPermit) IsFresh(nowEpochMillis int64) bool {
 	return p.IssuedAtEpochMillis > 0 && p.ExpiresAtEpochMillis > 0 &&
 		p.IssuedAtEpochMillis < p.ExpiresAtEpochMillis &&
 		p.ExpiresAtEpochMillis-p.IssuedAtEpochMillis <= MaxPermitValidityMillis &&
-		nowEpochMillis >= p.IssuedAtEpochMillis && nowEpochMillis < p.ExpiresAtEpochMillis
+		nowEpochMillis+PermitClockSkewMillis >= p.IssuedAtEpochMillis &&
+		nowEpochMillis < p.ExpiresAtEpochMillis
 }
 
 // Verifier holds ONLY the broker's PUBLIC key + the expected kid — it verifies a permit but never mints one.
