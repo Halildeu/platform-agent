@@ -15,6 +15,7 @@ import (
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/mtls"
 	"platform-agent/internal/protocol"
+	"platform-agent/internal/selfupdate"
 	"platform-agent/internal/state"
 )
 
@@ -46,6 +47,10 @@ type Runner struct {
 	StateTracker *state.Tracker
 	Executor     *commands.LocalExecutor
 	Logger       *log.Logger
+	// SelfUpdateActivationHook is called after a successful UPDATE_AGENT
+	// staging result has been submitted to the backend. This mirrors the HMAC
+	// app runner path for tokenless mTLS / auto-enroll endpoints.
+	SelfUpdateActivationHook func(ctx context.Context, stage selfupdate.StageResult) error
 
 	// httpClient and wireClient are built lazily on first use, because
 	// constructing them requires loading the cert (which may fail on the
@@ -709,7 +714,23 @@ func (r *Runner) pollAndExecuteInternal(ctx context.Context, token string) error
 		return err
 	}
 	r.logf("command %s finished with %s", command.CommandID, result.Status)
+	r.maybeLaunchSelfUpdateActivation(ctx, command, result)
 	return nil
+}
+
+func (r *Runner) maybeLaunchSelfUpdateActivation(ctx context.Context, command protocol.AgentCommand, result protocol.CommandResult) {
+	if command.Type != protocol.CommandUpdateAgent || result.Status != protocol.CommandStatusSucceeded || r.SelfUpdateActivationHook == nil {
+		return
+	}
+	stage, ok := result.Details["update"].(selfupdate.StageResult)
+	if !ok || stage.StageStatus != selfupdate.StageReady {
+		return
+	}
+	if err := r.SelfUpdateActivationHook(ctx, stage); err != nil {
+		r.logf("self-update activation hook failed activationPlanId=%s: %v", stage.ActivationPlanID, err)
+		return
+	}
+	r.logf("self-update activation hook launched activationPlanId=%s", stage.ActivationPlanID)
 }
 
 func (r *Runner) logf(format string, args ...interface{}) {

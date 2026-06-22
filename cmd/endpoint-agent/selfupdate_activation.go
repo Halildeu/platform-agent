@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"platform-agent/internal/app"
+	"platform-agent/internal/autoenroll"
 	"platform-agent/internal/config"
 	winservice "platform-agent/internal/platform/windows/service"
 	"platform-agent/internal/selfupdate"
@@ -94,8 +95,22 @@ func handleSelfUpdateStatus(args []string) {
 }
 
 func configureSelfUpdateActivationHook(runner *app.Runner, cfg config.Config, logger *log.Logger) {
-	if runner == nil || !cfg.SelfUpdateAutoActivate {
+	if runner == nil {
 		return
+	}
+	runner.SelfUpdateActivationHook = makeSelfUpdateActivationHook(cfg, logger)
+}
+
+func configureAutoEnrollSelfUpdateActivationHook(runner *autoenroll.Runner, cfg config.Config, logger *log.Logger) {
+	if runner == nil {
+		return
+	}
+	runner.SelfUpdateActivationHook = makeSelfUpdateActivationHook(cfg, logger)
+}
+
+func makeSelfUpdateActivationHook(cfg config.Config, logger *log.Logger) func(context.Context, selfupdate.StageResult) error {
+	if !cfg.SelfUpdateAutoActivate {
+		return nil
 	}
 	executable := currentExecutablePath()
 	stagingRoot := defaultSelfUpdateStagingRoot()
@@ -111,7 +126,7 @@ func configureSelfUpdateActivationHook(runner *app.Runner, cfg config.Config, lo
 	if serviceName == "" {
 		serviceName = winservice.DefaultName
 	}
-	runner.SelfUpdateActivationHook = func(ctx context.Context, stage selfupdate.StageResult) error {
+	return func(ctx context.Context, stage selfupdate.StageResult) error {
 		if executable == "" {
 			return fmt.Errorf("self-update activation helper executable path is empty")
 		}

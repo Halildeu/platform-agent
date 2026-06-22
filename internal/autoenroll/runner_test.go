@@ -14,6 +14,7 @@ import (
 	"platform-agent/internal/commands"
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
+	"platform-agent/internal/selfupdate"
 	"platform-agent/internal/state"
 )
 
@@ -335,6 +336,64 @@ func TestRunner_TokenlessLifecycleExecutesCommandWithCertAuth(t *testing.T) {
 	}
 	if got := recorder.count(PathTokenRefresh); got != 0 {
 		t.Fatalf("RefreshToken must not be called in tokenless command lifecycle; got %d", got)
+	}
+}
+
+func TestRunner_TokenlessLifecycleLaunchesSelfUpdateActivationHook(t *testing.T) {
+	ctx := context.Background()
+	var got string
+	runner := &Runner{
+		SelfUpdateActivationHook: func(_ context.Context, stage selfupdate.StageResult) error {
+			got = stage.ActivationPlanID
+			return nil
+		},
+	}
+
+	runner.maybeLaunchSelfUpdateActivation(ctx,
+		protocol.AgentCommand{
+			CommandID: "cmd-update-1",
+			Type:      protocol.CommandUpdateAgent,
+		},
+		protocol.CommandResult{
+			CommandID: "cmd-update-1",
+			Status:    protocol.CommandStatusSucceeded,
+			Details: map[string]interface{}{
+				"update": selfupdate.StageResult{
+					StageStatus:      selfupdate.StageReady,
+					ActivationPlanID: "0123456789abcdef0123456789abcdef",
+				},
+			},
+		},
+	)
+
+	if got != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("activation hook plan id = %q", got)
+	}
+}
+
+func TestRunner_TokenlessLifecycleDoesNotLaunchSelfUpdateActivationHookForNonReadyUpdate(t *testing.T) {
+	ctx := context.Background()
+	called := false
+	runner := &Runner{
+		SelfUpdateActivationHook: func(context.Context, selfupdate.StageResult) error {
+			called = true
+			return nil
+		},
+	}
+
+	runner.maybeLaunchSelfUpdateActivation(ctx,
+		protocol.AgentCommand{CommandID: "cmd-update-1", Type: protocol.CommandUpdateAgent},
+		protocol.CommandResult{
+			CommandID: "cmd-update-1",
+			Status:    protocol.CommandStatusFailed,
+			Details: map[string]interface{}{
+				"update": selfupdate.StageResult{StageStatus: selfupdate.StageFailed},
+			},
+		},
+	)
+
+	if called {
+		t.Fatal("activation hook must not run for failed/non-ready update")
 	}
 }
 
