@@ -107,8 +107,8 @@ func TestVerifyFailClosed(t *testing.T) {
 		now  int64
 		mut  func(p *OperationPermit)
 	}{
-		{"expired (now==expiresAt)", v.ExpiresAtEpochMillis, func(*OperationPermit) {}},
-		{"expired (now>expiresAt)", v.ExpiresAtEpochMillis + 1, func(*OperationPermit) {}},
+		{"expired outside skew", v.ExpiresAtEpochMillis + PermitClockSkewMillis, func(*OperationPermit) {}},
+		{"long expired outside skew", v.ExpiresAtEpochMillis + PermitClockSkewMillis + 1, func(*OperationPermit) {}},
 		{"not-yet-valid outside skew", v.IssuedAtEpochMillis - PermitClockSkewMillis - 1, func(*OperationPermit) {}},
 		{"wrong kid", freshNow, func(p *OperationPermit) { p.Kid = "kid-OTHER" }},
 		{"wrong alg", freshNow, func(p *OperationPermit) { p.Alg = "SHA512withECDSA" }},
@@ -147,7 +147,7 @@ func TestVerifyWithReasonReportsBoundedSubReasons(t *testing.T) {
 		mut  func(p *OperationPermit)
 		want string
 	}{
-		{"expired", v.ExpiresAtEpochMillis, func(*OperationPermit) {}, ReasonPermitNotFresh},
+		{"expired outside skew", v.ExpiresAtEpochMillis + PermitClockSkewMillis, func(*OperationPermit) {}, ReasonPermitNotFresh},
 		{"wrong kid", freshNow, func(p *OperationPermit) { p.Kid = "kid-OTHER" }, ReasonPermitKidMismatch},
 		{"wrong alg", freshNow, func(p *OperationPermit) { p.Alg = "SHA512withECDSA" }, ReasonPermitAlgMismatch},
 		{"blank signature", freshNow, func(p *OperationPermit) { p.SignatureB64 = "" }, ReasonPermitSignatureMissing},
@@ -240,8 +240,11 @@ func TestIsFreshGuards(t *testing.T) {
 			t.Errorf("case %d (%d..%d): a malformed window must NOT be fresh", i, p.IssuedAtEpochMillis, p.ExpiresAtEpochMillis)
 		}
 	}
-	if (OperationPermit{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1300}).IsFresh(1300) {
-		t.Fatal("expiry remains strict; skew must not extend replay lifetime past expiresAt")
+	if !(OperationPermit{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1300}).IsFresh(1300 + PermitClockSkewMillis - 1) {
+		t.Fatal("a permit just inside the expiry clock-skew window must be fresh")
+	}
+	if (OperationPermit{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1300}).IsFresh(1300 + PermitClockSkewMillis) {
+		t.Fatal("expiry clock-skew remains bounded")
 	}
 }
 

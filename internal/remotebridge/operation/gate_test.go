@@ -26,8 +26,8 @@ func TestAuthorizeFullStackWithBrokerVector(t *testing.T) {
 	if d := NewAuthorizer(ver).Authorize(v.permit(), "whoami", freshNow); d.Allowed || d.Reason != ReasonCommandMismatch {
 		t.Fatalf("wrong command must be command-mismatch, got allowed=%v reason=%q", d.Allowed, d.Reason)
 	}
-	// expired permit → the crypto gate (verify) fails first
-	if d := NewAuthorizer(ver).Authorize(v.permit(), v.CommandLine, v.ExpiresAtEpochMillis); d.Allowed || d.Reason != ReasonPermitNotFresh {
+	// expired permit outside bounded clock skew → the crypto gate (verify) fails first
+	if d := NewAuthorizer(ver).Authorize(v.permit(), v.CommandLine, v.ExpiresAtEpochMillis+PermitClockSkewMillis); d.Allowed || d.Reason != ReasonPermitNotFresh {
 		t.Fatalf("expired must be permit-invalid:not-fresh, got allowed=%v reason=%q", d.Allowed, d.Reason)
 	}
 }

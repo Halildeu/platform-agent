@@ -143,12 +143,15 @@ func TestFreshnessWindowHalfOpen(t *testing.T) {
 		now  int64
 		want bool
 	}{
-		{"before issuedAt", p.IssuedAtEpochMillis - 1, false},
+		{"just before issuedAt inside skew", p.IssuedAtEpochMillis - 1, true},
+		{"inside issuedAt skew", p.IssuedAtEpochMillis - PermitClockSkewMillis, true},
+		{"outside issuedAt skew", p.IssuedAtEpochMillis - PermitClockSkewMillis - 1, false},
 		{"at issuedAt (inclusive)", p.IssuedAtEpochMillis, true},
 		{"mid window", vectorNow, true},
 		{"last valid milli", p.ExpiresAtEpochMillis - 1, true},
-		{"at expiresAt (exclusive)", p.ExpiresAtEpochMillis, false},
-		{"long expired", p.ExpiresAtEpochMillis + 60_000, false},
+		{"inside expiresAt skew", p.ExpiresAtEpochMillis + PermitClockSkewMillis - 1, true},
+		{"outside expiresAt skew", p.ExpiresAtEpochMillis + PermitClockSkewMillis, false},
+		{"long expired", p.ExpiresAtEpochMillis + PermitClockSkewMillis + 60_000, false},
 	}
 	for _, c := range cases {
 		if got := v.Verify(vectorPermit(t), c.now); got != c.want {

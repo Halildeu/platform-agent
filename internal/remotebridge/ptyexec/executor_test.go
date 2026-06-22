@@ -114,7 +114,7 @@ func TestExecutorDeniedCommandsNeverRun(t *testing.T) {
 		now  int64
 	}{
 		{"wrong command (hash mismatch)", "whoami", execFreshNow},
-		{"expired permit", v.CommandLine, v.ExpiresAtEpochMillis},
+		{"expired permit outside skew", v.CommandLine, v.ExpiresAtEpochMillis + operation.PermitClockSkewMillis},
 		{"not-yet-valid permit outside skew", v.CommandLine, v.IssuedAtEpochMillis - operation.PermitClockSkewMillis - 1},
 	}
 	for _, c := range cases {
