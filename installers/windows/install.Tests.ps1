@@ -169,6 +169,9 @@ Import-InstallHelper -Name "Backup-HmacCredentialStoreForFreshEnroll"
 Import-InstallHelper -Name "Assert-EnrollmentTokenLength"
 Import-InstallHelper -Name "Assert-RemoteBridgeInstallConfig"
 Import-InstallHelper -Name "Add-RemoteBridgeServiceEnvironment"
+Import-InstallHelper -Name "Resolve-SelfUpdateSignerThumbprints"
+Import-InstallHelper -Name "Assert-SelfUpdateInstallConfig"
+Import-InstallHelper -Name "Add-SelfUpdateServiceEnvironment"
 
 Describe "Assert-EnrollmentTokenLength (#120 truncated-paste guard)" {
     It "throws on a 1-char token (the MKR-A1 live-pilot truncated paste)" {
@@ -335,6 +338,87 @@ Describe "Remote bridge installer env gating" {
         $values.ContainsKey("ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED") | Should Be $false
         $values.ContainsKey("ENDPOINT_AGENT_REMOTE_BRIDGE_BROKER_ADDR") | Should Be $false
         $values.ContainsKey("ENDPOINT_AGENT_REMOTE_BRIDGE_INSECURE_PLAINTEXT") | Should Be $false
+    }
+}
+
+Describe "Self-update installer env gating" {
+    It "derives the self-update signer allowlist from the release-patched expected signer" {
+        Resolve-SelfUpdateSignerThumbprints `
+            -ExplicitThumbprints "" `
+            -ExpectedThumbprint "D68F4F530137EB65CE44E3405E82B46205E753E5" |
+            Should Be "D68F4F530137EB65CE44E3405E82B46205E753E5"
+    }
+
+    It "prefers an explicit self-update signer allowlist during rotation" {
+        Resolve-SelfUpdateSignerThumbprints `
+            -ExplicitThumbprints "OLD,NEW" `
+            -ExpectedThumbprint "D68F4F530137EB65CE44E3405E82B46205E753E5" |
+            Should Be "OLD,NEW"
+    }
+
+    It "rejects enabled self-update without local URL and signer trust policy" {
+        { Assert-SelfUpdateInstallConfig -Enabled $true -AllowedHosts "" -SignerThumbprints "D68F4F530137EB65CE44E3405E82B46205E753E5" -HardMaxBytes "52428800" -MaxRedirects 5 -AutoActivate $false -ActivationTimeout "2m" -CommandTimeout "30m" } |
+            Should Throw "-SelfUpdateEnabled requires -SelfUpdateAllowedHosts"
+
+        { Assert-SelfUpdateInstallConfig -Enabled $true -AllowedHosts "github.com" -SignerThumbprints "" -HardMaxBytes "52428800" -MaxRedirects 5 -AutoActivate $false -ActivationTimeout "2m" -CommandTimeout "30m" } |
+            Should Throw "-SelfUpdateEnabled requires -SelfUpdateSignerThumbprints"
+    }
+
+    It "rejects self-update policy values when self-update is disabled" {
+        { Assert-SelfUpdateInstallConfig -Enabled $false -AllowedHosts "github.com" -SignerThumbprints "" -HardMaxBytes "52428800" -MaxRedirects 5 -AutoActivate $false -ActivationTimeout "2m" -CommandTimeout "30m" } |
+            Should Throw "-SelfUpdateAllowedHosts requires -SelfUpdateEnabled"
+
+        { Assert-SelfUpdateInstallConfig -Enabled $false -AllowedHosts "" -SignerThumbprints "D68F4F530137EB65CE44E3405E82B46205E753E5" -HardMaxBytes "52428800" -MaxRedirects 5 -AutoActivate $false -ActivationTimeout "2m" -CommandTimeout "30m" } |
+            Should Throw "-SelfUpdateSignerThumbprints requires -SelfUpdateEnabled"
+    }
+
+    It "writes the complete local self-update service environment when enabled" {
+        $values = @{
+            "ENDPOINT_AGENT_LOG_DIR" = "C:\ProgramData\EndpointAgent\logs"
+        }
+
+        Add-SelfUpdateServiceEnvironment `
+            -Values $values `
+            -Enabled $true `
+            -AllowedHosts "github.com,release-assets.githubusercontent.com,objects.githubusercontent.com" `
+            -SignerThumbprints "D68F4F530137EB65CE44E3405E82B46205E753E5" `
+            -HardMaxBytes "52428800" `
+            -MaxRedirects 5 `
+            -AutoActivate $true `
+            -ActivationTimeout "2m" `
+            -ServiceName "EndpointAgent" `
+            -CommandTimeout "30m"
+
+        $values["ENDPOINT_AGENT_SELF_UPDATE_ENABLED"] | Should Be "true"
+        $values["ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS"] | Should Be "github.com,release-assets.githubusercontent.com,objects.githubusercontent.com"
+        $values["ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS"] | Should Be "D68F4F530137EB65CE44E3405E82B46205E753E5"
+        $values["ENDPOINT_AGENT_SELF_UPDATE_HARD_MAX_BYTES"] | Should Be "52428800"
+        $values["ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS"] | Should Be "5"
+        $values["ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE"] | Should Be "true"
+        $values["ENDPOINT_AGENT_SELF_UPDATE_ACTIVATION_TIMEOUT"] | Should Be "2m"
+        $values["ENDPOINT_AGENT_SELF_UPDATE_SERVICE_NAME"] | Should Be "EndpointAgent"
+        $values["ENDPOINT_AGENT_SELF_UPDATE_COMMAND_TIMEOUT"] | Should Be "30m"
+    }
+
+    It "does not add self-update service environment values when disabled" {
+        $values = @{
+            "ENDPOINT_AGENT_LOG_DIR" = "C:\ProgramData\EndpointAgent\logs"
+        }
+
+        Add-SelfUpdateServiceEnvironment `
+            -Values $values `
+            -Enabled $false `
+            -AllowedHosts "" `
+            -SignerThumbprints "" `
+            -HardMaxBytes "52428800" `
+            -MaxRedirects 5 `
+            -AutoActivate $false `
+            -ActivationTimeout "2m" `
+            -ServiceName "EndpointAgent" `
+            -CommandTimeout "30m"
+
+        $values.ContainsKey("ENDPOINT_AGENT_SELF_UPDATE_ENABLED") | Should Be $false
+        $values.ContainsKey("ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS") | Should Be $false
     }
 }
 

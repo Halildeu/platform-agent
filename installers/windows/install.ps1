@@ -51,6 +51,16 @@ param(
     [string]$RemoteBridgePermitKeyID = "",
     [switch]$RemoteBridgePilotAutoConsent,
     [string]$RemoteBridgeTLSServerName = "",
+    [switch]$SelfUpdateEnabled,
+    [string]$SelfUpdateAllowedHosts = "",
+    [string]$SelfUpdateSignerThumbprints = "",
+    [string]$SelfUpdateHardMaxBytes = "52428800",
+    [ValidateRange(0, 100)]
+    [int]$SelfUpdateMaxRedirects = 5,
+    [switch]$SelfUpdateAutoActivate,
+    [string]$SelfUpdateActivationTimeout = "2m",
+    [string]$SelfUpdateServiceName = "",
+    [string]$SelfUpdateCommandTimeout = "30m",
     [ValidateRange(1, 600)]
     [int]$ServiceStartTimeoutSeconds = 30,
     [switch]$Start,
@@ -528,6 +538,101 @@ function Add-RemoteBridgeServiceEnvironment {
     }
 }
 
+function Resolve-SelfUpdateSignerThumbprints {
+    param(
+        [string]$ExplicitThumbprints,
+        [string]$ExpectedThumbprint
+    )
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitThumbprints)) {
+        return $ExplicitThumbprints
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedThumbprint) -and $ExpectedThumbprint -ne "__INJECTED_EXPECTED_THUMBPRINT__") {
+        return $ExpectedThumbprint
+    }
+    return ""
+}
+
+function Assert-SelfUpdateInstallConfig {
+    param(
+        [bool]$Enabled,
+        [string]$AllowedHosts,
+        [string]$SignerThumbprints,
+        [string]$HardMaxBytes,
+        [int]$MaxRedirects,
+        [bool]$AutoActivate,
+        [string]$ActivationTimeout,
+        [string]$CommandTimeout
+    )
+    if ($Enabled) {
+        if ([string]::IsNullOrWhiteSpace($AllowedHosts)) {
+            throw "-SelfUpdateEnabled requires -SelfUpdateAllowedHosts."
+        }
+        if ([string]::IsNullOrWhiteSpace($SignerThumbprints)) {
+            throw "-SelfUpdateEnabled requires -SelfUpdateSignerThumbprints or a release-patched -ExpectedSignerThumbprint."
+        }
+        [int64]$maxBytes = 0
+        if (-not [int64]::TryParse($HardMaxBytes, [ref]$maxBytes) -or $maxBytes -le 0) {
+            throw "-SelfUpdateHardMaxBytes must be a positive integer."
+        }
+        if ($MaxRedirects -lt 0) {
+            throw "-SelfUpdateMaxRedirects must be zero or greater."
+        }
+        if ($AutoActivate -and [string]::IsNullOrWhiteSpace($ActivationTimeout)) {
+            throw "-SelfUpdateAutoActivate requires -SelfUpdateActivationTimeout."
+        }
+        if ([string]::IsNullOrWhiteSpace($CommandTimeout)) {
+            throw "-SelfUpdateCommandTimeout must not be empty when -SelfUpdateEnabled is set."
+        }
+        return
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($AllowedHosts)) {
+        throw "-SelfUpdateAllowedHosts requires -SelfUpdateEnabled."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SignerThumbprints)) {
+        throw "-SelfUpdateSignerThumbprints requires -SelfUpdateEnabled."
+    }
+    if ($AutoActivate) {
+        throw "-SelfUpdateAutoActivate requires -SelfUpdateEnabled."
+    }
+}
+
+function Add-SelfUpdateServiceEnvironment {
+    param(
+        [hashtable]$Values,
+        [bool]$Enabled,
+        [string]$AllowedHosts,
+        [string]$SignerThumbprints,
+        [string]$HardMaxBytes,
+        [int]$MaxRedirects,
+        [bool]$AutoActivate,
+        [string]$ActivationTimeout,
+        [string]$ServiceName,
+        [string]$CommandTimeout
+    )
+    if (-not $Enabled) {
+        return
+    }
+
+    $Values["ENDPOINT_AGENT_SELF_UPDATE_ENABLED"] = "true"
+    $Values["ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS"] = $AllowedHosts
+    $Values["ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS"] = $SignerThumbprints
+    $Values["ENDPOINT_AGENT_SELF_UPDATE_HARD_MAX_BYTES"] = $HardMaxBytes
+    $Values["ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS"] = [string]$MaxRedirects
+    if ($AutoActivate) {
+        $Values["ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE"] = "true"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ActivationTimeout)) {
+        $Values["ENDPOINT_AGENT_SELF_UPDATE_ACTIVATION_TIMEOUT"] = $ActivationTimeout
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ServiceName)) {
+        $Values["ENDPOINT_AGENT_SELF_UPDATE_SERVICE_NAME"] = $ServiceName
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CommandTimeout)) {
+        $Values["ENDPOINT_AGENT_SELF_UPDATE_COMMAND_TIMEOUT"] = $CommandTimeout
+    }
+}
+
 function Set-ServiceEnvironmentRegkey {
     param(
         [string]$Name,
@@ -913,6 +1018,20 @@ Assert-RemoteBridgeInstallConfig `
     -PilotAutoConsent ([bool]$RemoteBridgePilotAutoConsent) `
     -TLSServerName $RemoteBridgeTLSServerName
 
+$resolvedSelfUpdateSignerThumbprints = Resolve-SelfUpdateSignerThumbprints `
+    -ExplicitThumbprints $SelfUpdateSignerThumbprints `
+    -ExpectedThumbprint $ExpectedSignerThumbprint
+$resolvedSelfUpdateServiceName = if ([string]::IsNullOrWhiteSpace($SelfUpdateServiceName)) { $ServiceName } else { $SelfUpdateServiceName }
+Assert-SelfUpdateInstallConfig `
+    -Enabled ([bool]$SelfUpdateEnabled) `
+    -AllowedHosts $SelfUpdateAllowedHosts `
+    -SignerThumbprints $resolvedSelfUpdateSignerThumbprints `
+    -HardMaxBytes $SelfUpdateHardMaxBytes `
+    -MaxRedirects $SelfUpdateMaxRedirects `
+    -AutoActivate ([bool]$SelfUpdateAutoActivate) `
+    -ActivationTimeout $SelfUpdateActivationTimeout `
+    -CommandTimeout $SelfUpdateCommandTimeout
+
 # ----------------------------------------------------------------------
 # Faz 22.1.0 release-foundation - URL download + signature verify
 # (Codex 019e8284 PARTIAL->AGREE plan). Runs ONLY when -BinaryUrl is
@@ -1242,6 +1361,18 @@ try {
         -PermitKeyID $RemoteBridgePermitKeyID `
         -PilotAutoConsent ([bool]$RemoteBridgePilotAutoConsent) `
         -TLSServerName $RemoteBridgeTLSServerName
+
+    Add-SelfUpdateServiceEnvironment `
+        -Values $serviceEnv `
+        -Enabled ([bool]$SelfUpdateEnabled) `
+        -AllowedHosts $SelfUpdateAllowedHosts `
+        -SignerThumbprints $resolvedSelfUpdateSignerThumbprints `
+        -HardMaxBytes $SelfUpdateHardMaxBytes `
+        -MaxRedirects $SelfUpdateMaxRedirects `
+        -AutoActivate ([bool]$SelfUpdateAutoActivate) `
+        -ActivationTimeout $SelfUpdateActivationTimeout `
+        -ServiceName $resolvedSelfUpdateServiceName `
+        -CommandTimeout $SelfUpdateCommandTimeout
 
     Write-Step "installing service: $ServiceName"
     Invoke-AgentServiceCommand -ExePath $targetBinary -Arguments @(
