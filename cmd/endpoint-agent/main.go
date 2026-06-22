@@ -386,7 +386,12 @@ func newAutoEnrollRunner(cfg config.Config, apiURLOverride string, logger *log.L
 	tracker := state.NewTracker(state.StateStarting)
 	executor := newCommandExecutor(cfg)
 
-	return autoenroll.NewRunner(aeCfg, certProvider, registryReader, configStore, executor, tracker, logger)
+	runner, err := autoenroll.NewRunner(aeCfg, certProvider, registryReader, configStore, executor, tracker, logger)
+	if err != nil {
+		return nil, err
+	}
+	configureAutoEnrollSelfUpdateActivationHook(runner, cfg, logger)
+	return runner, nil
 }
 
 // runAutoEnrollDryRun proves the cert + TLS config + persisted config path
