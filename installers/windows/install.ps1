@@ -541,15 +541,79 @@ function Add-RemoteBridgeServiceEnvironment {
 function Resolve-SelfUpdateSignerThumbprints {
     param(
         [string]$ExplicitThumbprints,
-        [string]$ExpectedThumbprint
+        [string]$VerifiedSignerSha256Thumbprint
     )
     if (-not [string]::IsNullOrWhiteSpace($ExplicitThumbprints)) {
-        return $ExplicitThumbprints
+        return (Normalize-SelfUpdateSignerSha256Thumbprints -Thumbprints $ExplicitThumbprints)
     }
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedThumbprint) -and $ExpectedThumbprint -ne "__INJECTED_EXPECTED_THUMBPRINT__") {
-        return $ExpectedThumbprint
+    if (-not [string]::IsNullOrWhiteSpace($VerifiedSignerSha256Thumbprint)) {
+        return $VerifiedSignerSha256Thumbprint
     }
     return ""
+}
+
+function Normalize-SelfUpdateSignerSha256Thumbprints {
+    param(
+        [string]$Thumbprints
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Thumbprints)) {
+        return ""
+    }
+
+    $normalized = @()
+    foreach ($entry in ($Thumbprints -split ",")) {
+        $value = (($entry.Trim().ToUpperInvariant() -replace ":", "") -replace " ", "")
+        if ($value -notmatch "^[0-9A-F]{64}$") {
+            throw "-SelfUpdateSignerThumbprints entries must be SHA256 certificate fingerprints (64 hex chars)."
+        }
+        $normalized += $value
+    }
+
+    return ($normalized -join ",")
+}
+
+function Get-CertificateRawSha256Thumbprint {
+    param(
+        [Parameter(Mandatory)] $Certificate
+    )
+
+    if ($null -eq $Certificate.RawData -or $Certificate.RawData.Length -eq 0) {
+        throw "certificate raw data missing; cannot derive self-update signer fingerprint"
+    }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha.ComputeHash([byte[]]$Certificate.RawData)
+        return (($hash | ForEach-Object { $_.ToString("X2") }) -join "")
+    } finally {
+        if ($null -ne $sha) {
+            $sha.Dispose()
+        }
+    }
+}
+
+function Get-SelfUpdateSignerSha256ThumbprintFromBinary {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [string]$ExpectedThumbprint
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ExpectedThumbprint) -or $ExpectedThumbprint -eq "__INJECTED_EXPECTED_THUMBPRINT__") {
+        throw "-SelfUpdateEnabled requires explicit -SelfUpdateSignerThumbprints or release-patched -ExpectedSignerThumbprint."
+    }
+
+    $sig = Get-AuthenticodeSignature -LiteralPath $Path
+    if (-not $sig.SignerCertificate) {
+        throw "binary is unsigned; cannot derive self-update signer fingerprint"
+    }
+
+    $actualThumb = $sig.SignerCertificate.Thumbprint
+    if ($actualThumb -ne $ExpectedThumbprint.ToUpperInvariant()) {
+        throw "signer thumbprint mismatch: expected $ExpectedThumbprint, got $actualThumb"
+    }
+
+    return Get-CertificateRawSha256Thumbprint -Certificate $sig.SignerCertificate
 }
 
 function Assert-SelfUpdateInstallConfig {
@@ -1020,17 +1084,8 @@ Assert-RemoteBridgeInstallConfig `
 
 $resolvedSelfUpdateSignerThumbprints = Resolve-SelfUpdateSignerThumbprints `
     -ExplicitThumbprints $SelfUpdateSignerThumbprints `
-    -ExpectedThumbprint $ExpectedSignerThumbprint
+    -VerifiedSignerSha256Thumbprint ""
 $resolvedSelfUpdateServiceName = if ([string]::IsNullOrWhiteSpace($SelfUpdateServiceName)) { $ServiceName } else { $SelfUpdateServiceName }
-Assert-SelfUpdateInstallConfig `
-    -Enabled ([bool]$SelfUpdateEnabled) `
-    -AllowedHosts $SelfUpdateAllowedHosts `
-    -SignerThumbprints $resolvedSelfUpdateSignerThumbprints `
-    -HardMaxBytes $SelfUpdateHardMaxBytes `
-    -MaxRedirects $SelfUpdateMaxRedirects `
-    -AutoActivate ([bool]$SelfUpdateAutoActivate) `
-    -ActivationTimeout $SelfUpdateActivationTimeout `
-    -CommandTimeout $SelfUpdateCommandTimeout
 
 # ----------------------------------------------------------------------
 # Faz 22.1.0 release-foundation - URL download + signature verify
@@ -1194,6 +1249,24 @@ if ($useUrlDownload) {
 }
 
 $sourceBinary = Resolve-Path -LiteralPath $BinaryPath -ErrorAction Stop
+if ($SelfUpdateEnabled -and [string]::IsNullOrWhiteSpace($resolvedSelfUpdateSignerThumbprints)) {
+    $verifiedSelfUpdateSignerThumbprint = Get-SelfUpdateSignerSha256ThumbprintFromBinary `
+        -Path $sourceBinary.ProviderPath `
+        -ExpectedThumbprint $ExpectedSignerThumbprint
+    $resolvedSelfUpdateSignerThumbprints = Resolve-SelfUpdateSignerThumbprints `
+        -ExplicitThumbprints $SelfUpdateSignerThumbprints `
+        -VerifiedSignerSha256Thumbprint $verifiedSelfUpdateSignerThumbprint
+}
+Assert-SelfUpdateInstallConfig `
+    -Enabled ([bool]$SelfUpdateEnabled) `
+    -AllowedHosts $SelfUpdateAllowedHosts `
+    -SignerThumbprints $resolvedSelfUpdateSignerThumbprints `
+    -HardMaxBytes $SelfUpdateHardMaxBytes `
+    -MaxRedirects $SelfUpdateMaxRedirects `
+    -AutoActivate ([bool]$SelfUpdateAutoActivate) `
+    -ActivationTimeout $SelfUpdateActivationTimeout `
+    -CommandTimeout $SelfUpdateCommandTimeout
+
 $targetBinary = Join-Path $InstallDir "endpoint-agent.exe"
 $originalValues = @{}
 $autoEnrollRegistrySnapshot = $null
