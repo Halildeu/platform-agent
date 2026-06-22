@@ -109,7 +109,7 @@ func TestVerifyFailClosed(t *testing.T) {
 	}{
 		{"expired (now==expiresAt)", v.ExpiresAtEpochMillis, func(*OperationPermit) {}},
 		{"expired (now>expiresAt)", v.ExpiresAtEpochMillis + 1, func(*OperationPermit) {}},
-		{"not-yet-valid (now<issuedAt)", v.IssuedAtEpochMillis - 1, func(*OperationPermit) {}},
+		{"not-yet-valid outside skew", v.IssuedAtEpochMillis - PermitClockSkewMillis - 1, func(*OperationPermit) {}},
 		{"wrong kid", freshNow, func(p *OperationPermit) { p.Kid = "kid-OTHER" }},
 		{"wrong alg", freshNow, func(p *OperationPermit) { p.Alg = "SHA512withECDSA" }},
 		{"blank signature", freshNow, func(p *OperationPermit) { p.SignatureB64 = "" }},
@@ -219,6 +219,9 @@ func TestIsFreshGuards(t *testing.T) {
 	if !(OperationPermit{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1300}).IsFresh(1100) {
 		t.Fatal("a valid window must be fresh")
 	}
+	if !(OperationPermit{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1300}).IsFresh(1000 - PermitClockSkewMillis) {
+		t.Fatal("a permit just inside the not-before clock-skew window must be fresh")
+	}
 	bad := []OperationPermit{
 		{IssuedAtEpochMillis: 0, ExpiresAtEpochMillis: 1300},    // non-positive issued
 		{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 0},    // non-positive expires
@@ -226,11 +229,19 @@ func TestIsFreshGuards(t *testing.T) {
 		{IssuedAtEpochMillis: 1300, ExpiresAtEpochMillis: 1000}, // inverted
 		{IssuedAtEpochMillis: 1200, ExpiresAtEpochMillis: 1200}, // degenerate
 		{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1000 + MaxPermitValidityMillis + 1},
+		{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1300}, // outside not-before skew at now below
 	}
 	for i, p := range bad {
-		if p.IsFresh(1100) {
+		now := int64(1100)
+		if i == len(bad)-1 {
+			now = p.IssuedAtEpochMillis - PermitClockSkewMillis - 1
+		}
+		if p.IsFresh(now) {
 			t.Errorf("case %d (%d..%d): a malformed window must NOT be fresh", i, p.IssuedAtEpochMillis, p.ExpiresAtEpochMillis)
 		}
+	}
+	if (OperationPermit{IssuedAtEpochMillis: 1000, ExpiresAtEpochMillis: 1300}).IsFresh(1300) {
+		t.Fatal("expiry remains strict; skew must not extend replay lifetime past expiresAt")
 	}
 }
 
