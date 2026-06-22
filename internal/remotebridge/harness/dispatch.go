@@ -161,6 +161,15 @@ func dispatchErrorCode(err error) string {
 func authzReasonCode(err error) string {
 	msg := err.Error()
 	for _, reason := range []string{
+		operation.ReasonPermitVerifierUnavailable,
+		operation.ReasonPermitKidMismatch,
+		operation.ReasonPermitAlgMismatch,
+		operation.ReasonPermitSignatureMissing,
+		operation.ReasonPermitVersionMismatch,
+		operation.ReasonPermitDeviceMismatch,
+		operation.ReasonPermitNotFresh,
+		operation.ReasonPermitSignatureDecode,
+		operation.ReasonPermitSignatureInvalid,
 		operation.ReasonPermitInvalid,
 		operation.ReasonCapabilityNotPTY,
 		operation.ReasonCommandTooLong,

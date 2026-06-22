@@ -15,13 +15,22 @@ type Decision struct {
 
 // Stable Decision.Reason codes (bounded cardinality — safe as a metric/audit tag).
 const (
-	ReasonPermitInvalid    = "permit-invalid"     // signature/kid/alg/freshness failed, or no verifier
-	ReasonCapabilityNotPTY = "capability-not-pty" // the permit does not grant CONSTRAINED_PTY
-	ReasonCommandTooLong   = "command-too-long"   // raw commandLine exceeds MaxCommandLine (broker MAX_LINE)
-	ReasonEmptyCommand     = "empty-command"      // the command canonicalises to empty (no command)
-	ReasonCommandMismatch  = "command-mismatch"   // hash(command) != the permit's commandHash
-	ReasonSeqInvalid       = "seq-invalid"        // permit seq <= 0 (malformed; broker seq starts >= 1)
-	ReasonSeqReplay        = "seq-replay"         // permit seq <= the last accepted seq for its session
+	ReasonPermitInvalid             = "permit-invalid"                         // fallback: permit verification failed
+	ReasonPermitVerifierUnavailable = "permit-invalid:verifier-unavailable"    // verifier missing in the executor path
+	ReasonPermitKidMismatch         = "permit-invalid:kid-mismatch"            // permit kid != configured broker kid
+	ReasonPermitAlgMismatch         = "permit-invalid:alg-mismatch"            // permit alg != pinned alg
+	ReasonPermitSignatureMissing    = "permit-invalid:signature-missing"       // signature field is empty
+	ReasonPermitVersionMismatch     = "permit-invalid:version-mismatch"        // schema version is not pinned v1
+	ReasonPermitDeviceMismatch      = "permit-invalid:device-mismatch"         // signed device id does not match this agent
+	ReasonPermitNotFresh            = "permit-invalid:not-fresh"               // malformed/expired/not-yet-valid permit window
+	ReasonPermitSignatureDecode     = "permit-invalid:signature-decode-failed" // signature is not valid base64/DER bytes
+	ReasonPermitSignatureInvalid    = "permit-invalid:signature-invalid"       // ECDSA signature verification failed
+	ReasonCapabilityNotPTY          = "capability-not-pty"                     // the permit does not grant CONSTRAINED_PTY
+	ReasonCommandTooLong            = "command-too-long"                       // raw commandLine exceeds MaxCommandLine (broker MAX_LINE)
+	ReasonEmptyCommand              = "empty-command"                          // the command canonicalises to empty (no command)
+	ReasonCommandMismatch           = "command-mismatch"                       // hash(command) != the permit's commandHash
+	ReasonSeqInvalid                = "seq-invalid"                            // permit seq <= 0 (malformed; broker seq starts >= 1)
+	ReasonSeqReplay                 = "seq-replay"                             // permit seq <= the last accepted seq for its session
 )
 
 // MaxCommandLine mirrors broker PtyArgumentPolicy.MAX_LINE: the agent's "decide" layer (this gate, which
@@ -37,7 +46,7 @@ const MaxCommandLine = 4096
 // command, with a strictly-increasing per-session seq (replay guard). It AUTHORIZES — it does not execute
 // (the ConPTY executor is a later, owner-gated slice). Safe for concurrent use.
 type Authorizer struct {
-	verify func(OperationPermit, int64) bool // crypto verify (Verifier.Verify); nil ⇒ deny everything
+	verify func(OperationPermit, int64) (bool, string) // crypto verify; nil ⇒ deny everything
 	mu     sync.Mutex
 	// lastSeq: sessionId -> last accepted permit seq. NOTE: this grows one entry per session; an
 	// attended, named-roster pilot bounds it, but eviction on session-end (a lifecycle hook) is a follow-up
@@ -47,15 +56,27 @@ type Authorizer struct {
 
 // NewAuthorizer builds the gate over a permit verifier. A nil verifier means "deny everything" (fail-closed).
 func NewAuthorizer(verifier *Verifier) *Authorizer {
-	var fn func(OperationPermit, int64) bool
+	var fn func(OperationPermit, int64) (bool, string)
 	if verifier != nil {
-		fn = verifier.Verify
+		fn = verifier.VerifyWithReason
 	}
-	return newAuthorizer(fn)
+	return newReasonedAuthorizer(fn)
 }
 
 // newAuthorizer is the internal constructor (also used by tests to inject a verify func).
 func newAuthorizer(verify func(OperationPermit, int64) bool) *Authorizer {
+	if verify == nil {
+		return newReasonedAuthorizer(nil)
+	}
+	return newReasonedAuthorizer(func(p OperationPermit, nowEpochMillis int64) (bool, string) {
+		if verify(p, nowEpochMillis) {
+			return true, ""
+		}
+		return false, ReasonPermitInvalid
+	})
+}
+
+func newReasonedAuthorizer(verify func(OperationPermit, int64) (bool, string)) *Authorizer {
 	return &Authorizer{verify: verify, lastSeq: make(map[string]int64)}
 }
 
@@ -66,8 +87,14 @@ func newAuthorizer(verify func(OperationPermit, int64) bool) *Authorizer {
 // last accepted seq for its session. On allow, the session's last-seq advances atomically. Any failure →
 // Allowed=false with a stable Reason and NO state change.
 func (a *Authorizer) Authorize(permit OperationPermit, commandLine string, nowEpochMillis int64) Decision {
-	if a == nil || a.verify == nil || !a.verify(permit, nowEpochMillis) {
-		return Decision{Reason: ReasonPermitInvalid}
+	if a == nil || a.verify == nil {
+		return Decision{Reason: ReasonPermitVerifierUnavailable}
+	}
+	if ok, reason := a.verify(permit, nowEpochMillis); !ok {
+		if reason == "" {
+			reason = ReasonPermitInvalid
+		}
+		return Decision{Reason: reason}
 	}
 	if permit.Capability != CapabilityConstrainedPTY {
 		return Decision{Reason: ReasonCapabilityNotPTY}

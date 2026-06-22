@@ -134,6 +134,50 @@ func TestVerifyFailClosed(t *testing.T) {
 	}
 }
 
+func TestVerifyWithReasonReportsBoundedSubReasons(t *testing.T) {
+	v := loadVector(t)
+	ver, err := NewVerifier(v.BrokerPublicKeyB64, v.Kid, v.DeviceID)
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		now  int64
+		mut  func(p *OperationPermit)
+		want string
+	}{
+		{"expired", v.ExpiresAtEpochMillis, func(*OperationPermit) {}, ReasonPermitNotFresh},
+		{"wrong kid", freshNow, func(p *OperationPermit) { p.Kid = "kid-OTHER" }, ReasonPermitKidMismatch},
+		{"wrong alg", freshNow, func(p *OperationPermit) { p.Alg = "SHA512withECDSA" }, ReasonPermitAlgMismatch},
+		{"blank signature", freshNow, func(p *OperationPermit) { p.SignatureB64 = "" }, ReasonPermitSignatureMissing},
+		{"corrupt base64 signature", freshNow, func(p *OperationPermit) { p.SignatureB64 = "!!!notb64!!!" }, ReasonPermitSignatureDecode},
+		{"wrong permitVersion", freshNow, func(p *OperationPermit) { p.PermitVersion = 2 }, ReasonPermitVersionMismatch},
+		{"tampered deviceId", freshNow, func(p *OperationPermit) { p.DeviceID = "dev-EVIL" }, ReasonPermitDeviceMismatch},
+		{"degenerate window", freshNow, func(p *OperationPermit) {
+			p.IssuedAtEpochMillis = 1200
+			p.ExpiresAtEpochMillis = 1200
+		}, ReasonPermitNotFresh},
+		{"tampered signed payload", freshNow, func(p *OperationPermit) { p.SessionID = "sess-EVIL" }, ReasonPermitSignatureInvalid},
+	}
+	for _, c := range cases {
+		p := v.permit()
+		c.mut(&p)
+		ok, reason := ver.VerifyWithReason(p, c.now)
+		if ok || reason != c.want {
+			t.Errorf("%s: VerifyWithReason ok=%v reason=%q want ok=false reason=%q", c.name, ok, reason, c.want)
+		}
+	}
+
+	if ok, reason := ver.VerifyWithReason(v.permit(), freshNow); !ok || reason != "" {
+		t.Fatalf("valid permit should verify without reason, got ok=%v reason=%q", ok, reason)
+	}
+	var nilVerifier *Verifier
+	if ok, reason := nilVerifier.VerifyWithReason(v.permit(), freshNow); ok || reason != ReasonPermitVerifierUnavailable {
+		t.Fatalf("nil verifier reason=%q ok=%v", reason, ok)
+	}
+}
+
 // a permit signed by a DIFFERENT broker key must be rejected (the verifier is pinned to the real key).
 func TestVerifyRejectsForeignKey(t *testing.T) {
 	v := loadVector(t)
