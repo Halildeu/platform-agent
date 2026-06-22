@@ -30,13 +30,7 @@ func TestActivatePreparedUpdateSwapsBinaryAndStartsService(t *testing.T) {
 	if highWater.version != plan.TargetVersion {
 		t.Fatalf("high-water version=%q", highWater.version)
 	}
-	persisted, code, reason := LoadActivationOutcome(root, stagingID)
-	if code != "" || reason != "" {
-		t.Fatalf("LoadActivationOutcome: code=%q reason=%q", code, reason)
-	}
-	if !persisted.EvidencePersisted {
-		t.Fatalf("persisted outcome should record evidencePersisted=true: %+v", persisted)
-	}
+	assertPersistedActivationOutcome(t, root, stagingID, ActivationActivated)
 }
 
 func TestActivatePreparedUpdateRollsBackWhenStartFails(t *testing.T) {
@@ -45,7 +39,7 @@ func TestActivatePreparedUpdateRollsBackWhenStartFails(t *testing.T) {
 
 	out := ActivatePreparedUpdate(context.Background(), root, stagingID, 1024, svc, nil)
 
-	if out.Status != ActivationRolledBack || !out.ServiceRunningVerified {
+	if out.Status != ActivationRolledBack || !out.ServiceRunningVerified || !out.EvidencePersisted {
 		t.Fatalf("outcome=%+v", out)
 	}
 	if got := readFileString(t, plan.CurrentBinaryPath); got != string(currentPayload) {
@@ -54,6 +48,7 @@ func TestActivatePreparedUpdateRollsBackWhenStartFails(t *testing.T) {
 	if len(svc.calls) != 3 || svc.calls[0] != "stop:EndpointAgent" || svc.calls[1] != "start:EndpointAgent" || svc.calls[2] != "start:EndpointAgent" {
 		t.Fatalf("service calls=%v", svc.calls)
 	}
+	assertPersistedActivationOutcome(t, root, stagingID, ActivationRolledBack)
 }
 
 func TestActivatePreparedUpdateStopFailureDoesNotSwapCurrentBinary(t *testing.T) {
@@ -62,7 +57,7 @@ func TestActivatePreparedUpdateStopFailureDoesNotSwapCurrentBinary(t *testing.T)
 
 	out := ActivatePreparedUpdate(context.Background(), root, stagingID, 1024, svc, nil)
 
-	if out.Status != ActivationFailed {
+	if out.Status != ActivationFailed || !out.EvidencePersisted {
 		t.Fatalf("outcome=%+v", out)
 	}
 	if got := readFileString(t, plan.CurrentBinaryPath); got != string(currentPayload) {
@@ -70,6 +65,56 @@ func TestActivatePreparedUpdateStopFailureDoesNotSwapCurrentBinary(t *testing.T)
 	}
 	if len(svc.calls) != 1 || svc.calls[0] != "stop:EndpointAgent" {
 		t.Fatalf("service calls=%v", svc.calls)
+	}
+	assertPersistedActivationOutcome(t, root, stagingID, ActivationFailed)
+}
+
+func TestActivatePreparedUpdatePersistsReadinessFailure(t *testing.T) {
+	root, stagingID, _, stagedPayload, _ := writeActivationFixture(t)
+	svc := &fakeActivationService{}
+	if err := os.WriteFile(stagedNameFor(root, stagingID), append(stagedPayload, []byte("-tampered")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := ActivatePreparedUpdate(context.Background(), root, stagingID, 1024, svc, nil)
+
+	if out.Status != ActivationFailed || !out.EvidencePersisted {
+		t.Fatalf("outcome=%+v", out)
+	}
+	if len(svc.calls) != 0 {
+		t.Fatalf("service should not be touched before readiness passes, calls=%v", svc.calls)
+	}
+	persisted := assertPersistedActivationOutcome(t, root, stagingID, ActivationFailed)
+	if persisted.Reason == "" {
+		t.Fatalf("persisted failure should include reason: %+v", persisted)
+	}
+}
+
+func TestPersistActivationOutcomeReportsWriteFailure(t *testing.T) {
+	stagingID := "0123456789abcdef0123456789abcdef"
+	root := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(root, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := persistActivationOutcome(context.Background(), root, stagingID, activationFailed(stagingID, "1.1.0", "", "write should fail"))
+
+	if out.EvidencePersisted {
+		t.Fatalf("outcome should report evidence persisted false on write failure: %+v", out)
+	}
+	if out.EvidencePersistenceError == "" {
+		t.Fatalf("outcome should report persistence error: %+v", out)
+	}
+}
+
+func TestPersistActivationOutcomeRejectsInvalidIdentifier(t *testing.T) {
+	out := persistActivationOutcome(context.Background(), t.TempDir(), "../bad", activationFailed("../bad", "", "", "invalid id"))
+
+	if out.EvidencePersisted {
+		t.Fatalf("outcome should not report persisted for invalid id: %+v", out)
+	}
+	if out.ActivationPlanID != "../bad" || out.EvidencePersistenceError != "invalid activation outcome identifier" {
+		t.Fatalf("unexpected invalid-id outcome: %+v", out)
 	}
 }
 
@@ -135,4 +180,16 @@ func readFileString(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+func assertPersistedActivationOutcome(t *testing.T, root, stagingID string, want ActivationStatus) ActivationOutcome {
+	t.Helper()
+	persisted, code, reason := LoadActivationOutcome(root, stagingID)
+	if code != "" || reason != "" {
+		t.Fatalf("LoadActivationOutcome: code=%q reason=%q", code, reason)
+	}
+	if persisted.Status != want || !persisted.EvidencePersisted {
+		t.Fatalf("persisted outcome=%+v, want status=%s evidencePersisted=true", persisted, want)
+	}
+	return persisted
 }
