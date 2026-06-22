@@ -170,6 +170,9 @@ Import-InstallHelper -Name "Assert-EnrollmentTokenLength"
 Import-InstallHelper -Name "Assert-RemoteBridgeInstallConfig"
 Import-InstallHelper -Name "Add-RemoteBridgeServiceEnvironment"
 Import-InstallHelper -Name "Resolve-SelfUpdateSignerThumbprints"
+Import-InstallHelper -Name "Normalize-SelfUpdateSignerSha256Thumbprints"
+Import-InstallHelper -Name "Get-CertificateRawSha256Thumbprint"
+Import-InstallHelper -Name "Get-SelfUpdateSignerSha256ThumbprintFromBinary"
 Import-InstallHelper -Name "Assert-SelfUpdateInstallConfig"
 Import-InstallHelper -Name "Add-SelfUpdateServiceEnvironment"
 
@@ -342,18 +345,74 @@ Describe "Remote bridge installer env gating" {
 }
 
 Describe "Self-update installer env gating" {
-    It "derives the self-update signer allowlist from the release-patched expected signer" {
+    It "derives the self-update signer allowlist from the verified signer SHA256 fingerprint" {
         Resolve-SelfUpdateSignerThumbprints `
             -ExplicitThumbprints "" `
-            -ExpectedThumbprint "D68F4F530137EB65CE44E3405E82B46205E753E5" |
-            Should Be "D68F4F530137EB65CE44E3405E82B46205E753E5"
+            -VerifiedSignerSha256Thumbprint "EB16FA8C2C2325295483ED2271D87632DA5EA631E3095039D6CFC358F16CAACD" |
+            Should Be "EB16FA8C2C2325295483ED2271D87632DA5EA631E3095039D6CFC358F16CAACD"
+    }
+
+    It "does not derive the self-update signer allowlist from the SHA1 Authenticode thumbprint" {
+        Resolve-SelfUpdateSignerThumbprints `
+            -ExplicitThumbprints "" `
+            -VerifiedSignerSha256Thumbprint "" |
+            Should Be ""
     }
 
     It "prefers an explicit self-update signer allowlist during rotation" {
         Resolve-SelfUpdateSignerThumbprints `
-            -ExplicitThumbprints "OLD,NEW" `
+            -ExplicitThumbprints "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb:bb" `
+            -VerifiedSignerSha256Thumbprint "EB16FA8C2C2325295483ED2271D87632DA5EA631E3095039D6CFC358F16CAACD" |
+            Should Be "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    }
+
+    It "rejects explicit self-update SHA1 signer thumbprints" {
+        {
+            Normalize-SelfUpdateSignerSha256Thumbprints `
+                -Thumbprints "D68F4F530137EB65CE44E3405E82B46205E753E5"
+        } | Should Throw "64 hex"
+    }
+
+    It "computes uppercase SHA256 over signer certificate raw data" {
+        $cert = [pscustomobject]@{
+            RawData = [byte[]](1, 2, 3)
+        }
+
+        Get-CertificateRawSha256Thumbprint -Certificate $cert |
+            Should Be "039058C6F2C0CB492C533B0A4D14EF77CC0F78ABCCCED5287D84A1A2011CFB81"
+    }
+
+    It "derives the local self-update allowlist from the verified binary signer certificate SHA256" {
+        Mock Get-AuthenticodeSignature {
+            [pscustomobject]@{
+                SignerCertificate = [pscustomobject]@{
+                    Thumbprint = "D68F4F530137EB65CE44E3405E82B46205E753E5"
+                    RawData = [byte[]](1, 2, 3)
+                }
+            }
+        }
+
+        Get-SelfUpdateSignerSha256ThumbprintFromBinary `
+            -Path "C:\Program Files\EndpointAgent\endpoint-agent.exe" `
             -ExpectedThumbprint "D68F4F530137EB65CE44E3405E82B46205E753E5" |
-            Should Be "OLD,NEW"
+            Should Be "039058C6F2C0CB492C533B0A4D14EF77CC0F78ABCCCED5287D84A1A2011CFB81"
+    }
+
+    It "refuses to derive a local self-update allowlist when the binary signer SHA1 is not the expected release signer" {
+        Mock Get-AuthenticodeSignature {
+            [pscustomobject]@{
+                SignerCertificate = [pscustomobject]@{
+                    Thumbprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    RawData = [byte[]](1, 2, 3)
+                }
+            }
+        }
+
+        {
+            Get-SelfUpdateSignerSha256ThumbprintFromBinary `
+                -Path "C:\Program Files\EndpointAgent\endpoint-agent.exe" `
+                -ExpectedThumbprint "D68F4F530137EB65CE44E3405E82B46205E753E5"
+        } | Should Throw "signer thumbprint mismatch"
     }
 
     It "rejects enabled self-update without local URL and signer trust policy" {
@@ -381,7 +440,7 @@ Describe "Self-update installer env gating" {
             -Values $values `
             -Enabled $true `
             -AllowedHosts "github.com,release-assets.githubusercontent.com,objects.githubusercontent.com" `
-            -SignerThumbprints "D68F4F530137EB65CE44E3405E82B46205E753E5" `
+            -SignerThumbprints "EB16FA8C2C2325295483ED2271D87632DA5EA631E3095039D6CFC358F16CAACD" `
             -HardMaxBytes "52428800" `
             -MaxRedirects 5 `
             -AutoActivate $true `
@@ -391,7 +450,7 @@ Describe "Self-update installer env gating" {
 
         $values["ENDPOINT_AGENT_SELF_UPDATE_ENABLED"] | Should Be "true"
         $values["ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS"] | Should Be "github.com,release-assets.githubusercontent.com,objects.githubusercontent.com"
-        $values["ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS"] | Should Be "D68F4F530137EB65CE44E3405E82B46205E753E5"
+        $values["ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS"] | Should Be "EB16FA8C2C2325295483ED2271D87632DA5EA631E3095039D6CFC358F16CAACD"
         $values["ENDPOINT_AGENT_SELF_UPDATE_HARD_MAX_BYTES"] | Should Be "52428800"
         $values["ENDPOINT_AGENT_SELF_UPDATE_MAX_REDIRECTS"] | Should Be "5"
         $values["ENDPOINT_AGENT_SELF_UPDATE_AUTO_ACTIVATE"] | Should Be "true"
