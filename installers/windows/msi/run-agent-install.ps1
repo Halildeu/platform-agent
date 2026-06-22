@@ -108,6 +108,15 @@ $keyMap = @{
     'REMOTE_BRIDGE_PERMIT_KEY_ID'= @{ Param = 'RemoteBridgePermitKeyID'; Kind = 'value' }
     'REMOTE_BRIDGE_PILOT_AUTO_CONSENT'= @{ Param = 'RemoteBridgePilotAutoConsent'; Kind = 'switch' }
     'REMOTE_BRIDGE_TLS_SERVER_NAME'= @{ Param = 'RemoteBridgeTLSServerName'; Kind = 'value' }
+    'SELF_UPDATE_ENABLED'              = @{ Param = 'SelfUpdateEnabled';             Kind = 'switch' }
+    'SELF_UPDATE_ALLOWED_HOSTS'        = @{ Param = 'SelfUpdateAllowedHosts';        Kind = 'value'  }
+    'SELF_UPDATE_SIGNER_THUMBPRINTS'   = @{ Param = 'SelfUpdateSignerThumbprints';   Kind = 'value'  }
+    'SELF_UPDATE_HARD_MAX_BYTES'       = @{ Param = 'SelfUpdateHardMaxBytes';        Kind = 'value'  }
+    'SELF_UPDATE_MAX_REDIRECTS'        = @{ Param = 'SelfUpdateMaxRedirects';        Kind = 'int'    }
+    'SELF_UPDATE_AUTO_ACTIVATE'        = @{ Param = 'SelfUpdateAutoActivate';        Kind = 'switch' }
+    'SELF_UPDATE_ACTIVATION_TIMEOUT'   = @{ Param = 'SelfUpdateActivationTimeout';   Kind = 'value'  }
+    'SELF_UPDATE_SERVICE_NAME'         = @{ Param = 'SelfUpdateServiceName';         Kind = 'value'  }
+    'SELF_UPDATE_COMMAND_TIMEOUT'      = @{ Param = 'SelfUpdateCommandTimeout';      Kind = 'value'  }
 }
 
 function Test-TruthyFlag {
