@@ -143,6 +143,21 @@ type Config struct {
 	// receives the signing private key; the broker verifies this advisory
 	// evidence against its configured public key and policy.
 	RemoteBridgeAttestationEvidenceB64 string
+	// RemoteBridgeAttestationSLSA* and RemoteBridgeDeviceKey* are an optional
+	// structured producer for the remote-bridge v1 AgentHello evidence envelope.
+	// These fields carry pre-provisioned, already-signed material only: the
+	// agent assembles bytes for the broker verifier, but never mints device-key
+	// attestation signatures itself.
+	RemoteBridgeAttestationSLSABinaryDigest       string
+	RemoteBridgeAttestationSLSABuilderID          string
+	RemoteBridgeAttestationSLSAPredicateHash      string
+	RemoteBridgeAttestationSLSAPredicateSignature string
+	RemoteBridgeDeviceKeyDerB64                   string
+	RemoteBridgeDeviceKeyProtectionLevel          string
+	RemoteBridgeDeviceKeyNonExportable            *bool
+	RemoteBridgeDeviceKeySignatureB64             string
+	RemoteBridgeDeviceKeySignatureAlgorithm       string
+	RemoteBridgeDeviceKeyChainDerB64              []string
 }
 
 // BuildVersion is overridden at build time via
@@ -242,6 +257,16 @@ func LoadFromEnv() Config {
 	cfg.RemoteBridgeMTLSCertSubjectSuffix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX", cfg.RemoteBridgeMTLSCertSubjectSuffix)
 	cfg.RemoteBridgeMTLSCertSANURIPrefix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX", cfg.RemoteBridgeMTLSCertSANURIPrefix)
 	cfg.RemoteBridgeAttestationEvidenceB64 = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_EVIDENCE_B64", cfg.RemoteBridgeAttestationEvidenceB64)
+	cfg.RemoteBridgeAttestationSLSABinaryDigest = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_SLSA_BINARY_DIGEST", cfg.RemoteBridgeAttestationSLSABinaryDigest)
+	cfg.RemoteBridgeAttestationSLSABuilderID = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_SLSA_BUILDER_ID", cfg.RemoteBridgeAttestationSLSABuilderID)
+	cfg.RemoteBridgeAttestationSLSAPredicateHash = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_SLSA_PREDICATE_HASH", cfg.RemoteBridgeAttestationSLSAPredicateHash)
+	cfg.RemoteBridgeAttestationSLSAPredicateSignature = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_SLSA_PREDICATE_SIGNATURE", cfg.RemoteBridgeAttestationSLSAPredicateSignature)
+	cfg.RemoteBridgeDeviceKeyDerB64 = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_DER_B64", cfg.RemoteBridgeDeviceKeyDerB64)
+	cfg.RemoteBridgeDeviceKeyProtectionLevel = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_PROTECTION_LEVEL", cfg.RemoteBridgeDeviceKeyProtectionLevel)
+	cfg.RemoteBridgeDeviceKeyNonExportable = envOptionalBool("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_NON_EXPORTABLE", cfg.RemoteBridgeDeviceKeyNonExportable)
+	cfg.RemoteBridgeDeviceKeySignatureB64 = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SIGNATURE_B64", cfg.RemoteBridgeDeviceKeySignatureB64)
+	cfg.RemoteBridgeDeviceKeySignatureAlgorithm = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SIGNATURE_ALGORITHM", cfg.RemoteBridgeDeviceKeySignatureAlgorithm)
+	cfg.RemoteBridgeDeviceKeyChainDerB64 = envCSV("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_CHAIN_DER_B64", cfg.RemoteBridgeDeviceKeyChainDerB64)
 	return cfg
 }
 
@@ -309,6 +334,23 @@ func envBool(key string, fallback bool) bool {
 		return true
 	case "0", "false", "no", "off":
 		return false
+	default:
+		return fallback
+	}
+}
+
+func envOptionalBool(key string, fallback *bool) *bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		v := true
+		return &v
+	case "0", "false", "no", "off":
+		v := false
+		return &v
 	default:
 		return fallback
 	}

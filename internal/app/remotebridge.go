@@ -15,6 +15,7 @@ import (
 	"platform-agent/internal/config"
 	"platform-agent/internal/mtls"
 	"platform-agent/internal/platform/windows/certstore"
+	"platform-agent/internal/remotebridge/attestation"
 	"platform-agent/internal/remotebridge/harness"
 	"platform-agent/internal/remotebridge/operation"
 	pb "platform-agent/internal/remotebridge/pb"
@@ -59,6 +60,10 @@ type remoteBridgeDeps struct {
 }
 
 func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID func() string, deps remoteBridgeDeps) (harness.Config, error) {
+	attestationEvidenceB64, err := remoteBridgeAttestationEvidenceB64(cfg)
+	if err != nil {
+		return harness.Config{}, err
+	}
 	hcfg := harness.Config{
 		BrokerAddr:             cfg.RemoteBridgeBrokerAddr,
 		DeviceIDProvider:       deviceID,
@@ -70,7 +75,7 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		BackoffMax:             cfg.RemoteBridgeBackoffMax,
 		IdentityPollInterval:   cfg.RemoteBridgeIdentityPollInterval,
 		DialTimeout:            cfg.RemoteBridgeDialTimeout,
-		AttestationEvidenceB64: cfg.RemoteBridgeAttestationEvidenceB64,
+		AttestationEvidenceB64: attestationEvidenceB64,
 	}
 	if !cfg.RemoteBridgeOperationsEnabled {
 		if cfg.RemoteBridgePilotAutoConsent {
@@ -105,6 +110,28 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		hcfg.ConsentResponder = pilotAutoConsentResponder
 	}
 	return hcfg, nil
+}
+
+func remoteBridgeAttestationEvidenceB64(cfg config.Config) (string, error) {
+	if strings.TrimSpace(cfg.RemoteBridgeAttestationEvidenceB64) != "" {
+		return cfg.RemoteBridgeAttestationEvidenceB64, nil
+	}
+	return attestation.BuildEvidenceB64(attestation.Config{
+		SLSA: attestation.SLSAConfig{
+			BinaryDigest:       cfg.RemoteBridgeAttestationSLSABinaryDigest,
+			BuilderID:          cfg.RemoteBridgeAttestationSLSABuilderID,
+			PredicateHash:      cfg.RemoteBridgeAttestationSLSAPredicateHash,
+			PredicateSignature: cfg.RemoteBridgeAttestationSLSAPredicateSignature,
+		},
+		DeviceKey: attestation.DeviceKeyConfig{
+			KeyDerB64:       cfg.RemoteBridgeDeviceKeyDerB64,
+			ProtectionLevel: cfg.RemoteBridgeDeviceKeyProtectionLevel,
+			NonExportable:   cfg.RemoteBridgeDeviceKeyNonExportable,
+			SignatureB64:    cfg.RemoteBridgeDeviceKeySignatureB64,
+			Algorithm:       cfg.RemoteBridgeDeviceKeySignatureAlgorithm,
+			ChainDerB64:     cfg.RemoteBridgeDeviceKeyChainDerB64,
+		},
+	})
 }
 
 func pilotAutoConsentResponder(ctx context.Context, prompt *pb.ConsentPrompt) (*pb.ConsentResult, error) {
