@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"io"
 	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,8 @@ import (
 )
 
 const testBrokerPermitPublicKeyB64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY7DAtgJHZjLaQdftKvXyhbbNlvYCmbuOjoxfTk5LII9UrdN/xZMmP43qQ6zJtERHS7PpBbIppbPMTNxcPk9aIQ=="
+
+func boolPtr(v bool) *bool { return &v }
 
 func consentPrompt(sessionID string) *remotebridgepb.ConsentPrompt {
 	return &remotebridgepb.ConsentPrompt{
@@ -61,6 +65,72 @@ func TestRemoteBridgeOperationDispatcherDisabledByDefault(t *testing.T) {
 	}
 	if hcfg.TLSConfig != nil {
 		t.Fatal("idle harness should not require operation mTLS config")
+	}
+}
+
+func TestRemoteBridgeRawAttestationEvidenceOverridesStructuredProducer(t *testing.T) {
+	cfg := config.Default()
+	cfg.RemoteBridgeEnabled = true
+	cfg.RemoteBridgeBrokerAddr = "broker.example:443"
+	cfg.RemoteBridgeAttestationEvidenceB64 = "ZGlnZXN0fGJ1aWxkZXJ8cG9saWN5fHNpZw=="
+	cfg.RemoteBridgeAttestationSLSABinaryDigest = "sha256:partial"
+
+	hcfg, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, remoteBridgeDeps{})
+	if err != nil {
+		t.Fatalf("raw attestation override should bypass structured producer validation: %v", err)
+	}
+	if hcfg.AttestationEvidenceB64 != cfg.RemoteBridgeAttestationEvidenceB64 {
+		t.Fatalf("attestation evidence = %q, want raw override %q", hcfg.AttestationEvidenceB64, cfg.RemoteBridgeAttestationEvidenceB64)
+	}
+}
+
+func TestRemoteBridgeStructuredAttestationEnvelopeWired(t *testing.T) {
+	cfg := config.Default()
+	cfg.RemoteBridgeEnabled = true
+	cfg.RemoteBridgeBrokerAddr = "broker.example:443"
+	cfg.RemoteBridgeAttestationSLSABinaryDigest = "sha256:bin"
+	cfg.RemoteBridgeAttestationSLSABuilderID = "builder"
+	cfg.RemoteBridgeAttestationSLSAPredicateHash = "sha256:predicate"
+	cfg.RemoteBridgeAttestationSLSAPredicateSignature = "sig"
+	cfg.RemoteBridgeDeviceKeyDerB64 = "AQID"
+	cfg.RemoteBridgeDeviceKeyProtectionLevel = "SECURE_ELEMENT_OR_TPM"
+	cfg.RemoteBridgeDeviceKeyNonExportable = boolPtr(true)
+	cfg.RemoteBridgeDeviceKeySignatureB64 = "BAU="
+	cfg.RemoteBridgeDeviceKeySignatureAlgorithm = "SHA256withECDSA"
+	cfg.RemoteBridgeDeviceKeyChainDerB64 = []string{"Bgc=", "CAk="}
+
+	hcfg, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, remoteBridgeDeps{})
+	if err != nil {
+		t.Fatalf("structured attestation envelope config: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(hcfg.AttestationEvidenceB64)
+	if err != nil {
+		t.Fatalf("decode attestation evidence: %v", err)
+	}
+	text := string(decoded)
+	for _, want := range []string{
+		`"v":1`,
+		`"slsa"`,
+		`"deviceKey"`,
+		`"protectionLevel":"SECURE_ELEMENT_OR_TPM"`,
+		`"nonExportable":true`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("attestation envelope %s missing %s", text, want)
+		}
+	}
+}
+
+func TestRemoteBridgePartialStructuredAttestationConfigRefuses(t *testing.T) {
+	cfg := config.Default()
+	cfg.RemoteBridgeEnabled = true
+	cfg.RemoteBridgeBrokerAddr = "broker.example:443"
+	cfg.RemoteBridgeDeviceKeyDerB64 = "AQID"
+	cfg.RemoteBridgeDeviceKeyProtectionLevel = "SECURE_ELEMENT_OR_TPM"
+
+	_, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, remoteBridgeDeps{})
+	if err == nil {
+		t.Fatal("partial structured attestation config must refuse remote-bridge init")
 	}
 }
 

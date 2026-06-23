@@ -37,6 +37,18 @@ func TestRemoteBridgeDefaultsDisabled(t *testing.T) {
 	if cfg.RemoteBridgeAttestationEvidenceB64 != "" {
 		t.Fatal("remote-bridge attestation evidence must default empty")
 	}
+	if cfg.RemoteBridgeAttestationSLSABinaryDigest != "" ||
+		cfg.RemoteBridgeAttestationSLSABuilderID != "" ||
+		cfg.RemoteBridgeAttestationSLSAPredicateHash != "" ||
+		cfg.RemoteBridgeAttestationSLSAPredicateSignature != "" ||
+		cfg.RemoteBridgeDeviceKeyDerB64 != "" ||
+		cfg.RemoteBridgeDeviceKeyProtectionLevel != "" ||
+		cfg.RemoteBridgeDeviceKeyNonExportable != nil ||
+		cfg.RemoteBridgeDeviceKeySignatureB64 != "" ||
+		cfg.RemoteBridgeDeviceKeySignatureAlgorithm != "" ||
+		len(cfg.RemoteBridgeDeviceKeyChainDerB64) != 0 {
+		t.Fatal("remote-bridge structured attestation producer fields must default empty")
+	}
 }
 
 func TestRemoteBridgeEnvOverrides(t *testing.T) {
@@ -55,6 +67,16 @@ func TestRemoteBridgeEnvOverrides(t *testing.T) {
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX", ".acik.local")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX", "adcomputer:")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_EVIDENCE_B64", "ZGlnZXN0fGJ1aWxkZXJ8cG9saWN5fHNpZw==")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_SLSA_BINARY_DIGEST", "sha256:bin")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_SLSA_BUILDER_ID", "builder")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_SLSA_PREDICATE_HASH", "sha256:predicate")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_ATTESTATION_SLSA_PREDICATE_SIGNATURE", "sig")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_DER_B64", "AQID")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_PROTECTION_LEVEL", "SECURE_ELEMENT_OR_TPM")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_NON_EXPORTABLE", "true")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SIGNATURE_B64", "BAU=")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SIGNATURE_ALGORITHM", "SHA256withECDSA")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_CHAIN_DER_B64", "Bgc=,CAk=")
 	cfg := LoadFromEnv()
 	if !cfg.RemoteBridgeEnabled || cfg.RemoteBridgeBrokerAddr != "broker.example:8443" ||
 		!cfg.RemoteBridgeInsecurePlaintext ||
@@ -69,7 +91,20 @@ func TestRemoteBridgeEnvOverrides(t *testing.T) {
 		cfg.RemoteBridgeTLSServerName != "bridge.example" ||
 		cfg.RemoteBridgeMTLSCertSubjectSuffix != ".acik.local" ||
 		cfg.RemoteBridgeMTLSCertSANURIPrefix != "adcomputer:" ||
-		cfg.RemoteBridgeAttestationEvidenceB64 != "ZGlnZXN0fGJ1aWxkZXJ8cG9saWN5fHNpZw==" {
+		cfg.RemoteBridgeAttestationEvidenceB64 != "ZGlnZXN0fGJ1aWxkZXJ8cG9saWN5fHNpZw==" ||
+		cfg.RemoteBridgeAttestationSLSABinaryDigest != "sha256:bin" ||
+		cfg.RemoteBridgeAttestationSLSABuilderID != "builder" ||
+		cfg.RemoteBridgeAttestationSLSAPredicateHash != "sha256:predicate" ||
+		cfg.RemoteBridgeAttestationSLSAPredicateSignature != "sig" ||
+		cfg.RemoteBridgeDeviceKeyDerB64 != "AQID" ||
+		cfg.RemoteBridgeDeviceKeyProtectionLevel != "SECURE_ELEMENT_OR_TPM" ||
+		cfg.RemoteBridgeDeviceKeyNonExportable == nil ||
+		!*cfg.RemoteBridgeDeviceKeyNonExportable ||
+		cfg.RemoteBridgeDeviceKeySignatureB64 != "BAU=" ||
+		cfg.RemoteBridgeDeviceKeySignatureAlgorithm != "SHA256withECDSA" ||
+		len(cfg.RemoteBridgeDeviceKeyChainDerB64) != 2 ||
+		cfg.RemoteBridgeDeviceKeyChainDerB64[0] != "Bgc=" ||
+		cfg.RemoteBridgeDeviceKeyChainDerB64[1] != "CAk=" {
 		t.Fatalf("env overrides not applied: %+v", cfg)
 	}
 }
