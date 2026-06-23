@@ -366,6 +366,9 @@ jobs:
               | .artifact_host_image_ref = (.artifact_host_image + "@" + $digest)' \
              dist/release-manifest.json > dist/release-manifest.json.tmp
           mv dist/release-manifest.json.tmp dist/release-manifest.json
+          # The durable GitHub Release manifest changed after registry digest
+          # resolution; refresh SHA256SUMS so it covers the final release bytes.
+          ./scripts/release/refresh-release-sha256sums.sh dist
           echo "## Artifact-host image" >> "$GITHUB_STEP_SUMMARY"
           echo "\`$IMAGE:$TAG@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
           echo "gitops digest pin: kustomize/base/apps/artifact-host → \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
