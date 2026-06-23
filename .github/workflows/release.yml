@@ -480,6 +480,7 @@ jobs:
              dist/release-manifest.json > dist/release-manifest.json.tmp
           mv dist/release-manifest.json.tmp dist/release-manifest.json
           echo "release-manifest.json enriched with EndpointAgent.zip fields"
+          ./scripts/release/refresh-release-sha256sums.sh dist
 
       - name: Publish release
         env:
