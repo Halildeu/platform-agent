@@ -75,6 +75,9 @@ jobs:
       - name: Installer encoding gate (no non-ASCII in shipped .ps1)
         run: bash scripts/test/windows-installer-encoding.sh
 
+      - name: Release policy contract gate
+        run: bash scripts/test/release-policy-contract.sh
+
       - name: Cross-compile Windows amd64
         env:
           GOOS: windows
