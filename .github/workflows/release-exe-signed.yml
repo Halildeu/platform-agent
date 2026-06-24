@@ -458,32 +458,42 @@ jobs:
           } >> dist/RELEASE_NOTES.publish.md
           # Whole-operation retry: the release API (api + uploads.github.com)
           # intermittently returns 401 even though the GHCR push above proves the
-          # job token is fine. Published releases are immutable here: an existing
-          # release is a fail-closed condition. Only a partial release created by
-          # this job's retry loop is deleted between attempts (tag is kept).
+          # job token is fine. Repo-level release immutability means assets must
+          # be uploaded while the release is still a draft; publish is the final
+          # one-way step. Existing published releases are fail-closed. Only a
+          # partial draft release created by this job's retry loop is deleted
+          # between attempts (tag is kept).
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::error::GitHub release $TAG already exists; refusing to delete/recreate an immutable trusted release"
             exit 1
           fi
-          delete_current_run_release() {
-            body="$(gh release view "$TAG" --json body --jq .body 2>/dev/null || true)"
-            if printf '%s\n' "$body" | grep -Fq "$RUN_MARKER"; then
+          delete_current_run_draft() {
+            release_json="$(gh release view "$TAG" --json body,isDraft 2>/dev/null || true)"
+            if [ -z "$release_json" ]; then
+              return 0
+            fi
+            is_draft="$(printf '%s\n' "$release_json" | jq -r '.isDraft // false')"
+            body="$(printf '%s\n' "$release_json" | jq -r '.body // ""')"
+            if [ "$is_draft" = "true" ] && printf '%s\n' "$body" | grep -Fq "$RUN_MARKER"; then
               gh release delete "$TAG" --yes --cleanup-tag=false >/dev/null 2>&1 || true
               return 0
             fi
-            echo "::error::refusing to delete GitHub release $TAG; release body does not carry current workflow marker"
+            echo "::error::refusing to delete GitHub release $TAG; it is not a current-run draft"
             exit 1
           }
           publish_once() {
             gh release create "$TAG" --verify-tag \
+              --draft \
               --title "platform-agent $TAG (trusted-internal-ca)" \
-              --notes-file dist/RELEASE_NOTES.publish.md "${ASSETS[@]}"
+              --notes-file dist/RELEASE_NOTES.publish.md
+            gh release upload "$TAG" "${ASSETS[@]}"
+            gh release edit "$TAG" --draft=false --latest
           }
           ok=0
           for attempt in 1 2 3 4 5 6; do
             if publish_once; then ok=1; break; fi
             echo "::warning::release attempt $attempt failed — retrying in $((attempt*15))s"
-            gh release view "$TAG" >/dev/null 2>&1 && delete_current_run_release || true
+            gh release view "$TAG" >/dev/null 2>&1 && delete_current_run_draft || true
             sleep $((attempt*15))
           done
           [ "$ok" = "1" ] || { echo "::error::GitHub release failed after 6 attempts (artifact-host image already pushed; release is the secondary archive)"; exit 1; }
