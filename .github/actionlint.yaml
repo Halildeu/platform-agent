@@ -1,0 +1,9 @@
+self-hosted-runner:
+  labels:
+    - parallels
+    - signing
+    - windows11
+
+config-variables: null
+
+paths:

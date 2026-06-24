@@ -27,13 +27,21 @@ on:
       tag:
         description: "Existing git tag to release (clean a.b.c, no -lab)"
         required: true
+      release_class:
+        description: "Faz 22.6 release class for the trusted product-channel manifest"
+        required: false
+        default: "rollout-candidate"
+        type: choice
+        options:
+          - bounded-pilot
+          - rollout-candidate
   # NO pull_request trigger — the self-hosted signing runner must never run on a PR.
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-exe-signed-${{ github.ref }}
+  group: release-exe-signed-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -43,6 +51,11 @@ jobs:
     outputs:
       tag: ${{ steps.c.outputs.tag }}
       proceed: ${{ steps.c.outputs.proceed }}
+      release_class: ${{ steps.policy.outputs.release_class }}
+      source_commit: ${{ steps.policy.outputs.source_commit }}
+      previous_release: ${{ steps.policy.outputs.previous_release }}
+      frozen_train_evidence_count: ${{ steps.policy.outputs.frozen_train_evidence_count }}
+      daily_trusted_release_count: ${{ steps.policy.outputs.daily_trusted_release_count }}
     steps:
       - id: c
         shell: bash
@@ -72,6 +85,28 @@ jobs:
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Code-signing NOT configured — set CODESIGN_ENABLED=true + CODESIGN_* vars and stand up the [self-hosted,linux,signing] runner. Skipping; no trusted EXE release produced."
           fi
+      - uses: actions/checkout@v4
+        if: steps.c.outputs.proceed == 'true'
+        with:
+          fetch-depth: 0
+      - id: policy
+        name: Faz 22.6 release lineage policy gate
+        if: steps.c.outputs.proceed == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.c.outputs.tag }}
+          RELEASE_CLASS_INPUT: ${{ github.event.inputs.release_class }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --quiet
+          release_class="${RELEASE_CLASS_INPUT:-rollout-candidate}"
+          ./scripts/release/check-release-lineage-policy.sh \
+            --tag "$TAG" \
+            --release-class "$release_class" \
+            --github-repo "${{ github.repository }}" \
+            --enforce-github-rules \
+            --emit-github-output "$GITHUB_OUTPUT"
 
   build-unsigned-exe:
     name: Build UNSIGNED agent exe (windows-hosted)
@@ -236,11 +271,30 @@ jobs:
       # pins ONE thumbprint). verify-exe extracted it from the signed exe.
       THUMB: ${{ needs.verify-exe.outputs.signer_thumbprint }}
       VERIFIED_SHA256: ${{ needs.verify-exe.outputs.binary_sha256 }}
+      RELEASE_CLASS: ${{ needs.classify.outputs.release_class }}
+      SOURCE_COMMIT: ${{ needs.classify.outputs.source_commit }}
+      PREVIOUS_RELEASE: ${{ needs.classify.outputs.previous_release }}
+      WORKFLOW_RUN_ID: ${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.classify.outputs.tag }}
           fetch-depth: 0
+      - name: Re-check release lineage policy on publish checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main --quiet
+          head="$(git rev-parse HEAD)"
+          [ "$head" = "$SOURCE_COMMIT" ] || { echo "::error::publish HEAD $head != classified source_commit $SOURCE_COMMIT"; exit 1; }
+          ./scripts/release/check-release-lineage-policy.sh \
+            --tag "$TAG" \
+            --release-class "$RELEASE_CLASS" \
+            --previous-release "$PREVIOUS_RELEASE" \
+            --source-commit "$SOURCE_COMMIT" \
+            --github-repo "${{ github.repository }}" \
+            --enforce-github-rules
       - uses: actions/download-artifact@v4
         with:
           name: endpoint-agent-exe-signed
@@ -290,13 +344,17 @@ jobs:
           $sumLines -join "`n" | Out-File -Encoding ascii dist/SHA256SUMS
           $manifest = [ordered]@{
             schema_version = 1
+            source_commit = $env:SOURCE_COMMIT
+            workflow_run_id = $env:WORKFLOW_RUN_ID
             release_tag    = $env:TAG
+            release_class  = $env:RELEASE_CLASS
+            previous_release = $env:PREVIOUS_RELEASE
             signing_tier   = "trusted-internal-ca"
             trust_scope    = "installer-imported-internal-ca"
             publicly_trusted = $false
             signer_thumbprint = $env:THUMB
             endpoint_agent_sha256 = $env:SHA256
-            phase = "22.5-M1"
+            phase = "22.6-release-lineage"
             assets = @(
               [ordered]@{ name = "endpoint-agent.exe"; sha256 = $env:SHA256 }
               [ordered]@{ name = "bootstrap-package.ps1"; sha256 = (Get-FileHash -Algorithm SHA256 dist/bootstrap-package.ps1).Hash.ToLowerInvariant() }
@@ -369,9 +427,18 @@ jobs:
           # The durable GitHub Release manifest changed after registry digest
           # resolution; refresh SHA256SUMS so it covers the final release bytes.
           ./scripts/release/refresh-release-sha256sums.sh dist
-          echo "## Artifact-host image" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`$IMAGE:$TAG@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "gitops digest pin: kustomize/base/apps/artifact-host → \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+          ./scripts/release/validate-release-manifest.sh \
+            --manifest dist/release-manifest.json \
+            --dist-dir dist \
+            --tag "$TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --previous-release "$PREVIOUS_RELEASE" \
+            --release-class "$RELEASE_CLASS"
+          {
+            echo "## Artifact-host image"
+            echo "\`$IMAGE:$TAG@$DIGEST\`"
+            echo "gitops digest pin: kustomize/base/apps/artifact-host → \`$DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Publish GitHub release (durable archive)
         shell: bash
         env:
@@ -383,20 +450,51 @@ jobs:
             dist/uninstall.ps1 dist/SHA256SUMS dist/release-manifest.json
             dist/windows/EndpointAgent.zip dist/windows/EndpointAgent.zip.sha256
           )
+          RUN_MARKER="F22_6_RELEASE_RUN_ID:$WORKFLOW_RUN_ID"
+          cp dist/RELEASE_NOTES.md dist/RELEASE_NOTES.publish.md
+          {
+            echo ""
+            echo "<!-- $RUN_MARKER -->"
+          } >> dist/RELEASE_NOTES.publish.md
           # Whole-operation retry: the release API (api + uploads.github.com)
           # intermittently returns 401 even though the GHCR push above proves the
-          # job token is fine. Retry create+upload as a unit; delete a partial
-          # release between attempts (keep the protected tag) so create is clean.
+          # job token is fine. Published releases are immutable here: an existing
+          # release is a fail-closed condition. Only a partial release created by
+          # this job's retry loop is deleted between attempts (tag is kept).
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::GitHub release $TAG already exists; refusing to delete/recreate an immutable trusted release"
+            exit 1
+          fi
+          delete_current_run_release() {
+            body="$(gh release view "$TAG" --json body --jq .body 2>/dev/null || true)"
+            if printf '%s\n' "$body" | grep -Fq "$RUN_MARKER"; then
+              gh release delete "$TAG" --yes --cleanup-tag=false >/dev/null 2>&1 || true
+              return 0
+            fi
+            echo "::error::refusing to delete GitHub release $TAG; release body does not carry current workflow marker"
+            exit 1
+          }
           publish_once() {
-            gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes --cleanup-tag=false >/dev/null 2>&1 || true
             gh release create "$TAG" --verify-tag \
               --title "platform-agent $TAG (trusted-internal-ca)" \
-              --notes-file dist/RELEASE_NOTES.md "${ASSETS[@]}"
+              --notes-file dist/RELEASE_NOTES.publish.md "${ASSETS[@]}"
           }
           ok=0
           for attempt in 1 2 3 4 5 6; do
             if publish_once; then ok=1; break; fi
             echo "::warning::release attempt $attempt failed — retrying in $((attempt*15))s"
+            gh release view "$TAG" >/dev/null 2>&1 && delete_current_run_release || true
             sleep $((attempt*15))
           done
           [ "$ok" = "1" ] || { echo "::error::GitHub release failed after 6 attempts (artifact-host image already pushed; release is the secondary archive)"; exit 1; }
+      - name: Verify GitHub release archive (post-publish)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./scripts/release/verify-published-release.sh \
+            --repo "${{ github.repository }}" \
+            --tag "$TAG" \
+            --source-commit "$SOURCE_COMMIT" \
+            --previous-release "$PREVIOUS_RELEASE" \
+            --release-class "$RELEASE_CLASS"
