@@ -128,6 +128,13 @@ type Config struct {
 	// interactive desktop prompt. It is disabled by default and valid only when
 	// RemoteBridgeOperationsEnabled is also true.
 	RemoteBridgePilotAutoConsent bool
+	// RemoteBridgeDeviceKeySessionEnabled opts the agent into answering the
+	// broker's Faz 22.6 #548 device-key session challenge (the TPM-native
+	// hardware device-trust strong path). Disabled by default (ADR-0034); when
+	// set, the agent opens its TPM and wires a DeviceKeyResponder. Windows-only
+	// — the responder needs a real TPM, so an enabled flag on a non-Windows
+	// build refuses the bridge loudly rather than half-starting.
+	RemoteBridgeDeviceKeySessionEnabled bool
 	// RemoteBridgeTLSServerName optionally overrides SNI/hostname validation
 	// for the broker TLS connection. Blank means derive it from BrokerAddr.
 	RemoteBridgeTLSServerName string
@@ -253,6 +260,7 @@ func LoadFromEnv() Config {
 	cfg.RemoteBridgePermitBrokerPublicKeyB64 = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64", cfg.RemoteBridgePermitBrokerPublicKeyB64)
 	cfg.RemoteBridgePermitKeyID = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID", cfg.RemoteBridgePermitKeyID)
 	cfg.RemoteBridgePilotAutoConsent = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT", cfg.RemoteBridgePilotAutoConsent)
+	cfg.RemoteBridgeDeviceKeySessionEnabled = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SESSION_ENABLED", cfg.RemoteBridgeDeviceKeySessionEnabled)
 	cfg.RemoteBridgeTLSServerName = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME", cfg.RemoteBridgeTLSServerName)
 	cfg.RemoteBridgeMTLSCertSubjectSuffix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX", cfg.RemoteBridgeMTLSCertSubjectSuffix)
 	cfg.RemoteBridgeMTLSCertSANURIPrefix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX", cfg.RemoteBridgeMTLSCertSANURIPrefix)

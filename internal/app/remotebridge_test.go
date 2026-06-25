@@ -262,3 +262,69 @@ func TestRemoteBridgePilotAutoConsentWiring(t *testing.T) {
 		t.Fatal("expired prompt must not be granted")
 	}
 }
+
+func TestRemoteBridgeDeviceKeySessionWiring(t *testing.T) {
+	cfg := config.Default()
+	cfg.RemoteBridgeEnabled = true
+	cfg.RemoteBridgeOperationsEnabled = true
+	cfg.RemoteBridgeDeviceKeySessionEnabled = true
+	cfg.RemoteBridgeBrokerAddr = "broker.example:443"
+	cfg.RemoteBridgePermitBrokerPublicKeyB64 = testBrokerPermitPublicKeyB64
+	cfg.RemoteBridgePermitKeyID = "kid-1"
+
+	called := false
+	fake := func(_ context.Context, ch *remotebridgepb.DeviceKeyChallenge, _ string) (*remotebridgepb.DeviceKeyAttestationResponse, error) {
+		called = true
+		return &remotebridgepb.DeviceKeyAttestationResponse{ChallengeId: ch.GetChallengeId()}, nil
+	}
+	hcfg, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, remoteBridgeDeps{
+		tlsConfig:          &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{[]byte("cert")}}}},
+		deviceKeyResponder: fake,
+	})
+	if err != nil {
+		t.Fatalf("device-key session harness config: %v", err)
+	}
+	if hcfg.DeviceKeyResponder == nil {
+		t.Fatal("device-key session enabled did not wire a DeviceKeyResponder")
+	}
+	resp, err := hcfg.DeviceKeyResponder(context.Background(), &remotebridgepb.DeviceKeyChallenge{ChallengeId: "c1"}, "sess-1")
+	if err != nil {
+		t.Fatalf("wired responder: %v", err)
+	}
+	if !called || resp.GetChallengeId() != "c1" {
+		t.Fatalf("wired responder not invoked correctly: called=%v resp=%+v", called, resp)
+	}
+}
+
+func TestRemoteBridgeDeviceKeySessionDisabledByDefault(t *testing.T) {
+	cfg := config.Default()
+	cfg.RemoteBridgeEnabled = true
+	cfg.RemoteBridgeOperationsEnabled = true
+	cfg.RemoteBridgeBrokerAddr = "broker.example:443"
+	cfg.RemoteBridgePermitBrokerPublicKeyB64 = testBrokerPermitPublicKeyB64
+	cfg.RemoteBridgePermitKeyID = "kid-1"
+	// RemoteBridgeDeviceKeySessionEnabled defaults false — no responder must be wired.
+
+	hcfg, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, remoteBridgeDeps{
+		tlsConfig: &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{[]byte("cert")}}}},
+	})
+	if err != nil {
+		t.Fatalf("harness config: %v", err)
+	}
+	if hcfg.DeviceKeyResponder != nil {
+		t.Fatal("device-key session must be disabled unless explicitly enabled")
+	}
+}
+
+func TestRemoteBridgeDeviceKeySessionRequiresOperations(t *testing.T) {
+	cfg := config.Default()
+	cfg.RemoteBridgeEnabled = true
+	cfg.RemoteBridgeDeviceKeySessionEnabled = true
+	// RemoteBridgeOperationsEnabled stays false — the flag must refuse loudly, not silently no-op.
+	cfg.RemoteBridgeBrokerAddr = "broker.example:443"
+
+	_, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, remoteBridgeDeps{})
+	if err == nil {
+		t.Fatal("device-key session with operations disabled must refuse, not silently no-op")
+	}
+}
