@@ -4,6 +4,7 @@ package tpmenroll
 
 import (
 	"crypto"
+	"crypto/x509"
 	"encoding/asn1"
 	"fmt"
 	"io"
@@ -197,7 +198,13 @@ func (d *WindowsTPMDevice) readEKCertChain() [][]byte {
 		if err != nil || len(blob) == 0 {
 			continue
 		}
-		chain = append(chain, splitDERCerts(blob)...)
+		// Keep only TLVs that actually parse as X.509 certs — skips padding / non-cert NV content so the
+		// backend's PKIX path builder never sees garbage (Codex hygiene note).
+		for _, der := range splitDERCerts(blob) {
+			if _, perr := x509.ParseCertificate(der); perr == nil {
+				chain = append(chain, der)
+			}
+		}
 	}
 	return chain
 }
