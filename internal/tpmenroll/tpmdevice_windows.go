@@ -109,6 +109,14 @@ func (d *WindowsTPMDevice) Close() error {
 // profile the index is AuthRead with an EMPTY auth value, so it is readable via the index's own (nil) password.
 const ekCertNVIndexRSA = 0x01C00002
 
+// ekCertChainNVBaseRSA is the TCG EK Credential Profile base NV index for the RSA EK-certificate CHAIN (the
+// embedded intermediate CAs / "EICA"). Intel fTPMs (11th-gen+) embed the On-Die CA chain here: the EK leaf at
+// 0x01C00002 is issued by an intermediate (e.g. Intel "CSME ... PTT") whose cert is NOT carried in the leaf and
+// whose AIA is absent, so the chain MUST come from these indices to build EK-leaf → pinned manufacturer root.
+// ekCertChainNVIndexCountRSA scans a small contiguous window (the chain rarely exceeds 2-3 EICA certs).
+const ekCertChainNVBaseRSA = 0x01C00100
+const ekCertChainNVIndexCountRSA = 4
+
 func (d *WindowsTPMDevice) EndorsementKey() (pub, certDER []byte, chainDER [][]byte, err error) {
 	b := tpm2.Marshal(d.ekPublic)
 	// #548 strong path: read the manufacturer EK certificate from TPM NV. Best-effort ONLY in that a read
@@ -123,32 +131,32 @@ func (d *WindowsTPMDevice) EndorsementKey() (pub, certDER []byte, chainDER [][]b
 	if rerr != nil {
 		return b, nil, nil, nil
 	}
-	return b, cert, nil, nil
+	// Also return the embedded EK-cert chain (EICA) so the backend can build EK-leaf → pinned manufacturer root
+	// (Intel fTPMs need this — the leaf's issuer cert is only in NV, not in the leaf). Best-effort: an empty
+	// chain just means the verifier must already trust the leaf's direct issuer, else it fails closed.
+	return b, cert, d.readEKCertChain(), nil
 }
 
-// readEKCertificate reads the DER manufacturer EK certificate from the RSA EK-cert NV index. It first reads the
-// index public area for the data size + Name, then reads the area in bounded chunks via the index's own (empty)
-// auth, concatenating until DataSize bytes are read. Any TPM error (index absent, auth-model mismatch) surfaces
-// to the caller, which treats a read failure as "no cert" (fail-closed at the broker verifier).
-func (d *WindowsTPMDevice) readEKCertificate() ([]byte, error) {
+// readNVIndex reads a full NV index's data: it reads the index public area for the size + Name, then reads the
+// area in bounded chunks via the index's own (empty) auth, concatenating until DataSize bytes are read. Any TPM
+// error (index absent, auth-model mismatch) surfaces to the caller.
+func (d *WindowsTPMDevice) readNVIndex(idx tpm2.TPMHandle) ([]byte, error) {
 	if d.tpm == nil {
 		return nil, fmt.Errorf("tpm not open")
 	}
-	idx := tpm2.TPMHandle(ekCertNVIndexRSA)
 	readPub, err := tpm2.NVReadPublic{NVIndex: idx}.Execute(d.tpm)
 	if err != nil {
-		return nil, fmt.Errorf("NV read-public EK cert index 0x%x: %w", ekCertNVIndexRSA, err)
+		return nil, fmt.Errorf("NV read-public index 0x%x: %w", uint32(idx), err)
 	}
 	nvPub, err := readPub.NVPublic.Contents()
 	if err != nil {
-		return nil, fmt.Errorf("decode EK cert NV public area: %w", err)
+		return nil, fmt.Errorf("decode NV public area 0x%x: %w", uint32(idx), err)
 	}
 	total := int(nvPub.DataSize)
 	if total == 0 {
-		return nil, fmt.Errorf("EK cert NV index 0x%x reports zero data size", ekCertNVIndexRSA)
+		return nil, fmt.Errorf("NV index 0x%x reports zero data size", uint32(idx))
 	}
-	// chunk conservatively below the TPM's MAX_NV_BUFFER_SIZE (>=512 octets on all PC Client TPMs).
-	const chunk = 512
+	const chunk = 512 // conservative, below the TPM's MAX_NV_BUFFER_SIZE (>=512 octets on all PC Client TPMs)
 	out := make([]byte, 0, total)
 	for off := 0; off < total; {
 		n := total - off
@@ -162,15 +170,52 @@ func (d *WindowsTPMDevice) readEKCertificate() ([]byte, error) {
 			Offset:     uint16(off),
 		}.Execute(d.tpm)
 		if err != nil {
-			return nil, fmt.Errorf("NV read EK cert at offset %d: %w", off, err)
+			return nil, fmt.Errorf("NV read 0x%x at offset %d: %w", uint32(idx), off, err)
 		}
 		if len(rsp.Data.Buffer) == 0 {
-			return nil, fmt.Errorf("NV read EK cert returned 0 bytes at offset %d", off)
+			return nil, fmt.Errorf("NV read 0x%x returned 0 bytes at offset %d", uint32(idx), off)
 		}
 		out = append(out, rsp.Data.Buffer...)
 		off += len(rsp.Data.Buffer)
 	}
 	return out, nil
+}
+
+// readEKCertificate reads the DER manufacturer EK certificate (the leaf) from the RSA EK-cert NV index. A read
+// failure surfaces to the caller, which treats it as "no cert" (fail-closed at the broker verifier).
+func (d *WindowsTPMDevice) readEKCertificate() ([]byte, error) {
+	return d.readNVIndex(tpm2.TPMHandle(ekCertNVIndexRSA))
+}
+
+// readEKCertChain reads the embedded EK-certificate-chain (EICA) NV indices and returns the chain as individual
+// DER certs. Best-effort: a missing/empty chain index just yields fewer certs. The agent does not validate the
+// chain itself (the backend does, against its pinned manufacturer root) — it only surfaces what the TPM embeds.
+func (d *WindowsTPMDevice) readEKCertChain() [][]byte {
+	var chain [][]byte
+	for i := uint32(0); i < ekCertChainNVIndexCountRSA; i++ {
+		blob, err := d.readNVIndex(tpm2.TPMHandle(ekCertChainNVBaseRSA + i))
+		if err != nil || len(blob) == 0 {
+			continue
+		}
+		chain = append(chain, splitDERCerts(blob)...)
+	}
+	return chain
+}
+
+// splitDERCerts splits a buffer holding one or more concatenated DER certificates into individual cert DERs by
+// walking the ASN.1 TLVs (each X.509 certificate is exactly one SEQUENCE).
+func splitDERCerts(blob []byte) [][]byte {
+	var out [][]byte
+	for rest := blob; len(rest) > 0; {
+		var raw asn1.RawValue
+		after, err := asn1.Unmarshal(rest, &raw)
+		if err != nil || len(raw.FullBytes) == 0 {
+			break
+		}
+		out = append(out, append([]byte(nil), raw.FullBytes...))
+		rest = after
+	}
+	return out
 }
 
 func (d *WindowsTPMDevice) AttestationKey() (pub, name []byte, err error) {
