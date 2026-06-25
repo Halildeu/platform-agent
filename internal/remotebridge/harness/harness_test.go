@@ -333,6 +333,109 @@ func TestConfiguredConsentResponderSendsConsentResult(t *testing.T) {
 	}
 }
 
+// Faz 22.6 #548: a wired DeviceKeyResponder answers a broker DeviceKeyChallenge with a
+// DeviceKeyAttestationResponse on CONTROL, echoing the session id (the broker correlates by it).
+func TestConfiguredDeviceKeyResponderSendsAttestationResponse(t *testing.T) {
+	agentFrames := make(chan *pb.Envelope, 16)
+	const sid = "sess-dk"
+	const cid = "00112233445566778899aabbccddeeff"
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		_ = s.Send(heartbeatEnv(60_000, 0))
+		_ = s.Send(&pb.Envelope{
+			ChannelType: pb.ChannelType_CONTROL,
+			SessionId:   sid,
+			Payload: &pb.Envelope_DeviceKeyChallenge{DeviceKeyChallenge: &pb.DeviceKeyChallenge{
+				ChallengeId:          cid,
+				NonceB64:             base64.StdEncoding.EncodeToString([]byte("broker-nonce-32-bytes-exactly!!!")),
+				IssuedAtEpochMillis:  time.Now().UnixMilli(),
+				ExpiresAtEpochMillis: time.Now().Add(3 * time.Minute).UnixMilli(),
+				TransportPeerKey:     "ab1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd",
+				ProtocolVersion:      "device-key-session-v1",
+			}},
+		})
+		frame, err := s.Recv()
+		if err != nil {
+			return err
+		}
+		agentFrames <- frame
+		return io.EOF
+	}
+	start(t, script, func(cfg *Config) {
+		cfg.DeviceKeyResponder = func(_ context.Context, ch *pb.DeviceKeyChallenge, sessionID string) (*pb.DeviceKeyAttestationResponse, error) {
+			// the harness only proves the wire seam; devkeysession.Respond (TPM-backed) is tested separately
+			return &pb.DeviceKeyAttestationResponse{
+				ChallengeId:         ch.GetChallengeId(),
+				Schema:              "faz22.6.device-key-session.v1",
+				DeviceKeyPubB64:     "AQ==",
+				BindingContextB64:   base64.StdEncoding.EncodeToString([]byte(sessionID)),
+				DeviceKeySigB64:     "AQ==",
+				SignedAtEpochMillis: time.Now().UnixMilli(),
+			}, nil
+		}
+	})
+
+	var result *pb.Envelope
+	select {
+	case result = <-agentFrames:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no DeviceKeyAttestationResponse within 3s")
+	}
+	if result.GetDeviceKeyAttestationResponse() == nil {
+		t.Fatalf("agent frame is %T, want DeviceKeyAttestationResponse", result.GetPayload())
+	}
+	if got := result.GetSessionId(); got != sid {
+		t.Fatalf("response envelope sessionId = %q, want %q", got, sid)
+	}
+	if got := result.GetDeviceKeyAttestationResponse().GetChallengeId(); got != cid {
+		t.Fatalf("response challengeId = %q, want %q", got, cid)
+	}
+	if result.GetChannelType() != pb.ChannelType_CONTROL {
+		t.Fatalf("response must be on CONTROL, got %v", result.GetChannelType())
+	}
+}
+
+// Faz 22.6 #548: with NO DeviceKeyResponder wired (the default), an inbound DeviceKeyChallenge is a protocol
+// defect — the agent sends an error frame (never a forged attestation) and closes the stream.
+func TestDeviceKeyChallengeWithoutResponderIsAProtocolDefect(t *testing.T) {
+	agentFrames := make(chan *pb.Envelope, 16)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		_ = s.Send(heartbeatEnv(60_000, 0))
+		_ = s.Send(&pb.Envelope{
+			ChannelType: pb.ChannelType_CONTROL,
+			SessionId:   "sess-dk",
+			Payload: &pb.Envelope_DeviceKeyChallenge{DeviceKeyChallenge: &pb.DeviceKeyChallenge{
+				ChallengeId: "00112233445566778899aabbccddeeff", ProtocolVersion: "device-key-session-v1",
+			}},
+		})
+		for {
+			frame, err := s.Recv()
+			if err != nil {
+				return err
+			}
+			agentFrames <- frame
+		}
+	}
+	start(t, script, nil) // nil DeviceKeyResponder = default-off
+
+	select {
+	case frame := <-agentFrames:
+		if frame.GetDeviceKeyAttestationResponse() != nil {
+			t.Fatal("an unwired agent must NOT answer a device-key challenge")
+		}
+		if frame.GetError() == nil {
+			t.Fatalf("expected an error frame for the unsupported payload, got %T", frame.GetPayload())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no defect/error frame within 3s")
+	}
+}
+
 // TestKillObeySubSecond: a session-scoped kill mutates local session state
 // in well under a second and does NOT tear down the transport.
 func TestKillObeySubSecond(t *testing.T) {

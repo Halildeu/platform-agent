@@ -53,6 +53,15 @@ func (s *controlSender) sendConsentResult(result *pb.ConsentResult) error {
 	})
 }
 
+// sendDeviceKeyAttestationResponse pushes the agent's #548 device-key attestation back on CONTROL, echoing the
+// broker sessionId from the challenge envelope so the broker correlates it to the right session.
+func (s *controlSender) sendDeviceKeyAttestationResponse(sessionID string, resp *pb.DeviceKeyAttestationResponse) error {
+	return s.send(&pb.Envelope{
+		SessionId: sessionID,
+		Payload:   &pb.Envelope_DeviceKeyAttestationResponse{DeviceKeyAttestationResponse: resp},
+	})
+}
+
 // send stamps channel/seq/sentAt and writes. The payload must already be on
 // the agent-allowed CONTROL set.
 func (s *controlSender) send(env *pb.Envelope) error {
@@ -80,7 +89,8 @@ func agentMaySend(env *pb.Envelope) bool {
 		*pb.Envelope_ConsentResult,
 		*pb.Envelope_AuditEvent,
 		*pb.Envelope_Heartbeat,
-		*pb.Envelope_Error:
+		*pb.Envelope_Error,
+		*pb.Envelope_DeviceKeyAttestationResponse:
 		return true
 	default:
 		return false
