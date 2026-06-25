@@ -2,6 +2,7 @@ package devkeysession
 
 import (
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -107,19 +108,29 @@ func Produce(tpm tpmenroll.TPMDevice, ch Challenge, nowEpochMillis int64) (*Resp
 }
 
 // signBindingContext signs the binding context with the device key and wraps the result as a TPMT_SIGNATURE the
-// broker can parse — PKCS#1 v1.5 over SHA-256, matching the broker's "SHA256withRSA" verify path (the same scheme
-// the enrollment CSR proof-of-possession uses). Only RSA device keys are supported in this slice.
+// broker can parse — over SHA-256, matching the broker's "<hash>withRSA"/"<hash>withECDSA" verify path. Both the
+// enrollment-policy device-key types are supported: RSA (RSASSA, e.g. the test mock's RSA-3072) and EC
+// (ECDSA, e.g. the Windows TPM's EC P-256 device key — the production default).
 func signBindingContext(signer crypto.Signer, bindingCtx []byte) ([]byte, error) {
 	if signer == nil {
 		return nil, errors.New("devkeysession: no device key signer")
 	}
-	if _, ok := signer.Public().(*rsa.PublicKey); !ok {
-		return nil, fmt.Errorf("devkeysession: device key is not RSA (got %T); only RSASSA is wired", signer.Public())
-	}
 	digest := sha256.Sum256(bindingCtx)
-	raw, err := signer.Sign(rand.Reader, digest[:], crypto.SHA256)
-	if err != nil {
-		return nil, fmt.Errorf("devkeysession: device-key sign: %w", err)
+	switch pub := signer.Public().(type) {
+	case *rsa.PublicKey:
+		raw, err := signer.Sign(rand.Reader, digest[:], crypto.SHA256)
+		if err != nil {
+			return nil, fmt.Errorf("devkeysession: device-key RSA sign: %w", err)
+		}
+		return tpmenroll.MarshalRSASSASignature(tpmenroll.AlgSHA256, raw), nil
+	case *ecdsa.PublicKey:
+		der, err := signer.Sign(rand.Reader, digest[:], crypto.SHA256)
+		if err != nil {
+			return nil, fmt.Errorf("devkeysession: device-key ECDSA sign: %w", err)
+		}
+		coordBytes := (pub.Curve.Params().BitSize + 7) / 8
+		return tpmenroll.MarshalECDSASignature(tpmenroll.AlgSHA256, der, coordBytes)
+	default:
+		return nil, fmt.Errorf("devkeysession: unsupported device key type %T (RSA or EC required)", pub)
 	}
-	return tpmenroll.MarshalRSASSASignature(tpmenroll.AlgSHA256, raw), nil
 }

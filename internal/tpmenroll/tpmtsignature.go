@@ -4,7 +4,9 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/asn1"
 	"fmt"
+	"math/big"
 )
 
 // TPMT_SIGNATURE (TCG Part 2) for the AK's RSASSA quote/certify signatures:
@@ -23,6 +25,44 @@ func MarshalRSASSASignature(hashAlg int, sig []byte) []byte {
 	w.u16(hashAlg)
 	w.tpm2b(sig)
 	return w.b
+}
+
+// MarshalECDSASignature wraps a Go ASN.1-DER ECDSA signature (the form a crypto.Signer over an EC key emits,
+// incl. the Windows TPM EC P-256 device key) as a TPMT_SIGNATURE:
+//
+//	sigAlg(UINT16=ECDSA) ‖ hashAlg(UINT16) ‖ signatureR(TPM2B) ‖ signatureS(TPM2B)
+//
+// r/s are left-padded to coordBytes (the curve coordinate width, e.g. 32 for P-256) for canonical TPM-style
+// fixed-width bytes; the backend parser DER-normalizes them for "<hash>withECDSA" verification either way. A
+// non-positive coordBytes falls back to each integer's minimal big-endian magnitude.
+func MarshalECDSASignature(hashAlg int, derSig []byte, coordBytes int) ([]byte, error) {
+	var parsed struct{ R, S *big.Int }
+	if rest, err := asn1.Unmarshal(derSig, &parsed); err != nil {
+		return nil, fmt.Errorf("tpmenroll: ECDSA signature is not ASN.1 DER: %w", err)
+	} else if len(rest) != 0 {
+		return nil, fmt.Errorf("tpmenroll: ECDSA signature has %d trailing bytes", len(rest))
+	}
+	if parsed.R == nil || parsed.S == nil || parsed.R.Sign() <= 0 || parsed.S.Sign() <= 0 {
+		return nil, fmt.Errorf("tpmenroll: ECDSA signature has a non-positive R/S")
+	}
+	w := &tpmtWriter{}
+	w.u16(AlgECDSA)
+	w.u16(hashAlg)
+	w.tpm2b(fixedWidthBigEndian(parsed.R, coordBytes))
+	w.tpm2b(fixedWidthBigEndian(parsed.S, coordBytes))
+	return w.b, nil
+}
+
+// fixedWidthBigEndian renders v as exactly width big-endian bytes (left-padded with zeros); when width is
+// non-positive or smaller than v's magnitude, it returns v's minimal big-endian magnitude.
+func fixedWidthBigEndian(v *big.Int, width int) []byte {
+	b := v.Bytes()
+	if width <= 0 || len(b) >= width {
+		return b
+	}
+	out := make([]byte, width)
+	copy(out[width-len(b):], b)
+	return out
 }
 
 // SignAttestRSASSA produces the AK's TPMT_SIGNATURE over a TPMS_ATTEST: PKCS#1
