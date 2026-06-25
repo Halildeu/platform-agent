@@ -254,7 +254,9 @@ func eccP256SigningTemplate() tpm2.TPMTPublic {
 }
 
 // tpmDeviceSigner adapts the TPM-resident device key to crypto.Signer (for the
-// CSR proof-of-possession). It signs the supplied digest via TPM2_Sign (RSASSA).
+// CSR proof-of-possession + the #548 device-key session binding). The device key is
+// EC P-256, so it signs the supplied digest via TPM2_Sign (ECDSA, SHA-256) and
+// returns an ASN.1-DER ECDSA signature.
 type tpmDeviceSigner struct{ d *WindowsTPMDevice }
 
 func (s *tpmDeviceSigner) Public() crypto.PublicKey {
