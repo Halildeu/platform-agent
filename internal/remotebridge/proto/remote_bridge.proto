@@ -108,7 +108,43 @@ message Envelope {
     DataFrame data_frame = 19;
     ErrorFrame error = 20;
     OperationDispatch operation_dispatch = 21;
+    DeviceKeyChallenge device_key_challenge = 22;
+    DeviceKeyAttestationResponse device_key_attestation_response = 23;
   }
+}
+
+// Faz 22.6 #548 Path A — broker → agent (CONTROL): a broker-nonced challenge the agent answers with a
+// DeviceKeyAttestationResponse. Mirrors platform-backend remote_bridge.proto (FROZEN). ADVISORY: the agent
+// signs a response over the canonical binding context derived from these fields; it trusts nothing here as auth.
+message DeviceKeyChallenge {
+  string challenge_id = 1;             // single-use; broker replay-cache keyed on this
+  string nonce_b64 = 2;                // 32 random bytes, base64-std
+  int64  issued_at_epoch_millis = 3;
+  int64  expires_at_epoch_millis = 4;  // short TTL
+  string transport_peer_key = 5;       // broker-observed mTLS leaf SHA-256 (binding anchor)
+  string protocol_version = 6;         // "device-key-session-v1"
+}
+
+// Faz 22.6 #548 Path A — agent → broker (CONTROL): the fresh device-key session attestation answering a
+// DeviceKeyChallenge. ADVISORY shape only — the broker's DEVICE_KEY_ATTESTATION_REAL verifier re-derives every
+// fact (device_key_pub == mTLS leaf; device_key_sig over the binding context; certify_* TPM residency; ek_*
+// chains to a pinned root). NEVER carries secrets.
+message DeviceKeyAttestationResponse {
+  string challenge_id = 1;
+  string schema = 2;                   // "faz22.6.device-key-session.v1"
+  string device_key_pub_b64 = 3;       // MUST equal the mTLS leaf cert public key
+  string ak_pub_b64 = 4;
+  string ak_name_b64 = 5;
+  string ek_pub_b64 = 6;
+  string ek_cert_b64 = 7;
+  repeated string ek_cert_chain_b64 = 8;
+  string certify_info_b64 = 9;         // TPM2_Certify(device_key) by AK
+  string certify_sig_b64 = 10;
+  string quote_b64 = 11;               // TPM2_Quote; quote.extraData = the broker nonce (freshness)
+  string quote_sig_b64 = 12;
+  string binding_context_b64 = 13;     // canonical: label‖session_id‖challenge_id‖nonce‖transport_peer_key‖expiry
+  string device_key_sig_b64 = 14;      // device key signs binding_context
+  int64  signed_at_epoch_millis = 15;
 }
 
 // Agent → broker on connect. ADVISORY ONLY — never an authorization input.

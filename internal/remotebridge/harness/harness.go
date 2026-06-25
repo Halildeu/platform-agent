@@ -134,12 +134,26 @@ type Config struct {
 	// protocol defect unless an owner-gated product path explicitly wires a
 	// responder.
 	ConsentResponder ConsentResponder
+	// DeviceKeyResponder, when non-nil, answers a broker DeviceKeyChallenge
+	// (Faz 22.6 #548) with a DeviceKeyAttestationResponse. nil keeps the idle
+	// harness fail-closed: device_key_challenge is a protocol defect unless an
+	// owner-gated path wires the TPM-backed responder (gated, default-off —
+	// mirrors the broker's REAL-verifier gate). devkeysession.Respond is the
+	// canonical impl the agent wires here.
+	DeviceKeyResponder DeviceKeyResponder
 }
 
 // ConsentResponder is the endpoint-side policy hook for broker consent prompts.
 // It is intentionally absent by default; production UI/attended consent and
 // bounded pilot auto-consent must opt in through app-level config.
 type ConsentResponder func(ctx context.Context, prompt *pb.ConsentPrompt) (*pb.ConsentResult, error)
+
+// DeviceKeyResponder is the endpoint-side hook that answers a broker
+// DeviceKeyChallenge with a DeviceKeyAttestationResponse (Faz 22.6 #548). It
+// receives the challenge plus the broker sessionId from the CONTROL envelope
+// (which the response signature must commit to). Absent by default — the
+// TPM-backed responder is opt-in. devkeysession.Respond is the canonical impl.
+type DeviceKeyResponder func(ctx context.Context, challenge *pb.DeviceKeyChallenge, sessionID string) (*pb.DeviceKeyAttestationResponse, error)
 
 func (c Config) withDefaults() Config {
 	if c.FirstHeartbeatDeadline <= 0 {
@@ -395,6 +409,8 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 				go h.dispatchOperation(sctx, conn, permit, commandLine, deviceID, sender)
 			case actionConsentPrompt:
 				go h.respondToConsent(sctx, r.env.GetConsentPrompt(), sender)
+			case actionDeviceKeyChallenge:
+				go h.respondToDeviceKeyChallenge(sctx, r.env, sender)
 			case actionDefectClose:
 				h.mu.Lock()
 				h.defects++
@@ -457,6 +473,9 @@ const (
 	// (handleInbound defect-closes operation_dispatch — disabled-by-default).
 	actionDispatch
 	actionConsentPrompt
+	// actionDeviceKeyChallenge: a broker DeviceKeyChallenge arrived and a DeviceKeyResponder is wired (#548) —
+	// respondToDeviceKeyChallenge answers it off the recv loop. Without a responder it defect-closes (default-off).
+	actionDeviceKeyChallenge
 )
 
 // inboundSeqGuard tracks the broker-push sequencing mode of one stream. The
@@ -537,6 +556,13 @@ func (h *Harness) handleInbound(env *pb.Envelope, seqGuard *inboundSeqGuard) (in
 			return actionDefectClose, "unsupported-payload-in-idle"
 		}
 		return actionConsentPrompt, ""
+	case env.GetDeviceKeyChallenge() != nil:
+		// Faz 22.6 #548: a broker device-key challenge. DISABLED-BY-DEFAULT — without a DeviceKeyResponder wired
+		// (the gated, TPM-backed path) it is a protocol defect like any other unsupported idle payload.
+		if h.cfg.DeviceKeyResponder == nil {
+			return actionDefectClose, "unsupported-payload-in-idle"
+		}
+		return actionDeviceKeyChallenge, ""
 	case env.GetOperationDispatch() != nil:
 		// A CONSTRAINED_PTY operation push (T-4). DISABLED-BY-DEFAULT: with no PTY dispatcher wired the agent
 		// has no execution machinery, so — like any other broker payload in idle mode — it is a protocol
@@ -571,6 +597,34 @@ func (h *Harness) respondToConsent(ctx context.Context, prompt *pb.ConsentPrompt
 	}
 	if err := sender.sendConsentResult(result); err != nil {
 		h.logger.Printf("remote-bridge: send consent result failed session=%q err=%v", result.GetSessionId(), err)
+	}
+}
+
+// respondToDeviceKeyChallenge answers a broker DeviceKeyChallenge via the wired DeviceKeyResponder (Faz 22.6
+// #548), echoing the broker sessionId from the CONTROL envelope so the response correlates to this session.
+// Fail-closed: a nil/empty/challengeId-mismatched result sends an error frame instead of a forged attestation.
+func (h *Harness) respondToDeviceKeyChallenge(ctx context.Context, env *pb.Envelope, sender *controlSender) {
+	challenge := env.GetDeviceKeyChallenge()
+	if challenge == nil {
+		_ = sender.sendError("nil-device-key-challenge", false)
+		return
+	}
+	resp, err := h.cfg.DeviceKeyResponder(ctx, challenge, env.GetSessionId())
+	if err != nil {
+		h.logger.Printf("remote-bridge: device-key responder failed session=%q err=%v", env.GetSessionId(), err)
+		_ = sender.sendError("device-key-responder-failed", false)
+		return
+	}
+	if resp == nil {
+		_ = sender.sendError("device-key-responder-empty-result", false)
+		return
+	}
+	if resp.GetChallengeId() != challenge.GetChallengeId() {
+		_ = sender.sendError("device-key-response-challenge-mismatch", false)
+		return
+	}
+	if err := sender.sendDeviceKeyAttestationResponse(env.GetSessionId(), resp); err != nil {
+		h.logger.Printf("remote-bridge: send device-key response failed session=%q err=%v", env.GetSessionId(), err)
 	}
 }
 

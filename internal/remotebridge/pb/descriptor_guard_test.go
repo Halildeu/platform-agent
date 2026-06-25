@@ -74,23 +74,54 @@ func TestEnvelopeWireShapeFrozen(t *testing.T) {
 		"kill":                 16,
 		"audit_event":          17,
 		"heartbeat":            18,
-		"data_frame":           19,
-		"error":                20,
-		"operation_dispatch":   21,
+		"data_frame":                     19,
+		"error":                          20,
+		"operation_dispatch":             21,
+		"device_key_challenge":           22,
+		"device_key_attestation_response": 23,
 	})
 	payload := md.Oneofs().ByName("payload")
 	if payload == nil {
 		t.Fatal("oneof payload missing")
 	}
-	if got, want := payload.Fields().Len(), 12; got != want {
+	if got, want := payload.Fields().Len(), 14; got != want {
 		t.Fatalf("oneof payload has %d members, want %d", got, want)
 	}
 	for i := 0; i < payload.Fields().Len(); i++ {
 		fd := payload.Fields().Get(i)
-		if fd.Number() < 10 || fd.Number() > 21 {
-			t.Errorf("oneof member %s outside the frozen 10-21 range: %d", fd.Name(), fd.Number())
+		if fd.Number() < 10 || fd.Number() > 23 {
+			t.Errorf("oneof member %s outside the frozen 10-23 range: %d", fd.Name(), fd.Number())
 		}
 	}
+}
+
+// Faz 22.6 #548 — the 2 CONTROL payloads' wire shape is FROZEN with platform-backend's proto.
+func TestDeviceKeySessionWireShapeFrozen(t *testing.T) {
+	requireFieldNumbers(t, (&DeviceKeyChallenge{}).ProtoReflect().Descriptor(), map[string]int32{
+		"challenge_id":           1,
+		"nonce_b64":              2,
+		"issued_at_epoch_millis": 3,
+		"expires_at_epoch_millis": 4,
+		"transport_peer_key":     5,
+		"protocol_version":       6,
+	})
+	requireFieldNumbers(t, (&DeviceKeyAttestationResponse{}).ProtoReflect().Descriptor(), map[string]int32{
+		"challenge_id":           1,
+		"schema":                 2,
+		"device_key_pub_b64":     3,
+		"ak_pub_b64":             4,
+		"ak_name_b64":            5,
+		"ek_pub_b64":             6,
+		"ek_cert_b64":            7,
+		"ek_cert_chain_b64":      8,
+		"certify_info_b64":       9,
+		"certify_sig_b64":        10,
+		"quote_b64":              11,
+		"quote_sig_b64":          12,
+		"binding_context_b64":    13,
+		"device_key_sig_b64":     14,
+		"signed_at_epoch_millis": 15,
+	})
 }
 
 func TestOperationPermitWireShapeFrozen(t *testing.T) {

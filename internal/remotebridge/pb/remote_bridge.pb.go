@@ -234,6 +234,8 @@ type Envelope struct {
 	//	*Envelope_DataFrame
 	//	*Envelope_Error
 	//	*Envelope_OperationDispatch
+	//	*Envelope_DeviceKeyChallenge
+	//	*Envelope_DeviceKeyAttestationResponse
 	Payload       isEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -426,6 +428,24 @@ func (x *Envelope) GetOperationDispatch() *OperationDispatch {
 	return nil
 }
 
+func (x *Envelope) GetDeviceKeyChallenge() *DeviceKeyChallenge {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_DeviceKeyChallenge); ok {
+			return x.DeviceKeyChallenge
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetDeviceKeyAttestationResponse() *DeviceKeyAttestationResponse {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_DeviceKeyAttestationResponse); ok {
+			return x.DeviceKeyAttestationResponse
+		}
+	}
+	return nil
+}
+
 type isEnvelope_Payload interface {
 	isEnvelope_Payload()
 }
@@ -478,6 +498,14 @@ type Envelope_OperationDispatch struct {
 	OperationDispatch *OperationDispatch `protobuf:"bytes,21,opt,name=operation_dispatch,json=operationDispatch,proto3,oneof"`
 }
 
+type Envelope_DeviceKeyChallenge struct {
+	DeviceKeyChallenge *DeviceKeyChallenge `protobuf:"bytes,22,opt,name=device_key_challenge,json=deviceKeyChallenge,proto3,oneof"`
+}
+
+type Envelope_DeviceKeyAttestationResponse struct {
+	DeviceKeyAttestationResponse *DeviceKeyAttestationResponse `protobuf:"bytes,23,opt,name=device_key_attestation_response,json=deviceKeyAttestationResponse,proto3,oneof"`
+}
+
 func (*Envelope_AgentHello) isEnvelope_Payload() {}
 
 func (*Envelope_SessionRequest) isEnvelope_Payload() {}
@@ -502,6 +530,257 @@ func (*Envelope_Error) isEnvelope_Payload() {}
 
 func (*Envelope_OperationDispatch) isEnvelope_Payload() {}
 
+func (*Envelope_DeviceKeyChallenge) isEnvelope_Payload() {}
+
+func (*Envelope_DeviceKeyAttestationResponse) isEnvelope_Payload() {}
+
+// Faz 22.6 #548 Path A — broker → agent (CONTROL): a broker-nonced challenge the agent answers with a
+// DeviceKeyAttestationResponse. Mirrors platform-backend remote_bridge.proto (FROZEN). ADVISORY: the agent
+// signs a response over the canonical binding context derived from these fields; it trusts nothing here as auth.
+type DeviceKeyChallenge struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	ChallengeId          string                 `protobuf:"bytes,1,opt,name=challenge_id,json=challengeId,proto3" json:"challenge_id,omitempty"` // single-use; broker replay-cache keyed on this
+	NonceB64             string                 `protobuf:"bytes,2,opt,name=nonce_b64,json=nonceB64,proto3" json:"nonce_b64,omitempty"`          // 32 random bytes, base64-std
+	IssuedAtEpochMillis  int64                  `protobuf:"varint,3,opt,name=issued_at_epoch_millis,json=issuedAtEpochMillis,proto3" json:"issued_at_epoch_millis,omitempty"`
+	ExpiresAtEpochMillis int64                  `protobuf:"varint,4,opt,name=expires_at_epoch_millis,json=expiresAtEpochMillis,proto3" json:"expires_at_epoch_millis,omitempty"` // short TTL
+	TransportPeerKey     string                 `protobuf:"bytes,5,opt,name=transport_peer_key,json=transportPeerKey,proto3" json:"transport_peer_key,omitempty"`                // broker-observed mTLS leaf SHA-256 (binding anchor)
+	ProtocolVersion      string                 `protobuf:"bytes,6,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`                     // "device-key-session-v1"
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *DeviceKeyChallenge) Reset() {
+	*x = DeviceKeyChallenge{}
+	mi := &file_remote_bridge_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeviceKeyChallenge) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeviceKeyChallenge) ProtoMessage() {}
+
+func (x *DeviceKeyChallenge) ProtoReflect() protoreflect.Message {
+	mi := &file_remote_bridge_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeviceKeyChallenge.ProtoReflect.Descriptor instead.
+func (*DeviceKeyChallenge) Descriptor() ([]byte, []int) {
+	return file_remote_bridge_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *DeviceKeyChallenge) GetChallengeId() string {
+	if x != nil {
+		return x.ChallengeId
+	}
+	return ""
+}
+
+func (x *DeviceKeyChallenge) GetNonceB64() string {
+	if x != nil {
+		return x.NonceB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyChallenge) GetIssuedAtEpochMillis() int64 {
+	if x != nil {
+		return x.IssuedAtEpochMillis
+	}
+	return 0
+}
+
+func (x *DeviceKeyChallenge) GetExpiresAtEpochMillis() int64 {
+	if x != nil {
+		return x.ExpiresAtEpochMillis
+	}
+	return 0
+}
+
+func (x *DeviceKeyChallenge) GetTransportPeerKey() string {
+	if x != nil {
+		return x.TransportPeerKey
+	}
+	return ""
+}
+
+func (x *DeviceKeyChallenge) GetProtocolVersion() string {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return ""
+}
+
+// Faz 22.6 #548 Path A — agent → broker (CONTROL): the fresh device-key session attestation answering a
+// DeviceKeyChallenge. ADVISORY shape only — the broker's DEVICE_KEY_ATTESTATION_REAL verifier re-derives every
+// fact (device_key_pub == mTLS leaf; device_key_sig over the binding context; certify_* TPM residency; ek_*
+// chains to a pinned root). NEVER carries secrets.
+type DeviceKeyAttestationResponse struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	ChallengeId         string                 `protobuf:"bytes,1,opt,name=challenge_id,json=challengeId,proto3" json:"challenge_id,omitempty"`
+	Schema              string                 `protobuf:"bytes,2,opt,name=schema,proto3" json:"schema,omitempty"`                                              // "faz22.6.device-key-session.v1"
+	DeviceKeyPubB64     string                 `protobuf:"bytes,3,opt,name=device_key_pub_b64,json=deviceKeyPubB64,proto3" json:"device_key_pub_b64,omitempty"` // MUST equal the mTLS leaf cert public key
+	AkPubB64            string                 `protobuf:"bytes,4,opt,name=ak_pub_b64,json=akPubB64,proto3" json:"ak_pub_b64,omitempty"`
+	AkNameB64           string                 `protobuf:"bytes,5,opt,name=ak_name_b64,json=akNameB64,proto3" json:"ak_name_b64,omitempty"`
+	EkPubB64            string                 `protobuf:"bytes,6,opt,name=ek_pub_b64,json=ekPubB64,proto3" json:"ek_pub_b64,omitempty"`
+	EkCertB64           string                 `protobuf:"bytes,7,opt,name=ek_cert_b64,json=ekCertB64,proto3" json:"ek_cert_b64,omitempty"`
+	EkCertChainB64      []string               `protobuf:"bytes,8,rep,name=ek_cert_chain_b64,json=ekCertChainB64,proto3" json:"ek_cert_chain_b64,omitempty"`
+	CertifyInfoB64      string                 `protobuf:"bytes,9,opt,name=certify_info_b64,json=certifyInfoB64,proto3" json:"certify_info_b64,omitempty"` // TPM2_Certify(device_key) by AK
+	CertifySigB64       string                 `protobuf:"bytes,10,opt,name=certify_sig_b64,json=certifySigB64,proto3" json:"certify_sig_b64,omitempty"`
+	QuoteB64            string                 `protobuf:"bytes,11,opt,name=quote_b64,json=quoteB64,proto3" json:"quote_b64,omitempty"` // TPM2_Quote; quote.extraData = the broker nonce (freshness)
+	QuoteSigB64         string                 `protobuf:"bytes,12,opt,name=quote_sig_b64,json=quoteSigB64,proto3" json:"quote_sig_b64,omitempty"`
+	BindingContextB64   string                 `protobuf:"bytes,13,opt,name=binding_context_b64,json=bindingContextB64,proto3" json:"binding_context_b64,omitempty"` // canonical: label‖session_id‖challenge_id‖nonce‖transport_peer_key‖expiry
+	DeviceKeySigB64     string                 `protobuf:"bytes,14,opt,name=device_key_sig_b64,json=deviceKeySigB64,proto3" json:"device_key_sig_b64,omitempty"`     // device key signs binding_context
+	SignedAtEpochMillis int64                  `protobuf:"varint,15,opt,name=signed_at_epoch_millis,json=signedAtEpochMillis,proto3" json:"signed_at_epoch_millis,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *DeviceKeyAttestationResponse) Reset() {
+	*x = DeviceKeyAttestationResponse{}
+	mi := &file_remote_bridge_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeviceKeyAttestationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeviceKeyAttestationResponse) ProtoMessage() {}
+
+func (x *DeviceKeyAttestationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_remote_bridge_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeviceKeyAttestationResponse.ProtoReflect.Descriptor instead.
+func (*DeviceKeyAttestationResponse) Descriptor() ([]byte, []int) {
+	return file_remote_bridge_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *DeviceKeyAttestationResponse) GetChallengeId() string {
+	if x != nil {
+		return x.ChallengeId
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetSchema() string {
+	if x != nil {
+		return x.Schema
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetDeviceKeyPubB64() string {
+	if x != nil {
+		return x.DeviceKeyPubB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetAkPubB64() string {
+	if x != nil {
+		return x.AkPubB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetAkNameB64() string {
+	if x != nil {
+		return x.AkNameB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetEkPubB64() string {
+	if x != nil {
+		return x.EkPubB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetEkCertB64() string {
+	if x != nil {
+		return x.EkCertB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetEkCertChainB64() []string {
+	if x != nil {
+		return x.EkCertChainB64
+	}
+	return nil
+}
+
+func (x *DeviceKeyAttestationResponse) GetCertifyInfoB64() string {
+	if x != nil {
+		return x.CertifyInfoB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetCertifySigB64() string {
+	if x != nil {
+		return x.CertifySigB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetQuoteB64() string {
+	if x != nil {
+		return x.QuoteB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetQuoteSigB64() string {
+	if x != nil {
+		return x.QuoteSigB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetBindingContextB64() string {
+	if x != nil {
+		return x.BindingContextB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetDeviceKeySigB64() string {
+	if x != nil {
+		return x.DeviceKeySigB64
+	}
+	return ""
+}
+
+func (x *DeviceKeyAttestationResponse) GetSignedAtEpochMillis() int64 {
+	if x != nil {
+		return x.SignedAtEpochMillis
+	}
+	return 0
+}
+
 // Agent → broker on connect. ADVISORY ONLY — never an authorization input.
 // The broker re-derives every authoritative fact through the B1.4 verifiers
 // into RemoteBridgeTrustEvidence; nothing here is trusted as a boolean.
@@ -519,7 +798,7 @@ type AgentHello struct {
 
 func (x *AgentHello) Reset() {
 	*x = AgentHello{}
-	mi := &file_remote_bridge_proto_msgTypes[1]
+	mi := &file_remote_bridge_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -531,7 +810,7 @@ func (x *AgentHello) String() string {
 func (*AgentHello) ProtoMessage() {}
 
 func (x *AgentHello) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[1]
+	mi := &file_remote_bridge_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -544,7 +823,7 @@ func (x *AgentHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentHello.ProtoReflect.Descriptor instead.
 func (*AgentHello) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{1}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *AgentHello) GetAgentVersion() string {
@@ -603,7 +882,7 @@ type SessionRequest struct {
 
 func (x *SessionRequest) Reset() {
 	*x = SessionRequest{}
-	mi := &file_remote_bridge_proto_msgTypes[2]
+	mi := &file_remote_bridge_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -615,7 +894,7 @@ func (x *SessionRequest) String() string {
 func (*SessionRequest) ProtoMessage() {}
 
 func (x *SessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[2]
+	mi := &file_remote_bridge_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -628,7 +907,7 @@ func (x *SessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionRequest.ProtoReflect.Descriptor instead.
 func (*SessionRequest) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{2}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *SessionRequest) GetSessionId() string {
@@ -680,7 +959,7 @@ type ConsentPrompt struct {
 
 func (x *ConsentPrompt) Reset() {
 	*x = ConsentPrompt{}
-	mi := &file_remote_bridge_proto_msgTypes[3]
+	mi := &file_remote_bridge_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -692,7 +971,7 @@ func (x *ConsentPrompt) String() string {
 func (*ConsentPrompt) ProtoMessage() {}
 
 func (x *ConsentPrompt) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[3]
+	mi := &file_remote_bridge_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -705,7 +984,7 @@ func (x *ConsentPrompt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConsentPrompt.ProtoReflect.Descriptor instead.
 func (*ConsentPrompt) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{3}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ConsentPrompt) GetSessionId() string {
@@ -757,7 +1036,7 @@ type ConsentResult struct {
 
 func (x *ConsentResult) Reset() {
 	*x = ConsentResult{}
-	mi := &file_remote_bridge_proto_msgTypes[4]
+	mi := &file_remote_bridge_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -769,7 +1048,7 @@ func (x *ConsentResult) String() string {
 func (*ConsentResult) ProtoMessage() {}
 
 func (x *ConsentResult) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[4]
+	mi := &file_remote_bridge_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -782,7 +1061,7 @@ func (x *ConsentResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConsentResult.ProtoReflect.Descriptor instead.
 func (*ConsentResult) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{4}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ConsentResult) GetSessionId() string {
@@ -836,7 +1115,7 @@ type OperationRequest struct {
 
 func (x *OperationRequest) Reset() {
 	*x = OperationRequest{}
-	mi := &file_remote_bridge_proto_msgTypes[5]
+	mi := &file_remote_bridge_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -848,7 +1127,7 @@ func (x *OperationRequest) String() string {
 func (*OperationRequest) ProtoMessage() {}
 
 func (x *OperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[5]
+	mi := &file_remote_bridge_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -861,7 +1140,7 @@ func (x *OperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRequest.ProtoReflect.Descriptor instead.
 func (*OperationRequest) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{5}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *OperationRequest) GetSessionId() string {
@@ -920,7 +1199,7 @@ type OperationPermit struct {
 
 func (x *OperationPermit) Reset() {
 	*x = OperationPermit{}
-	mi := &file_remote_bridge_proto_msgTypes[6]
+	mi := &file_remote_bridge_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -932,7 +1211,7 @@ func (x *OperationPermit) String() string {
 func (*OperationPermit) ProtoMessage() {}
 
 func (x *OperationPermit) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[6]
+	mi := &file_remote_bridge_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -945,7 +1224,7 @@ func (x *OperationPermit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationPermit.ProtoReflect.Descriptor instead.
 func (*OperationPermit) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{6}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *OperationPermit) GetAlg() string {
@@ -1071,7 +1350,7 @@ type OperationDispatch struct {
 
 func (x *OperationDispatch) Reset() {
 	*x = OperationDispatch{}
-	mi := &file_remote_bridge_proto_msgTypes[7]
+	mi := &file_remote_bridge_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1083,7 +1362,7 @@ func (x *OperationDispatch) String() string {
 func (*OperationDispatch) ProtoMessage() {}
 
 func (x *OperationDispatch) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[7]
+	mi := &file_remote_bridge_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1096,7 +1375,7 @@ func (x *OperationDispatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationDispatch.ProtoReflect.Descriptor instead.
 func (*OperationDispatch) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{7}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *OperationDispatch) GetPermit() *OperationPermit {
@@ -1127,7 +1406,7 @@ type Kill struct {
 
 func (x *Kill) Reset() {
 	*x = Kill{}
-	mi := &file_remote_bridge_proto_msgTypes[8]
+	mi := &file_remote_bridge_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1139,7 +1418,7 @@ func (x *Kill) String() string {
 func (*Kill) ProtoMessage() {}
 
 func (x *Kill) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[8]
+	mi := &file_remote_bridge_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1152,7 +1431,7 @@ func (x *Kill) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Kill.ProtoReflect.Descriptor instead.
 func (*Kill) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{8}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Kill) GetSessionId() string {
@@ -1189,7 +1468,7 @@ type AuditEvent struct {
 
 func (x *AuditEvent) Reset() {
 	*x = AuditEvent{}
-	mi := &file_remote_bridge_proto_msgTypes[9]
+	mi := &file_remote_bridge_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1201,7 +1480,7 @@ func (x *AuditEvent) String() string {
 func (*AuditEvent) ProtoMessage() {}
 
 func (x *AuditEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[9]
+	mi := &file_remote_bridge_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1214,7 +1493,7 @@ func (x *AuditEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuditEvent.ProtoReflect.Descriptor instead.
 func (*AuditEvent) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{9}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AuditEvent) GetSessionId() string {
@@ -1257,7 +1536,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_remote_bridge_proto_msgTypes[10]
+	mi := &file_remote_bridge_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1269,7 +1548,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[10]
+	mi := &file_remote_bridge_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1282,7 +1561,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{10}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Heartbeat) GetHeartbeatIntervalMillis() int64 {
@@ -1322,7 +1601,7 @@ type DataFrame struct {
 
 func (x *DataFrame) Reset() {
 	*x = DataFrame{}
-	mi := &file_remote_bridge_proto_msgTypes[11]
+	mi := &file_remote_bridge_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1334,7 +1613,7 @@ func (x *DataFrame) String() string {
 func (*DataFrame) ProtoMessage() {}
 
 func (x *DataFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[11]
+	mi := &file_remote_bridge_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1347,7 +1626,7 @@ func (x *DataFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataFrame.ProtoReflect.Descriptor instead.
 func (*DataFrame) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{11}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DataFrame) GetStreamId() string {
@@ -1398,7 +1677,7 @@ type ErrorFrame struct {
 
 func (x *ErrorFrame) Reset() {
 	*x = ErrorFrame{}
-	mi := &file_remote_bridge_proto_msgTypes[12]
+	mi := &file_remote_bridge_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1410,7 +1689,7 @@ func (x *ErrorFrame) String() string {
 func (*ErrorFrame) ProtoMessage() {}
 
 func (x *ErrorFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_remote_bridge_proto_msgTypes[12]
+	mi := &file_remote_bridge_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1423,7 +1702,7 @@ func (x *ErrorFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ErrorFrame.ProtoReflect.Descriptor instead.
 func (*ErrorFrame) Descriptor() ([]byte, []int) {
-	return file_remote_bridge_proto_rawDescGZIP(), []int{12}
+	return file_remote_bridge_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ErrorFrame) GetCode() string {
@@ -1451,7 +1730,7 @@ var File_remote_bridge_proto protoreflect.FileDescriptor
 
 const file_remote_bridge_proto_rawDesc = "" +
 	"\n" +
-	"\x13remote_bridge.proto\x12\x1dendpointadmin.remotebridge.v1\"\xe2\t\n" +
+	"\x13remote_bridge.proto\x12\x1dendpointadmin.remotebridge.v1\"\xd0\v\n" +
 	"\bEnvelope\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1b\n" +
@@ -1475,8 +1754,36 @@ const file_remote_bridge_proto_rawDesc = "" +
 	"\n" +
 	"data_frame\x18\x13 \x01(\v2(.endpointadmin.remotebridge.v1.DataFrameH\x00R\tdataFrame\x12A\n" +
 	"\x05error\x18\x14 \x01(\v2).endpointadmin.remotebridge.v1.ErrorFrameH\x00R\x05error\x12a\n" +
-	"\x12operation_dispatch\x18\x15 \x01(\v20.endpointadmin.remotebridge.v1.OperationDispatchH\x00R\x11operationDispatchB\t\n" +
-	"\apayload\"\xc2\x02\n" +
+	"\x12operation_dispatch\x18\x15 \x01(\v20.endpointadmin.remotebridge.v1.OperationDispatchH\x00R\x11operationDispatch\x12e\n" +
+	"\x14device_key_challenge\x18\x16 \x01(\v21.endpointadmin.remotebridge.v1.DeviceKeyChallengeH\x00R\x12deviceKeyChallenge\x12\x84\x01\n" +
+	"\x1fdevice_key_attestation_response\x18\x17 \x01(\v2;.endpointadmin.remotebridge.v1.DeviceKeyAttestationResponseH\x00R\x1cdeviceKeyAttestationResponseB\t\n" +
+	"\apayload\"\x99\x02\n" +
+	"\x12DeviceKeyChallenge\x12!\n" +
+	"\fchallenge_id\x18\x01 \x01(\tR\vchallengeId\x12\x1b\n" +
+	"\tnonce_b64\x18\x02 \x01(\tR\bnonceB64\x123\n" +
+	"\x16issued_at_epoch_millis\x18\x03 \x01(\x03R\x13issuedAtEpochMillis\x125\n" +
+	"\x17expires_at_epoch_millis\x18\x04 \x01(\x03R\x14expiresAtEpochMillis\x12,\n" +
+	"\x12transport_peer_key\x18\x05 \x01(\tR\x10transportPeerKey\x12)\n" +
+	"\x10protocol_version\x18\x06 \x01(\tR\x0fprotocolVersion\"\xd2\x04\n" +
+	"\x1cDeviceKeyAttestationResponse\x12!\n" +
+	"\fchallenge_id\x18\x01 \x01(\tR\vchallengeId\x12\x16\n" +
+	"\x06schema\x18\x02 \x01(\tR\x06schema\x12+\n" +
+	"\x12device_key_pub_b64\x18\x03 \x01(\tR\x0fdeviceKeyPubB64\x12\x1c\n" +
+	"\n" +
+	"ak_pub_b64\x18\x04 \x01(\tR\bakPubB64\x12\x1e\n" +
+	"\vak_name_b64\x18\x05 \x01(\tR\takNameB64\x12\x1c\n" +
+	"\n" +
+	"ek_pub_b64\x18\x06 \x01(\tR\bekPubB64\x12\x1e\n" +
+	"\vek_cert_b64\x18\a \x01(\tR\tekCertB64\x12)\n" +
+	"\x11ek_cert_chain_b64\x18\b \x03(\tR\x0eekCertChainB64\x12(\n" +
+	"\x10certify_info_b64\x18\t \x01(\tR\x0ecertifyInfoB64\x12&\n" +
+	"\x0fcertify_sig_b64\x18\n" +
+	" \x01(\tR\rcertifySigB64\x12\x1b\n" +
+	"\tquote_b64\x18\v \x01(\tR\bquoteB64\x12\"\n" +
+	"\rquote_sig_b64\x18\f \x01(\tR\vquoteSigB64\x12.\n" +
+	"\x13binding_context_b64\x18\r \x01(\tR\x11bindingContextB64\x12+\n" +
+	"\x12device_key_sig_b64\x18\x0e \x01(\tR\x0fdeviceKeySigB64\x123\n" +
+	"\x16signed_at_epoch_millis\x18\x0f \x01(\x03R\x13signedAtEpochMillis\"\xc2\x02\n" +
 	"\n" +
 	"AgentHello\x12#\n" +
 	"\ragent_version\x18\x01 \x01(\tR\fagentVersion\x12\x1b\n" +
@@ -1597,54 +1904,58 @@ func file_remote_bridge_proto_rawDescGZIP() []byte {
 }
 
 var file_remote_bridge_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_remote_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_remote_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_remote_bridge_proto_goTypes = []any{
-	(Capability)(0),           // 0: endpointadmin.remotebridge.v1.Capability
-	(WireOperation)(0),        // 1: endpointadmin.remotebridge.v1.WireOperation
-	(ChannelType)(0),          // 2: endpointadmin.remotebridge.v1.ChannelType
-	(*Envelope)(nil),          // 3: endpointadmin.remotebridge.v1.Envelope
-	(*AgentHello)(nil),        // 4: endpointadmin.remotebridge.v1.AgentHello
-	(*SessionRequest)(nil),    // 5: endpointadmin.remotebridge.v1.SessionRequest
-	(*ConsentPrompt)(nil),     // 6: endpointadmin.remotebridge.v1.ConsentPrompt
-	(*ConsentResult)(nil),     // 7: endpointadmin.remotebridge.v1.ConsentResult
-	(*OperationRequest)(nil),  // 8: endpointadmin.remotebridge.v1.OperationRequest
-	(*OperationPermit)(nil),   // 9: endpointadmin.remotebridge.v1.OperationPermit
-	(*OperationDispatch)(nil), // 10: endpointadmin.remotebridge.v1.OperationDispatch
-	(*Kill)(nil),              // 11: endpointadmin.remotebridge.v1.Kill
-	(*AuditEvent)(nil),        // 12: endpointadmin.remotebridge.v1.AuditEvent
-	(*Heartbeat)(nil),         // 13: endpointadmin.remotebridge.v1.Heartbeat
-	(*DataFrame)(nil),         // 14: endpointadmin.remotebridge.v1.DataFrame
-	(*ErrorFrame)(nil),        // 15: endpointadmin.remotebridge.v1.ErrorFrame
+	(Capability)(0),                      // 0: endpointadmin.remotebridge.v1.Capability
+	(WireOperation)(0),                   // 1: endpointadmin.remotebridge.v1.WireOperation
+	(ChannelType)(0),                     // 2: endpointadmin.remotebridge.v1.ChannelType
+	(*Envelope)(nil),                     // 3: endpointadmin.remotebridge.v1.Envelope
+	(*DeviceKeyChallenge)(nil),           // 4: endpointadmin.remotebridge.v1.DeviceKeyChallenge
+	(*DeviceKeyAttestationResponse)(nil), // 5: endpointadmin.remotebridge.v1.DeviceKeyAttestationResponse
+	(*AgentHello)(nil),                   // 6: endpointadmin.remotebridge.v1.AgentHello
+	(*SessionRequest)(nil),               // 7: endpointadmin.remotebridge.v1.SessionRequest
+	(*ConsentPrompt)(nil),                // 8: endpointadmin.remotebridge.v1.ConsentPrompt
+	(*ConsentResult)(nil),                // 9: endpointadmin.remotebridge.v1.ConsentResult
+	(*OperationRequest)(nil),             // 10: endpointadmin.remotebridge.v1.OperationRequest
+	(*OperationPermit)(nil),              // 11: endpointadmin.remotebridge.v1.OperationPermit
+	(*OperationDispatch)(nil),            // 12: endpointadmin.remotebridge.v1.OperationDispatch
+	(*Kill)(nil),                         // 13: endpointadmin.remotebridge.v1.Kill
+	(*AuditEvent)(nil),                   // 14: endpointadmin.remotebridge.v1.AuditEvent
+	(*Heartbeat)(nil),                    // 15: endpointadmin.remotebridge.v1.Heartbeat
+	(*DataFrame)(nil),                    // 16: endpointadmin.remotebridge.v1.DataFrame
+	(*ErrorFrame)(nil),                   // 17: endpointadmin.remotebridge.v1.ErrorFrame
 }
 var file_remote_bridge_proto_depIdxs = []int32{
 	2,  // 0: endpointadmin.remotebridge.v1.Envelope.channel_type:type_name -> endpointadmin.remotebridge.v1.ChannelType
-	4,  // 1: endpointadmin.remotebridge.v1.Envelope.agent_hello:type_name -> endpointadmin.remotebridge.v1.AgentHello
-	5,  // 2: endpointadmin.remotebridge.v1.Envelope.session_request:type_name -> endpointadmin.remotebridge.v1.SessionRequest
-	6,  // 3: endpointadmin.remotebridge.v1.Envelope.consent_prompt:type_name -> endpointadmin.remotebridge.v1.ConsentPrompt
-	7,  // 4: endpointadmin.remotebridge.v1.Envelope.consent_result:type_name -> endpointadmin.remotebridge.v1.ConsentResult
-	8,  // 5: endpointadmin.remotebridge.v1.Envelope.operation_request:type_name -> endpointadmin.remotebridge.v1.OperationRequest
-	9,  // 6: endpointadmin.remotebridge.v1.Envelope.operation_permit:type_name -> endpointadmin.remotebridge.v1.OperationPermit
-	11, // 7: endpointadmin.remotebridge.v1.Envelope.kill:type_name -> endpointadmin.remotebridge.v1.Kill
-	12, // 8: endpointadmin.remotebridge.v1.Envelope.audit_event:type_name -> endpointadmin.remotebridge.v1.AuditEvent
-	13, // 9: endpointadmin.remotebridge.v1.Envelope.heartbeat:type_name -> endpointadmin.remotebridge.v1.Heartbeat
-	14, // 10: endpointadmin.remotebridge.v1.Envelope.data_frame:type_name -> endpointadmin.remotebridge.v1.DataFrame
-	15, // 11: endpointadmin.remotebridge.v1.Envelope.error:type_name -> endpointadmin.remotebridge.v1.ErrorFrame
-	10, // 12: endpointadmin.remotebridge.v1.Envelope.operation_dispatch:type_name -> endpointadmin.remotebridge.v1.OperationDispatch
-	0,  // 13: endpointadmin.remotebridge.v1.AgentHello.advertised_capabilities:type_name -> endpointadmin.remotebridge.v1.Capability
-	0,  // 14: endpointadmin.remotebridge.v1.SessionRequest.requested_capabilities:type_name -> endpointadmin.remotebridge.v1.Capability
-	0,  // 15: endpointadmin.remotebridge.v1.ConsentPrompt.capabilities:type_name -> endpointadmin.remotebridge.v1.Capability
-	1,  // 16: endpointadmin.remotebridge.v1.OperationRequest.operation:type_name -> endpointadmin.remotebridge.v1.WireOperation
-	0,  // 17: endpointadmin.remotebridge.v1.OperationPermit.capability:type_name -> endpointadmin.remotebridge.v1.Capability
-	9,  // 18: endpointadmin.remotebridge.v1.OperationDispatch.permit:type_name -> endpointadmin.remotebridge.v1.OperationPermit
-	3,  // 19: endpointadmin.remotebridge.v1.RemoteBridge.Connect:input_type -> endpointadmin.remotebridge.v1.Envelope
-	3,  // 20: endpointadmin.remotebridge.v1.RemoteBridge.Data:input_type -> endpointadmin.remotebridge.v1.Envelope
-	3,  // 21: endpointadmin.remotebridge.v1.RemoteBridge.Connect:output_type -> endpointadmin.remotebridge.v1.Envelope
-	3,  // 22: endpointadmin.remotebridge.v1.RemoteBridge.Data:output_type -> endpointadmin.remotebridge.v1.Envelope
-	21, // [21:23] is the sub-list for method output_type
-	19, // [19:21] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	6,  // 1: endpointadmin.remotebridge.v1.Envelope.agent_hello:type_name -> endpointadmin.remotebridge.v1.AgentHello
+	7,  // 2: endpointadmin.remotebridge.v1.Envelope.session_request:type_name -> endpointadmin.remotebridge.v1.SessionRequest
+	8,  // 3: endpointadmin.remotebridge.v1.Envelope.consent_prompt:type_name -> endpointadmin.remotebridge.v1.ConsentPrompt
+	9,  // 4: endpointadmin.remotebridge.v1.Envelope.consent_result:type_name -> endpointadmin.remotebridge.v1.ConsentResult
+	10, // 5: endpointadmin.remotebridge.v1.Envelope.operation_request:type_name -> endpointadmin.remotebridge.v1.OperationRequest
+	11, // 6: endpointadmin.remotebridge.v1.Envelope.operation_permit:type_name -> endpointadmin.remotebridge.v1.OperationPermit
+	13, // 7: endpointadmin.remotebridge.v1.Envelope.kill:type_name -> endpointadmin.remotebridge.v1.Kill
+	14, // 8: endpointadmin.remotebridge.v1.Envelope.audit_event:type_name -> endpointadmin.remotebridge.v1.AuditEvent
+	15, // 9: endpointadmin.remotebridge.v1.Envelope.heartbeat:type_name -> endpointadmin.remotebridge.v1.Heartbeat
+	16, // 10: endpointadmin.remotebridge.v1.Envelope.data_frame:type_name -> endpointadmin.remotebridge.v1.DataFrame
+	17, // 11: endpointadmin.remotebridge.v1.Envelope.error:type_name -> endpointadmin.remotebridge.v1.ErrorFrame
+	12, // 12: endpointadmin.remotebridge.v1.Envelope.operation_dispatch:type_name -> endpointadmin.remotebridge.v1.OperationDispatch
+	4,  // 13: endpointadmin.remotebridge.v1.Envelope.device_key_challenge:type_name -> endpointadmin.remotebridge.v1.DeviceKeyChallenge
+	5,  // 14: endpointadmin.remotebridge.v1.Envelope.device_key_attestation_response:type_name -> endpointadmin.remotebridge.v1.DeviceKeyAttestationResponse
+	0,  // 15: endpointadmin.remotebridge.v1.AgentHello.advertised_capabilities:type_name -> endpointadmin.remotebridge.v1.Capability
+	0,  // 16: endpointadmin.remotebridge.v1.SessionRequest.requested_capabilities:type_name -> endpointadmin.remotebridge.v1.Capability
+	0,  // 17: endpointadmin.remotebridge.v1.ConsentPrompt.capabilities:type_name -> endpointadmin.remotebridge.v1.Capability
+	1,  // 18: endpointadmin.remotebridge.v1.OperationRequest.operation:type_name -> endpointadmin.remotebridge.v1.WireOperation
+	0,  // 19: endpointadmin.remotebridge.v1.OperationPermit.capability:type_name -> endpointadmin.remotebridge.v1.Capability
+	11, // 20: endpointadmin.remotebridge.v1.OperationDispatch.permit:type_name -> endpointadmin.remotebridge.v1.OperationPermit
+	3,  // 21: endpointadmin.remotebridge.v1.RemoteBridge.Connect:input_type -> endpointadmin.remotebridge.v1.Envelope
+	3,  // 22: endpointadmin.remotebridge.v1.RemoteBridge.Data:input_type -> endpointadmin.remotebridge.v1.Envelope
+	3,  // 23: endpointadmin.remotebridge.v1.RemoteBridge.Connect:output_type -> endpointadmin.remotebridge.v1.Envelope
+	3,  // 24: endpointadmin.remotebridge.v1.RemoteBridge.Data:output_type -> endpointadmin.remotebridge.v1.Envelope
+	23, // [23:25] is the sub-list for method output_type
+	21, // [21:23] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_remote_bridge_proto_init() }
@@ -1665,6 +1976,8 @@ func file_remote_bridge_proto_init() {
 		(*Envelope_DataFrame)(nil),
 		(*Envelope_Error)(nil),
 		(*Envelope_OperationDispatch)(nil),
+		(*Envelope_DeviceKeyChallenge)(nil),
+		(*Envelope_DeviceKeyAttestationResponse)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1672,7 +1985,7 @@ func file_remote_bridge_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_remote_bridge_proto_rawDesc), len(file_remote_bridge_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   13,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
