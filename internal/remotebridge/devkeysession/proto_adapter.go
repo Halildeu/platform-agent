@@ -18,6 +18,12 @@ func Respond(tpm tpmenroll.TPMDevice, challenge *pb.DeviceKeyChallenge, sessionI
 	if challenge == nil {
 		return nil, errors.New("devkeysession: nil challenge")
 	}
+	// pin the broker challenge protocol (the broker also pins it + denies a mismatch) — avoids doing TPM work for
+	// a wrong/future-protocol challenge; cheap defense, not the security boundary (the broker verifier is).
+	if challenge.GetProtocolVersion() != ChallengeProtocolVersion {
+		return nil, fmt.Errorf("devkeysession: unsupported challenge protocol %q (want %q)",
+			challenge.GetProtocolVersion(), ChallengeProtocolVersion)
+	}
 	nonce, err := base64.StdEncoding.DecodeString(challenge.GetNonceB64())
 	if err != nil {
 		return nil, fmt.Errorf("devkeysession: malformed challenge nonce_b64: %w", err)

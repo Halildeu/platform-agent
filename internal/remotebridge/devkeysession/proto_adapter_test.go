@@ -78,7 +78,13 @@ func TestRespond_FailsClosed(t *testing.T) {
 	}
 	if _, err := devkeysession.Respond(tpm, &pb.DeviceKeyChallenge{
 		ChallengeId: "c", NonceB64: "!!!not-base64!!!", TransportPeerKey: "p",
+		ProtocolVersion: devkeysession.ChallengeProtocolVersion,
 	}, "sess-1", 1); err == nil {
 		t.Error("a malformed nonce_b64 must error")
+	}
+	if _, err := devkeysession.Respond(tpm, &pb.DeviceKeyChallenge{
+		ChallengeId: "c", NonceB64: "AQ==", TransportPeerKey: "p", ProtocolVersion: "bogus-v9",
+	}, "sess-1", 1); err == nil {
+		t.Error("a wrong challenge protocol_version must error before any TPM work")
 	}
 }

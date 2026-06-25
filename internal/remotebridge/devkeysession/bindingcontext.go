@@ -19,6 +19,10 @@ const DomainTag = "F22.6_DEVICE_KEY_SESSION_V1"
 // ResponseSchema is the schema literal the DeviceKeyAttestationResponse carries; the broker verifier pins it.
 const ResponseSchema = "faz22.6.device-key-session.v1"
 
+// ChallengeProtocolVersion is the broker DeviceKeyChallenge.protocol_version the agent answers; the broker pins
+// it too (DeviceKeyChallengeStore.PROTOCOL_VERSION) and denies a mismatch.
+const ChallengeProtocolVersion = "device-key-session-v1"
+
 // BindingContext builds the canonical bytes the TPM device key signs, byte-IDENTICAL to the broker's
 // DeviceKeySessionBindingContext.compute (Java): the fixed ASCII DomainTag, a NUL separator, then each variable
 // field LENGTH-PREFIXED with a big-endian UINT32 (so no two distinct field tuples can ever collide), then the
