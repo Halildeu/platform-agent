@@ -111,12 +111,14 @@ const ekCertNVIndexRSA = 0x01C00002
 
 func (d *WindowsTPMDevice) EndorsementKey() (pub, certDER []byte, chainDER [][]byte, err error) {
 	b := tpm2.Marshal(d.ekPublic)
-	// #548 strong path: read the manufacturer EK certificate from TPM NV. Best-effort by design — the backend
-	// EK-chain check (V2) is config-pinned and the device-key strong path is gated, so a TPM with no readable EK
-	// cert degrades to the bounded-lab path (the broker denies ek-cert-required, fail-closed) instead of
-	// breaking enrollment. HARDWARE-UNVERIFIED: the go-tpm NV sequence and the index's auth model are exercised
-	// only on a real Windows TPM at the step-7 live run; vendor NV provisioning (AuthRead-empty vs OwnerRead,
-	// MAX_NV_BUFFER size) can vary and is confirmed there.
+	// #548 strong path: read the manufacturer EK certificate from TPM NV. Best-effort ONLY in that a read
+	// failure is not propagated as a hard error here — so a caller on the disabled-by-default / bounded-lab path
+	// (which tolerates a nil cert) is unaffected. It does NOT mean the strong path proceeds without a cert: a
+	// missing/unreadable EK cert fails closed downstream — the broker session verifier denies ek-cert-required
+	// (V2, config-pinned) and backend enrollment V2 rejects a blank ekCert outright. HARDWARE-UNVERIFIED: the
+	// go-tpm NV sequence and the index's auth model are exercised only on a real Windows TPM at the step-7 live
+	// run; vendor NV provisioning (AuthRead-empty vs OwnerRead, MAX_NV_BUFFER size) can vary and is confirmed
+	// there (an OwnerRead-only TPM would need an owner-auth fallback as a compat — not security — fast-follow).
 	cert, rerr := d.readEKCertificate()
 	if rerr != nil {
 		return b, nil, nil, nil
