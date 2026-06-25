@@ -315,3 +315,16 @@ func TestRemoteBridgeDeviceKeySessionDisabledByDefault(t *testing.T) {
 		t.Fatal("device-key session must be disabled unless explicitly enabled")
 	}
 }
+
+func TestRemoteBridgeDeviceKeySessionRequiresOperations(t *testing.T) {
+	cfg := config.Default()
+	cfg.RemoteBridgeEnabled = true
+	cfg.RemoteBridgeDeviceKeySessionEnabled = true
+	// RemoteBridgeOperationsEnabled stays false — the flag must refuse loudly, not silently no-op.
+	cfg.RemoteBridgeBrokerAddr = "broker.example:443"
+
+	_, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, remoteBridgeDeps{})
+	if err == nil {
+		t.Fatal("device-key session with operations disabled must refuse, not silently no-op")
+	}
+}

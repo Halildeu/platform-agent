@@ -85,6 +85,12 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		if cfg.RemoteBridgePilotAutoConsent {
 			return harness.Config{}, errors.New("remote-bridge pilot auto-consent requires ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED")
 		}
+		if cfg.RemoteBridgeDeviceKeySessionEnabled {
+			// fail loud, not silent no-op: the device-key strong path is meaningful only over the
+			// mTLS channel the operations block establishes, so an enabled flag without operations
+			// is a misconfiguration, not a degraded start.
+			return harness.Config{}, errors.New("remote-bridge device-key session requires ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED")
+		}
 		return hcfg, nil
 	}
 	if cfg.RemoteBridgeInsecurePlaintext {
@@ -121,6 +127,11 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		// loudly (fail-closed) instead of silently leaving the strong path unanswered.
 		responder := deps.deviceKeyResponder
 		if responder == nil {
+			// Catch the obvious misconfig (harness.New would reject it later) BEFORE opening the
+			// TPM, so a config error never leaves a TPM handle held for the agent's lifetime.
+			if strings.TrimSpace(cfg.RemoteBridgeBrokerAddr) == "" {
+				return harness.Config{}, errors.New("remote-bridge device-key session requires a broker address")
+			}
 			var rerr error
 			responder, rerr = newTPMDeviceKeyResponder(ctx)
 			if rerr != nil {
