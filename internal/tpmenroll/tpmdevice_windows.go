@@ -104,12 +104,71 @@ func (d *WindowsTPMDevice) Close() error {
 	return d.tpm.Close()
 }
 
+// ekCertNVIndexRSA is the TCG PC Client RSA-2048 endorsement-key certificate NV index (TPM 2.0 Part 2,
+// "Registry of reserved handles"). Firmware TPMs provision the manufacturer EK cert here; per the PC Client
+// profile the index is AuthRead with an EMPTY auth value, so it is readable via the index's own (nil) password.
+const ekCertNVIndexRSA = 0x01C00002
+
 func (d *WindowsTPMDevice) EndorsementKey() (pub, certDER []byte, chainDER [][]byte, err error) {
 	b := tpm2.Marshal(d.ekPublic)
-	// The EK cert lives in TPM NV (EK certificate index); reading it is layered in
-	// the verify slice. The backend V2 EK-chain is config-pinned + off by default,
-	// so an empty cert is acceptable for the disabled-by-default pilot path.
-	return b, nil, nil, nil
+	// #548 strong path: read the manufacturer EK certificate from TPM NV. Best-effort by design — the backend
+	// EK-chain check (V2) is config-pinned and the device-key strong path is gated, so a TPM with no readable EK
+	// cert degrades to the bounded-lab path (the broker denies ek-cert-required, fail-closed) instead of
+	// breaking enrollment. HARDWARE-UNVERIFIED: the go-tpm NV sequence and the index's auth model are exercised
+	// only on a real Windows TPM at the step-7 live run; vendor NV provisioning (AuthRead-empty vs OwnerRead,
+	// MAX_NV_BUFFER size) can vary and is confirmed there.
+	cert, rerr := d.readEKCertificate()
+	if rerr != nil {
+		return b, nil, nil, nil
+	}
+	return b, cert, nil, nil
+}
+
+// readEKCertificate reads the DER manufacturer EK certificate from the RSA EK-cert NV index. It first reads the
+// index public area for the data size + Name, then reads the area in bounded chunks via the index's own (empty)
+// auth, concatenating until DataSize bytes are read. Any TPM error (index absent, auth-model mismatch) surfaces
+// to the caller, which treats a read failure as "no cert" (fail-closed at the broker verifier).
+func (d *WindowsTPMDevice) readEKCertificate() ([]byte, error) {
+	if d.tpm == nil {
+		return nil, fmt.Errorf("tpm not open")
+	}
+	idx := tpm2.TPMHandle(ekCertNVIndexRSA)
+	readPub, err := tpm2.NVReadPublic{NVIndex: idx}.Execute(d.tpm)
+	if err != nil {
+		return nil, fmt.Errorf("NV read-public EK cert index 0x%x: %w", ekCertNVIndexRSA, err)
+	}
+	nvPub, err := readPub.NVPublic.Contents()
+	if err != nil {
+		return nil, fmt.Errorf("decode EK cert NV public area: %w", err)
+	}
+	total := int(nvPub.DataSize)
+	if total == 0 {
+		return nil, fmt.Errorf("EK cert NV index 0x%x reports zero data size", ekCertNVIndexRSA)
+	}
+	// chunk conservatively below the TPM's MAX_NV_BUFFER_SIZE (>=512 octets on all PC Client TPMs).
+	const chunk = 512
+	out := make([]byte, 0, total)
+	for off := 0; off < total; {
+		n := total - off
+		if n > chunk {
+			n = chunk
+		}
+		rsp, err := tpm2.NVRead{
+			AuthHandle: tpm2.AuthHandle{Handle: idx, Name: readPub.NVName, Auth: tpm2.PasswordAuth(nil)},
+			NVIndex:    tpm2.NamedHandle{Handle: idx, Name: readPub.NVName},
+			Size:       uint16(n),
+			Offset:     uint16(off),
+		}.Execute(d.tpm)
+		if err != nil {
+			return nil, fmt.Errorf("NV read EK cert at offset %d: %w", off, err)
+		}
+		if len(rsp.Data.Buffer) == 0 {
+			return nil, fmt.Errorf("NV read EK cert returned 0 bytes at offset %d", off)
+		}
+		out = append(out, rsp.Data.Buffer...)
+		off += len(rsp.Data.Buffer)
+	}
+	return out, nil
 }
 
 func (d *WindowsTPMDevice) AttestationKey() (pub, name []byte, err error) {
