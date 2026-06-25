@@ -57,6 +57,10 @@ func StartRemoteBridge(ctx context.Context, cfg config.Config, deviceID func() s
 
 type remoteBridgeDeps struct {
 	tlsConfig *tls.Config
+	// deviceKeyResponder, when non-nil, is used instead of opening a real TPM
+	// — the test seam for the #548 device-key session wiring (a real TPM is
+	// unavailable in CI).
+	deviceKeyResponder harness.DeviceKeyResponder
 }
 
 func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID func() string, deps remoteBridgeDeps) (harness.Config, error) {
@@ -108,6 +112,22 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 	)
 	if cfg.RemoteBridgePilotAutoConsent {
 		hcfg.ConsentResponder = pilotAutoConsentResponder
+	}
+	if cfg.RemoteBridgeDeviceKeySessionEnabled {
+		// #548 strong path: answer the broker's device-key session challenge with a
+		// TPM-native attestation. The responder is gated here (inside the mTLS/operations
+		// block) because the binding context pins the mTLS transport-peer key — the
+		// challenge is only meaningful over the secure channel. A TPM-open failure refuses
+		// loudly (fail-closed) instead of silently leaving the strong path unanswered.
+		responder := deps.deviceKeyResponder
+		if responder == nil {
+			var rerr error
+			responder, rerr = newTPMDeviceKeyResponder(ctx)
+			if rerr != nil {
+				return harness.Config{}, fmt.Errorf("remote-bridge device-key session: %w", rerr)
+			}
+		}
+		hcfg.DeviceKeyResponder = responder
 	}
 	return hcfg, nil
 }
