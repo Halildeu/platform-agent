@@ -113,3 +113,32 @@ func TestRunTpmAutoEnrollWith_BackendDeny(t *testing.T) {
 		t.Fatalf("exit code = %d, want 1 (backend denied)", code)
 	}
 }
+
+// TestResolveTpmEnrollAPIURL guards the env-path contract the Windows mTLS
+// wrapper depends on: the --api-url flag wins, an empty flag falls back to
+// cfg.AutoEnrollAPIURL (ENDPOINT_AGENT_AUTO_ENROLL_API_URL), trailing slash +
+// whitespace are trimmed, and "neither set" returns "" (callers exit 2). The
+// Windows wrapper resolves the URL BEFORE deriving the mTLS SNI, so this must not
+// diverge from the orchestrator (Codex 019f024b P1 regression guard).
+func TestResolveTpmEnrollAPIURL(t *testing.T) {
+	const flagURL = "https://flag.example/api/v1/endpoint-agent"
+	const envURL = "https://env.example/api/v1/endpoint-agent"
+	cases := []struct {
+		name, flag, cfgURL, want string
+	}{
+		{"flag wins", flagURL, envURL, flagURL},
+		{"empty flag falls back to env", "", envURL, envURL},
+		{"empty flag whitespace falls back", "   ", envURL, envURL},
+		{"neither set", "", "", ""},
+		{"flag trailing slash trimmed", flagURL + "/", "", flagURL},
+		{"env trailing slash trimmed", "", envURL + "/", envURL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveTpmEnrollAPIURL(tc.flag, config.Config{AutoEnrollAPIURL: tc.cfgURL})
+			if got != tc.want {
+				t.Fatalf("resolveTpmEnrollAPIURL(%q, cfg{%q}) = %q, want %q", tc.flag, tc.cfgURL, got, tc.want)
+			}
+		})
+	}
+}
