@@ -20,6 +20,20 @@ type tpmEnrollDeps struct {
 	persist    func(certPEM string) error
 }
 
+// resolveTpmEnrollAPIURL resolves the TPM auto-enroll API base URL: the --api-url
+// flag (trimmed, trailing slash removed) wins; an empty flag falls back to
+// cfg.AutoEnrollAPIURL (the ENDPOINT_AGENT_AUTO_ENROLL_API_URL env path). Returns
+// "" when neither is set (callers exit 2). Shared by the Windows real-deps
+// wrapper (which needs the resolved host for the mTLS SNI) and this orchestrator
+// so the env-path contract cannot diverge between them (Codex 019f024b P1).
+func resolveTpmEnrollAPIURL(apiURL string, cfg config.Config) string {
+	resolved := strings.TrimRight(strings.TrimSpace(apiURL), "/")
+	if resolved == "" {
+		resolved = strings.TrimRight(strings.TrimSpace(cfg.AutoEnrollAPIURL), "/")
+	}
+	return resolved
+}
+
 // runTpmAutoEnrollWith drives the Faz 22.3B 4-leg TPM enrollment (POST /nonce →
 // ActivateCredential → Quote/Certify/CSR → POST /attest) and persists the issued
 // client certificate. Returns a process exit code. All external effects are
@@ -28,10 +42,7 @@ type tpmEnrollDeps struct {
 // --auto-enroll-tpm is passed); the live e2e is operator-gated (needs the
 // deployed backend + Vault PKI engine).
 func runTpmAutoEnrollWith(ctx context.Context, cfg config.Config, apiURL string, deps tpmEnrollDeps) int {
-	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
-	if apiURL == "" {
-		apiURL = cfg.AutoEnrollAPIURL
-	}
+	apiURL = resolveTpmEnrollAPIURL(apiURL, cfg)
 	if apiURL == "" {
 		fmt.Fprintln(os.Stderr, "tpm auto-enroll: --api-url (or ENDPOINT_AGENT_AUTO_ENROLL_API_URL) is required")
 		return 2
