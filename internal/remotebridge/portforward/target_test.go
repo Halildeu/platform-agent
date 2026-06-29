@@ -148,3 +148,15 @@ func TestResolve(t *testing.T) {
 		t.Fatal("Resolve(unknown) must be ok=false")
 	}
 }
+
+// NewAllowlist stores the canonical (unmapped) address, so the classified address
+// equals the dialed address even when the broker signs an IPv4-mapped IPv6 form.
+func TestNewAllowlistCanonicalizesMappedAddr(t *testing.T) {
+	a, err := NewAllowlist([]Target{{ID: "dc-1", Addr: addr("::ffff:10.0.0.5"), Port: 389}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt, ok := a.Resolve("dc-1"); !ok || tgt.Addr.String() != "10.0.0.5" {
+		t.Fatalf("stored addr = %v (ok=%v), want canonical 10.0.0.5", tgt.Addr, ok)
+	}
+}
