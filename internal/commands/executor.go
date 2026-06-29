@@ -287,6 +287,15 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// source enum (wdac|appLocker|filesystem). See
 			// docs/COMMAND-CONTRACT.md §20.
 			IncludeAppControl: boolPayload(command.Payload, "includeAppControl"),
+			// #527 security/network block evidence — opt-in only.
+			// Windows Security event-log 5157 / WFP blocked
+			// connections are projected into backend FDQ-compatible
+			// events. HARD BOUNDARY: read-only fixed query, bounded
+			// timeout, stable keys, cap=MaxSecurityNetworkEvents,
+			// and no raw process path / destination IP-host / URL /
+			// account identifier / command line / provider free text
+			// on the wire. See docs/COMMAND-CONTRACT.md §21.
+			IncludeSecurityNetwork: boolPayload(command.Payload, "includeSecurityNetwork"),
 		})
 		result.Status = protocol.CommandStatusSucceeded
 		result.Summary = "Inventory collected"
