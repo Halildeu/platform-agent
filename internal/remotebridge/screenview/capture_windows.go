@@ -110,6 +110,19 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex string) error {
 	defer producer.Close()
 
 	for {
+		// Banner LIVENESS (fail-closed): the banner is verified once above, but it could
+		// be torn down mid-session (WM_CLOSE/WM_DESTROY => ShowActiveBanner returns). We
+		// have NOT cancelled it yet (cancelBanner is deferred to exit), so ANY value on
+		// bannerErr here means the banner went down unexpectedly => stop streaming
+		// (no banner => no endpoint awareness => no frame).
+		select {
+		case berr := <-bannerErr:
+			if berr == nil {
+				berr = fmt.Errorf("banner closed mid-session")
+			}
+			return fmt.Errorf("screenview helper: endpoint banner went down (fail-closed): %w", berr)
+		default:
+		}
 		f, ok := producer.Next()
 		if !ok {
 			break // capture tripped fail-closed (consecutive errors) => end the stream
@@ -164,6 +177,33 @@ func (p *ipcFrameProducer) Close() error {
 		}
 	})
 	return nil
+}
+
+// readFirstFrame reads the helper's first frame bounded by BOTH the deadline AND
+// ctx. On ctx cancellation it closes the conn (unblocking the in-flight ReadFrame)
+// and drains the read goroutine, returning ctx.Err() — so a session KILL that lands
+// after accept but BEFORE the first frame aborts immediately and the factory's
+// deferred cleanup terminates the helper (no orphan capture survives the deadline).
+func readFirstFrame(ctx context.Context, conn net.Conn, deadline time.Duration) ([]byte, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(deadline))
+	type result struct {
+		payload []byte
+		err     error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		payload, err := dataplane.ReadFrame(conn)
+		ch <- result{payload, err}
+	}()
+	select {
+	case r := <-ch:
+		_ = conn.SetReadDeadline(time.Time{})
+		return r.payload, r.err
+	case <-ctx.Done():
+		_ = conn.Close() // unblock the in-flight ReadFrame
+		<-ch             // drain (buffered, never blocks)
+		return nil, ctx.Err()
+	}
 }
 
 // NewWindowsProducerFactory builds the production VIEW_ONLY capture factory. Each
@@ -224,16 +264,16 @@ func NewWindowsProducerFactory() ProducerFactory {
 			}
 		}()
 
-		// Factory-level fail-closed (READY proof): the helper emits its FIRST frame ONLY
-		// after the banner self-verified and a capture succeeded, so reading a first frame
-		// here proves the session is live + bannered. A banner/capture failure surfaces as
-		// this error (NOT a later clean EndStream that would look like a normal end).
-		_ = conn.SetReadDeadline(time.Now().Add(firstFrameDeadline))
-		firstPayload, err := dataplane.ReadFrame(conn)
+		// Factory-level fail-closed (READY proof), ctx-aware: the helper emits its FIRST
+		// frame ONLY after the banner self-verified and a capture succeeded, so reading a
+		// first frame here proves the session is live + bannered. Bounded by BOTH
+		// firstFrameDeadline AND ctx — a KILL after accept but before the first frame aborts
+		// immediately (not after the deadline). A failure surfaces as this error (NOT a
+		// later clean EndStream that would look like a normal end).
+		firstPayload, err := readFirstFrame(ctx, conn, firstFrameDeadline)
 		if err != nil {
-			return nil, fmt.Errorf("screenview: helper produced no first frame (banner/capture failed, fail-closed): %w", err)
+			return nil, fmt.Errorf("screenview: helper produced no first frame (banner/capture failed or cancelled, fail-closed): %w", err)
 		}
-		_ = conn.SetReadDeadline(time.Time{})
 
 		// Success: hand conn + helper + listener to the producer (cancel the cleanup defers).
 		listenerHandedOff, helperHandedOff, connHandedOff = true, true, true
