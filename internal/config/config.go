@@ -135,6 +135,15 @@ type Config struct {
 	// — the responder needs a real TPM, so an enabled flag on a non-Windows
 	// build refuses the bridge loudly rather than half-starting.
 	RemoteBridgeDeviceKeySessionEnabled bool
+	// RemoteBridgeViewOnlyEnabled enables VIEW_ONLY screen observation (Faz
+	// 22.6 #1580): the agent answers broker-signed VIEW_ONLY permits by
+	// streaming recording-OFF screen frames. Disabled by default (ADR-0034
+	// disabled-by-default; recording-OFF per ADR-0044 D3). INDEPENDENT of
+	// RemoteBridgeOperationsEnabled — enabling VIEW_ONLY never enables PTY
+	// command execution (least-privilege observe-only). It shares the
+	// operation-capable preconditions (TLS/mTLS + broker permit trust anchor)
+	// and, when both are enabled, the SAME per-session seq replay guard.
+	RemoteBridgeViewOnlyEnabled bool
 	// RemoteBridgeTLSServerName optionally overrides SNI/hostname validation
 	// for the broker TLS connection. Blank means derive it from BrokerAddr.
 	RemoteBridgeTLSServerName string
@@ -261,6 +270,7 @@ func LoadFromEnv() Config {
 	cfg.RemoteBridgePermitKeyID = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID", cfg.RemoteBridgePermitKeyID)
 	cfg.RemoteBridgePilotAutoConsent = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT", cfg.RemoteBridgePilotAutoConsent)
 	cfg.RemoteBridgeDeviceKeySessionEnabled = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SESSION_ENABLED", cfg.RemoteBridgeDeviceKeySessionEnabled)
+	cfg.RemoteBridgeViewOnlyEnabled = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ENABLED", cfg.RemoteBridgeViewOnlyEnabled)
 	cfg.RemoteBridgeTLSServerName = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME", cfg.RemoteBridgeTLSServerName)
 	cfg.RemoteBridgeMTLSCertSubjectSuffix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX", cfg.RemoteBridgeMTLSCertSubjectSuffix)
 	cfg.RemoteBridgeMTLSCertSANURIPrefix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX", cfg.RemoteBridgeMTLSCertSANURIPrefix)
