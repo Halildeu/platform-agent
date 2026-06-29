@@ -24,7 +24,7 @@ import (
 // defaults
 const (
 	defaultDrainInterval = 16 * time.Millisecond // ~60fps drain cadence; the gate is drop-tolerant
-	defaultDrainBatch    = 8                      // max frames pulled per drain tick
+	defaultDrainBatch    = 8                     // max frames pulled per drain tick
 	defaultContentType   = "image/png"
 )
 

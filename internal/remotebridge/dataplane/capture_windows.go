@@ -93,6 +93,10 @@ type WindowsFrameProducer struct {
 	// in order to each captured RawFrame BEFORE encode, so every egressed frame
 	// carries them (ADR-0034 D10). Empty = none.
 	processors []func(*RawFrame)
+	// captureFn grabs one RawFrame. Default = capture (full virtual screen);
+	// the VIEW_ONLY primary-screen producer injects capturePrimaryScreen so the
+	// captured region matches the primary-monitor banner.
+	captureFn func() (RawFrame, error)
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -109,6 +113,17 @@ type WindowsFrameProducer struct {
 // captured RawFrame before encode; nil entries are skipped. Passing none keeps
 // the raw capture unmodified.
 func NewWindowsFrameProducer(enc Encoder, interval time.Duration, maxErr int, processors ...func(*RawFrame)) *WindowsFrameProducer {
+	return newWindowsFrameProducer(enc, interval, maxErr, capture, processors...)
+}
+
+// NewWindowsPrimaryScreenFrameProducer is NewWindowsFrameProducer but captures
+// ONLY the primary monitor (capturePrimaryScreen) — used by VIEW_ONLY screen
+// observation so the captured region matches the primary-monitor banner.
+func NewWindowsPrimaryScreenFrameProducer(enc Encoder, interval time.Duration, maxErr int, processors ...func(*RawFrame)) *WindowsFrameProducer {
+	return newWindowsFrameProducer(enc, interval, maxErr, capturePrimaryScreen, processors...)
+}
+
+func newWindowsFrameProducer(enc Encoder, interval time.Duration, maxErr int, captureFn func() (RawFrame, error), processors ...func(*RawFrame)) *WindowsFrameProducer {
 	if enc == nil {
 		enc = NewPNGEncoder()
 	}
@@ -118,13 +133,16 @@ func NewWindowsFrameProducer(enc Encoder, interval time.Duration, maxErr int, pr
 	if maxErr <= 0 {
 		maxErr = DefaultMaxConsecutiveErrors
 	}
+	if captureFn == nil {
+		captureFn = capture
+	}
 	procs := make([]func(*RawFrame), 0, len(processors))
 	for _, p := range processors {
 		if p != nil {
 			procs = append(procs, p)
 		}
 	}
-	return &WindowsFrameProducer{enc: enc, interval: interval, maxErr: maxErr, processors: procs, stop: make(chan struct{})}
+	return &WindowsFrameProducer{enc: enc, interval: interval, maxErr: maxErr, processors: procs, captureFn: captureFn, stop: make(chan struct{})}
 }
 
 // Next captures, encodes, and returns the next frame. It rate-limits with a
@@ -151,7 +169,11 @@ func (w *WindowsFrameProducer) Next() (Frame, bool) {
 			return Frame{}, false
 		default:
 		}
-		raw, err := capture()
+		captureFn := w.captureFn
+		if captureFn == nil {
+			captureFn = capture
+		}
+		raw, err := captureFn()
 		if err == nil {
 			// Exfil controls run BEFORE encode so every egressed frame carries
 			// them (active-indicator band, screen-masks). frameWritable-guarded
@@ -204,15 +226,29 @@ func getSystemMetric(i int) int {
 	return int(int32(r))
 }
 
-// capture grabs the full virtual screen as top-down BGRA. Every GDI handle is
-// released before return (defers run LIFO), including on the error paths.
+// capture grabs the full virtual screen (all monitors) as top-down BGRA.
 func capture() (RawFrame, error) {
-	x := getSystemMetric(smXVirtualScreen)
-	y := getSystemMetric(smYVirtualScreen)
-	wdt := getSystemMetric(smCXVirtualScreen)
-	hgt := getSystemMetric(smCYVirtualScreen)
+	return captureRegion(
+		getSystemMetric(smXVirtualScreen), getSystemMetric(smYVirtualScreen),
+		getSystemMetric(smCXVirtualScreen), getSystemMetric(smCYVirtualScreen))
+}
+
+// capturePrimaryScreen grabs ONLY the primary monitor (origin 0,0) as top-down
+// BGRA. VIEW_ONLY screen observation uses this so the captured region matches the
+// primary-monitor endpoint-awareness banner — no secondary monitor is captured
+// without the user seeing the "remote active" banner (banner/capture parity;
+// Codex 019f1132). Multi-monitor coverage (banner + capture on every monitor) is
+// a GA follow-up.
+func capturePrimaryScreen() (RawFrame, error) {
+	return captureRegion(0, 0, getSystemMetric(smCXScreen), getSystemMetric(smCYScreen))
+}
+
+// captureRegion grabs the given screen rectangle as top-down BGRA. Every GDI
+// handle is released before return (defers run LIFO), including on the error
+// paths.
+func captureRegion(x, y, wdt, hgt int) (RawFrame, error) {
 	if wdt <= 0 || hgt <= 0 {
-		return RawFrame{}, fmt.Errorf("dataplane: invalid virtual screen %dx%d", wdt, hgt)
+		return RawFrame{}, fmt.Errorf("dataplane: invalid capture region %dx%d", wdt, hgt)
 	}
 
 	hScreen, _, _ := procGetDC.Call(0)

@@ -107,15 +107,27 @@ func acceptWithDeadline(ctx context.Context, l net.Listener, timeout time.Durati
 // pending Accept on a session-scoped KILL; this entry point bounds by timeout.
 func AcceptAndVerify(l net.Listener, expectedNonce []byte, timeout time.Duration) (net.Conn, error) {
 	// A non-positive timeout with a background context would reintroduce the unbounded Accept() this primitive
-	// exists to prevent — refuse it fail-closed. (A ctx-bounded caller uses acceptWithDeadline directly.)
+	// exists to prevent — refuse it fail-closed. (A ctx-bounded caller uses AcceptAndVerifyContext.)
 	if timeout <= 0 {
 		return nil, fmt.Errorf("dataplane: pipe accept timeout must be positive, got %s", timeout)
 	}
-	conn, err := acceptWithDeadline(context.Background(), l, timeout)
+	return AcceptAndVerifyContext(context.Background(), l, expectedNonce, timeout)
+}
+
+// AcceptAndVerifyContext is AcceptAndVerify with an additional context: a caller
+// whose operation is cancelled (e.g. a session-scoped KILL arriving before the
+// helper has connected) aborts the pending Accept immediately instead of waiting
+// out the timeout. Used by the VIEW_ONLY screen-capture factory, whose dispatch
+// context cancels on KILL. timeout still bounds the wait when the context has no
+// deadline; the handshake read is bounded by timeout.
+func AcceptAndVerifyContext(ctx context.Context, l net.Listener, expectedNonce []byte, timeout time.Duration) (net.Conn, error) {
+	conn, err := acceptWithDeadline(ctx, l, timeout)
 	if err != nil {
 		return nil, err
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	if timeout > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	}
 	if err := ReadVerifyHandshake(conn, expectedNonce); err != nil {
 		_ = conn.Close()
 		return nil, err
