@@ -288,8 +288,8 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			// docs/COMMAND-CONTRACT.md §20.
 			IncludeAppControl: boolPayload(command.Payload, "includeAppControl"),
 			// #527 security/network block evidence — opt-in only.
-			// Windows Security event-log 5157 / WFP blocked
-			// connections are projected into backend FDQ-compatible
+			// Windows Security event-log 5152/5157 / WFP blocked
+			// packet-or-connection events are projected into backend FDQ-compatible
 			// events. HARD BOUNDARY: read-only fixed query, bounded
 			// timeout, stable keys, cap=MaxSecurityNetworkEvents,
 			// and no raw process path / destination IP-host / URL /
