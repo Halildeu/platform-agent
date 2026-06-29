@@ -27,6 +27,7 @@ var (
 	procShowWindow         = user32.NewProc("ShowWindow")
 	procUpdateWindow       = user32.NewProc("UpdateWindow")
 	procIsWindowVisible    = user32.NewProc("IsWindowVisible")
+	procFindWindowW        = user32.NewProc("FindWindowW")
 	procGetMessageW        = user32.NewProc("GetMessageW")
 	procTranslateMessage   = user32.NewProc("TranslateMessage")
 	procDispatchMessageW   = user32.NewProc("DispatchMessageW")
@@ -107,6 +108,27 @@ type msgW struct {
 	time    uint32
 	ptX     int32
 	ptY     int32
+}
+
+// BannerSelfVerify confirms the endpoint-awareness banner window exists AND is
+// visible in THIS (interactive) session — FindWindowW by class + IsWindowVisible.
+// The VIEW_ONLY capture helper calls it after starting ShowActiveBanner, BEFORE
+// streaming any frame: no verified banner ⇒ no endpoint awareness ⇒ fail-closed
+// (do not capture). It is an AWARENESS assertion, not tamper-proofing (a user can
+// still kill the process; enforcement is the session gate + local-abort).
+func BannerSelfVerify() error {
+	classPtr, err := windows.UTF16PtrFromString(bannerClassName)
+	if err != nil {
+		return ErrBannerShow
+	}
+	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(classPtr)), 0)
+	if hwnd == 0 {
+		return ErrBannerShow
+	}
+	if vis, _, _ := procIsWindowVisible.Call(hwnd); vis == 0 {
+		return ErrBannerShow
+	}
+	return nil
 }
 
 // ShowActiveBanner displays the endpoint-awareness banner and BLOCKS on the Win32

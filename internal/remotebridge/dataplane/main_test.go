@@ -68,7 +68,7 @@ func runBannerHelper(outPath string) int {
 	errCh := make(chan error, 1)
 	go func() { errCh <- ShowActiveBanner(ctx) }()
 	time.Sleep(700 * time.Millisecond) // let the window create + show
-	verifyErr := bannerSelfVerify()
+	verifyErr := BannerSelfVerify()
 	// Pixel proof: with the (topmost) banner up, capture the real desktop via the
 	// proven GDI path and write the PNG next to outPath — the gold-proof then
 	// confirms the red banner is actually RENDERED at top-center (no dependency on

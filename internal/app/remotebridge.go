@@ -170,7 +170,9 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		// is proven on a real host.
 		producerFactory := deps.screenViewProducerFactory
 		if producerFactory == nil {
-			producerFactory = newScreenViewProducerFactory()
+			// Production VIEW_ONLY capture: launches an active-session helper over a
+			// DACL-restricted nonce-verified pipe (Windows); fail-closed off Windows.
+			producerFactory = screenview.NewWindowsProducerFactory()
 		}
 		dispatcher, err := screenview.New(newProviderViewOnlyAuthorizer(authzProvider), producerFactory, screenview.Options{})
 		if err != nil {

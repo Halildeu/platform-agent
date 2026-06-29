@@ -31,6 +31,7 @@ import (
 	winservice "platform-agent/internal/platform/windows/service"
 	"platform-agent/internal/protocol"
 	"platform-agent/internal/remotebridge/ptyexec"
+	"platform-agent/internal/remotebridge/screenview"
 	"platform-agent/internal/security"
 	"platform-agent/internal/software"
 	"platform-agent/internal/state"
@@ -40,6 +41,11 @@ import (
 
 func main() {
 	if handled, code := ptyexec.MaybeRunActiveSessionConPTYHelper(os.Args[1:]); handled {
+		os.Exit(code)
+	}
+	// VIEW_ONLY (#1580) active-session screen-capture helper: when launched with the
+	// screenview helper flags, run as the in-session capture helper and exit.
+	if handled, code := screenview.MaybeRunActiveSessionScreenViewHelper(os.Args[1:]); handled {
 		os.Exit(code)
 	}
 

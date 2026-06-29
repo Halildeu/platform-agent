@@ -7,6 +7,7 @@ import (
 
 	"platform-agent/internal/config"
 	"platform-agent/internal/remotebridge/operation"
+	"platform-agent/internal/remotebridge/screenview"
 )
 
 func viewOnlyTLSDeps() remoteBridgeDeps {
@@ -211,7 +212,7 @@ func TestProviderViewOnlyAuthorizerFailsClosedOnDevice(t *testing.T) {
 // — non-nil so VIEW_ONLY can be WIRED, but every call errors so no frame ever egresses until real capture (the
 // Session-0 helper, sub-slice #6) is wired and proven on a Windows host.
 func TestScreenViewProducerFactoryDefaultFailsClosed(t *testing.T) {
-	factory := newScreenViewProducerFactory()
+	factory := screenview.NewWindowsProducerFactory()
 	if factory == nil {
 		t.Fatal("the producer factory must be non-nil so VIEW_ONLY can be wired")
 	}

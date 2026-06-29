@@ -10,31 +10,11 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
-var procFindWindowW = user32.NewProc("FindWindowW")
-
-// bannerSelfVerify confirms the banner window exists + is visible in THIS session
-// (FindWindowW by class + IsWindowVisible). Test-support only — NOT a production
-// security assertion (a determined user can still kill the process; the banner is
-// an awareness control, enforcement is recording + local-abort).
-func bannerSelfVerify() error {
-	classPtr, err := windows.UTF16PtrFromString(bannerClassName)
-	if err != nil {
-		return ErrBannerShow
-	}
-	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(classPtr)), 0)
-	if hwnd == 0 {
-		return ErrBannerShow
-	}
-	if vis, _, _ := procIsWindowVisible.Call(hwnd); vis == 0 {
-		return ErrBannerShow
-	}
-	return nil
-}
+// (procFindWindowW + bannerSelfVerify were lifted to production as
+// dataplane.BannerSelfVerify in banner_windows.go — the VIEW_ONLY capture helper
+// needs the real fail-closed self-verify, not a test-only one.)
 
 // TestRealBannerInSession is the BANNER gold-proof: from SYSTEM (Session 0) it
 // launches THIS binary as a banner helper IN the interactive session (the only
