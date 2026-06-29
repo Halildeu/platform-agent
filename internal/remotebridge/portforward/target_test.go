@@ -20,15 +20,27 @@ func TestSafeForwardAddrCorpus(t *testing.T) {
 		"169.254.1.1", "fe80::1", // link-local unicast
 		"169.254.169.254",                 // cloud metadata (link-local unicast)
 		"224.0.0.1", "ff02::1", "ff01::1", // multicast / interface-local multicast
+		"255.255.255.255", // limited broadcast
+		// IPv4-mapped IPv6 must not bypass IPv4 classification (Unmap):
+		"::ffff:127.0.0.1", "::ffff:0.0.0.0", "::ffff:169.254.169.254", "::ffff:224.0.0.1", "::ffff:255.255.255.255",
+		// documentation / benchmark ranges (never a real DC):
+		"192.0.2.1", "198.51.100.10", "203.0.113.5", "198.18.0.1", "2001:db8::1",
+		// IPv6 transition/translation mechanisms (default-deny):
+		"64:ff9b::7f00:1", "64:ff9b:1::1", "2002::1", "2001::1",
 	}
 	for _, s := range unsafe {
 		if err := safeForwardAddr(addr(s)); err == nil {
-			t.Errorf("safeForwardAddr(%s) = nil, want refusal (SSRF-classic)", s)
+			t.Errorf("safeForwardAddr(%s) = nil, want refusal (never a legit DC target)", s)
 		}
+	}
+	// a zoned address is rejected outright
+	if err := safeForwardAddr(netip.MustParseAddr("fe80::1%eth0")); err == nil {
+		t.Error("safeForwardAddr(zoned) = nil, want refusal")
 	}
 	safe := []string{
 		"10.0.0.5", "192.168.1.10", "172.16.0.1", // RFC1918 (a real DC may be private)
-		"8.8.8.8", "2001:db8::1", // global unicast
+		"8.8.8.8", "2001:4860:4860::8888", // global unicast
+		"::ffff:10.0.0.5", // IPv4-mapped private is fine (unmaps to a safe v4)
 	}
 	for _, s := range safe {
 		if err := safeForwardAddr(addr(s)); err != nil {
@@ -50,6 +62,9 @@ func TestNewAllowlistValidation(t *testing.T) {
 		{"port 0", []Target{{ID: "dc-1", Addr: addr("10.0.0.5"), Port: 0}}},
 		{"signed loopback (SSRF at construction)", []Target{{ID: "dc-1", Addr: addr("127.0.0.1"), Port: 389}}},
 		{"signed metadata", []Target{{ID: "dc-1", Addr: addr("169.254.169.254"), Port: 80}}},
+		{"signed mapped loopback", []Target{{ID: "dc-1", Addr: addr("::ffff:127.0.0.1"), Port: 389}}},
+		{"signed documentation range", []Target{{ID: "dc-1", Addr: addr("192.0.2.1"), Port: 389}}},
+		{"signed limited broadcast", []Target{{ID: "dc-1", Addr: addr("255.255.255.255"), Port: 389}}},
 	}
 	for _, c := range cases {
 		if _, err := NewAllowlist(c.targets, nil); err == nil {

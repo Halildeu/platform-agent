@@ -78,6 +78,8 @@ func NewAllowlist(targets []Target, allowedPorts []uint16) (*Allowlist, error) {
 		if err := safeForwardAddr(t.Addr); err != nil {
 			return nil, fmt.Errorf("%w: target %q: %v", ErrInvalidTarget, t.ID, err)
 		}
+		// store the canonical form so the classified address == the dialed address.
+		t.Addr = t.Addr.Unmap()
 		byID[t.ID] = t
 	}
 	ports := make(map[uint16]struct{}, len(allowedPorts))
@@ -119,16 +121,55 @@ func (a *Allowlist) Dial(ctx context.Context, targetID string, timeout time.Dura
 	return d.DialContext(ctx, "tcp", netip.AddrPortFrom(t.Addr, t.Port).String())
 }
 
+var limitedBroadcast = netip.AddrFrom4([4]byte{255, 255, 255, 255})
+
+// deniedPrefixes are address blocks that are NEVER a legitimate domain-controller
+// forward target: documentation/benchmark ranges, and IPv6 transition/translation
+// mechanisms (NAT64/6to4/Teredo) whose embedded/translated semantics break the
+// "fixed signed DC IP" guarantee. Default-deny in this first security slice; a real
+// NAT64 need would be a separate owner-approved exception with its own embedded-IPv4
+// safety check. Prefix.Contains is address-family aware, so mixing v4/v6 is safe.
+var deniedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("192.0.2.0/24"),    // TEST-NET-1 (documentation)
+	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2 (documentation)
+	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3 (documentation)
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
+	netip.MustParsePrefix("2001:db8::/32"),   // IPv6 documentation
+	netip.MustParsePrefix("64:ff9b::/96"),    // well-known NAT64
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // local-use NAT64
+	netip.MustParsePrefix("2002::/16"),       // 6to4
+	netip.MustParsePrefix("2001::/32"),       // Teredo
+}
+
 // safeForwardAddr refuses addresses that are NEVER a legitimate remote forward
 // destination, even if the broker signed them (a signed loopback/link-local/metadata
 // is a mis-signed permit or an attack). A real DC is private or global unicast — none
-// of these classes. Note IsLinkLocalUnicast covers 169.254.0.0/16 (incl. the cloud
-// metadata 169.254.169.254) and fe80::/10.
+// of these classes. It canonicalises first (Unmap) so an IPv4-mapped IPv6 form like
+// ::ffff:127.0.0.1 or ::ffff:0.0.0.0 cannot bypass the IPv4 classification, and
+// rejects zoned addresses outright. IsLinkLocalUnicast covers 169.254.0.0/16 (incl.
+// the 169.254.169.254 cloud metadata) and fe80::/10.
+//
+// NOTE: this is a pure address-CLASS guard. Two further checks belong to the
+// (runtime-aware) PORT_FORWARD dispatcher, not here: refusing the agent's own
+// interface IPs (a non-loopback self-pivot), and requiring a non-empty owner-approved
+// allowed-port set ({88,389,445,…}) pinned agent-side as the last line.
 func safeForwardAddr(a netip.Addr) error {
-	if !a.IsValid() || a.IsUnspecified() || a.IsLoopback() ||
+	if !a.IsValid() || a.Zone() != "" {
+		return ErrTargetUnsafe
+	}
+	a = a.Unmap()
+	if a.IsUnspecified() || a.IsLoopback() ||
 		a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() ||
 		a.IsMulticast() || a.IsInterfaceLocalMulticast() {
 		return ErrTargetUnsafe
+	}
+	if a == limitedBroadcast {
+		return ErrTargetUnsafe
+	}
+	for _, p := range deniedPrefixes {
+		if p.Contains(a) {
+			return ErrTargetUnsafe
+		}
 	}
 	return nil
 }
