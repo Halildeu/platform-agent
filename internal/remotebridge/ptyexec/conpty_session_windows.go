@@ -111,6 +111,14 @@ func RunConPTYInActiveSession(ctx context.Context, exePath, commandLine string, 
 	}
 	defer conn.Close()
 
+	// ANTI-SPOOF: the connected client MUST be the helper we launched. A same-session
+	// process that read the launch nonce off the helper's argv and pre-empted the
+	// connection has a DIFFERENT PID -> reject fail-closed (so a stolen nonce cannot
+	// feed faked command output). Same primitive as the VIEW_ONLY capture path.
+	if clientPID, perr := dataplane.PipeClientProcessID(conn); perr != nil || clientPID != helper.Pid {
+		return nil, 0, fmt.Errorf("ptyexec: pipe client PID %d != launched helper PID %d (anti-spoof, fail-closed): %v", clientPID, helper.Pid, perr)
+	}
+
 	timeout := DefaultExecTimeout
 	if deadline, ok := ctx.Deadline(); ok {
 		if until := time.Until(deadline); until > 0 && until < timeout {
