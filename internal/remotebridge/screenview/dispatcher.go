@@ -149,7 +149,17 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 			session.Abort()
 			return nil
 		case <-pumpDone:
-			// producer ended: drain whatever the gate still holds, then a best-effort terminal EndStream.
+			// The producer ended. When ctx is also cancelled, BOTH this case and the ctx.Done()
+			// case are ready and select picks one at random — so the producer may have stopped
+			// BECAUSE of the cancellation. Treat that as cancellation (abort, NO terminal
+			// EndStream), matching the ctx.Done() branch, so a cancelled dispatch never emits an
+			// EndStream regardless of select ordering (deterministic; was a -race flake).
+			if ctx.Err() != nil {
+				session.Abort()
+				return nil
+			}
+			// clean producer-exhaustion: drain whatever the gate still holds, then a best-effort
+			// terminal EndStream.
 			if derr := drain(); derr != nil {
 				session.Abort()
 				return derr
