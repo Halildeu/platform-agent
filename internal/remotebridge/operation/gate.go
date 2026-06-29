@@ -2,9 +2,14 @@ package operation
 
 import "sync"
 
-// CapabilityConstrainedPTY is the only capability the PTY gate authorizes — the enum NAME, matching the
-// broker's RemoteSessionCapability.CONSTRAINED_PTY.
+// CapabilityConstrainedPTY is the capability the PTY gate authorizes — the enum NAME, matching the broker's
+// RemoteSessionCapability.CONSTRAINED_PTY.
 const CapabilityConstrainedPTY = "CONSTRAINED_PTY"
+
+// CapabilityViewOnly is the capability the VIEW_ONLY (screen-observation) gate authorizes — the enum NAME,
+// matching the broker's RemoteSessionCapability.VIEW_ONLY. A VIEW_ONLY permit carries NO command (empty
+// commandHash); its DATA stream is screen frames, not pseudo-console output.
+const CapabilityViewOnly = "VIEW_ONLY"
 
 // Decision is the gate verdict. Allowed is true ONLY when EVERY check passed. Reason is a stable,
 // bounded-cardinality code (never raw input) for telemetry/audit; it is "" exactly when Allowed.
@@ -31,6 +36,10 @@ const (
 	ReasonCommandMismatch           = "command-mismatch"                       // hash(command) != the permit's commandHash
 	ReasonSeqInvalid                = "seq-invalid"                            // permit seq <= 0 (malformed; broker seq starts >= 1)
 	ReasonSeqReplay                 = "seq-replay"                             // permit seq <= the last accepted seq for its session
+	ReasonCapabilityNotViewOnly     = "capability-not-view-only"              // the permit does not grant VIEW_ONLY
+	ReasonCommandHashPresent        = "command-hash-present"                  // a VIEW_ONLY permit must carry NO command hash
+	ReasonMissingSessionID          = "missing-session-id"                    // VIEW_ONLY permit has an empty session id
+	ReasonMissingOperationID        = "missing-operation-id"                  // VIEW_ONLY permit has an empty operation id (no DATA correlation)
 )
 
 // MaxCommandLine mirrors broker PtyArgumentPolicy.MAX_LINE: the agent's "decide" layer (this gate, which
@@ -125,6 +134,55 @@ func (a *Authorizer) Authorize(permit OperationPermit, commandLine string, nowEp
 	// holds no device identity — it relies on the bound verifier.
 	// Replay guard LAST + under lock: a verified+bound permit advances the per-session window atomically; an
 	// equal/older seq is a replay → deny with NO state change.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if permit.Seq <= a.lastSeq[permit.SessionID] {
+		return Decision{Reason: ReasonSeqReplay}
+	}
+	a.lastSeq[permit.SessionID] = permit.Seq
+	return Decision{Allowed: true}
+}
+
+// AuthorizeViewOnly runs the fail-closed gate for opening a VIEW_ONLY screen-observation stream under permit at
+// nowEpochMillis. Like Authorize it is fail-closed and, CRUCIALLY, shares THIS Authorizer's per-session seq
+// guard (a.lastSeq + a.mu) with the PTY path: the broker's per-session seq is monotonic ACROSS capabilities, so
+// one shared guard is what stops a VIEW_ONLY permit from replaying a seq already spent by a PTY operation (or
+// vice-versa). Wire ONE Authorizer for both capabilities. Allowed=true ONLY if, IN ORDER: (1) the permit
+// cryptographically verifies; (2) it grants VIEW_ONLY; (3) it carries NO command hash (VIEW_ONLY commands
+// nothing); (4) session + operation ids are present (operation id is the DATA-stream correlation key); (5) seq
+// is positive and strictly greater than the last accepted seq for its session. On allow, the shared per-session
+// last-seq advances atomically. Any failure → Allowed=false with a stable Reason and NO state change.
+func (a *Authorizer) AuthorizeViewOnly(permit OperationPermit, nowEpochMillis int64) Decision {
+	if a == nil || a.verify == nil {
+		return Decision{Reason: ReasonPermitVerifierUnavailable}
+	}
+	if ok, reason := a.verify(permit, nowEpochMillis); !ok {
+		if reason == "" {
+			reason = ReasonPermitInvalid
+		}
+		return Decision{Reason: reason}
+	}
+	if permit.Capability != CapabilityViewOnly {
+		return Decision{Reason: ReasonCapabilityNotViewOnly}
+	}
+	// A VIEW_ONLY permit authorizes screen observation, never a command — a non-empty command hash means a
+	// malformed/confused permit (e.g. a PTY permit relabelled VIEW_ONLY). Fail-closed.
+	if permit.CommandHash != "" {
+		return Decision{Reason: ReasonCommandHashPresent}
+	}
+	if permit.SessionID == "" {
+		return Decision{Reason: ReasonMissingSessionID}
+	}
+	if permit.OperationID == "" {
+		return Decision{Reason: ReasonMissingOperationID}
+	}
+	// A non-positive seq is malformed (broker per-session seq starts >= 1) — distinct from a replay for audit.
+	if permit.Seq <= 0 {
+		return Decision{Reason: ReasonSeqInvalid}
+	}
+	// Shared per-session replay guard (SAME lock + map as PTY Authorize): the broker seq is monotonic across
+	// capabilities, so PTY and VIEW_ONLY advance ONE window — two windows would let a VIEW_ONLY permit replay a
+	// seq a PTY op already consumed (and vice-versa). Deny an equal/older seq with NO state change.
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if permit.Seq <= a.lastSeq[permit.SessionID] {

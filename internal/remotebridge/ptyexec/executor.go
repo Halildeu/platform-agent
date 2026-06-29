@@ -35,8 +35,18 @@ type Executor struct {
 // NewExecutor builds the gated executor over a permit verifier + a command allowlist. cols/rows <= 0 take the
 // ConPTY defaults. A nil verifier yields a deny-everything gate (fail-closed).
 func NewExecutor(verifier *operation.Verifier, allowlist map[string]AllowRule, cols, rows int16) *Executor {
+	return NewExecutorWithAuthorizer(operation.NewAuthorizer(verifier), allowlist, cols, rows)
+}
+
+// NewExecutorWithAuthorizer builds the gated executor over an ALREADY-CONSTRUCTED operation.Authorizer + a
+// command allowlist, so the caller can SHARE one Authorizer — and therefore one per-session seq guard
+// (a.lastSeq+a.mu) — across capabilities. The VIEW_ONLY path and the CONSTRAINED_PTY path MUST share the same
+// *operation.Authorizer instance or the broker's cross-capability monotonic seq is no longer replay-protected
+// (see operation.AuthorizeViewOnly). cols/rows <= 0 take the ConPTY defaults. A nil authorizer is fail-closed:
+// Execute returns ErrNotAuthorized (no spawn).
+func NewExecutorWithAuthorizer(authz *operation.Authorizer, allowlist map[string]AllowRule, cols, rows int16) *Executor {
 	return &Executor{
-		authz:     operation.NewAuthorizer(verifier),
+		authz:     authz,
 		allowlist: allowlist,
 		cols:      cols,
 		rows:      rows,
