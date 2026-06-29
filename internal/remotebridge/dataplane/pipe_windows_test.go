@@ -120,6 +120,22 @@ func TestAcceptAndVerifyTimesOutWhenNoClientDials(t *testing.T) {
 	}
 }
 
+// A non-positive timeout would reintroduce the unbounded Accept() the bound exists
+// to prevent — AcceptAndVerify refuses it fail-closed.
+func TestAcceptAndVerifyRejectsNonPositiveTimeout(t *testing.T) {
+	sid := currentUserSID(t)
+	name, _ := RandomPipeName()
+	l, err := ListenSecurePipe(name, sid)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l.Close()
+	nonce, _ := NewLaunchNonce()
+	if _, err := AcceptAndVerify(l, nonce, 0); err == nil {
+		t.Fatal("a non-positive accept timeout must be refused fail-closed")
+	}
+}
+
 // A context cancellation (e.g. a session-scoped KILL before the helper connects)
 // aborts the pending Accept immediately rather than waiting out the timeout. This
 // exercises acceptWithDeadline's ctx path directly (the VIEW_ONLY capture factory

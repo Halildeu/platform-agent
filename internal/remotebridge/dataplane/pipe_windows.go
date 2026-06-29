@@ -106,6 +106,11 @@ func acceptWithDeadline(ctx context.Context, l net.Listener, timeout time.Durati
 // takes a context so a later caller (the VIEW_ONLY capture factory) can abort a
 // pending Accept on a session-scoped KILL; this entry point bounds by timeout.
 func AcceptAndVerify(l net.Listener, expectedNonce []byte, timeout time.Duration) (net.Conn, error) {
+	// A non-positive timeout with a background context would reintroduce the unbounded Accept() this primitive
+	// exists to prevent — refuse it fail-closed. (A ctx-bounded caller uses acceptWithDeadline directly.)
+	if timeout <= 0 {
+		return nil, fmt.Errorf("dataplane: pipe accept timeout must be positive, got %s", timeout)
+	}
 	conn, err := acceptWithDeadline(context.Background(), l, timeout)
 	if err != nil {
 		return nil, err
