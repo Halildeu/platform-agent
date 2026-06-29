@@ -32,8 +32,14 @@ type ViewSession struct {
 	mu sync.Mutex
 
 	recordingReady bool
-	active         bool
-	aborted        bool
+	// recordingNotRequired is the recording-OFF (ADR-0044 D3) gate input: when the broker runs the VIEW_ONLY
+	// data plane in recording-OFF mode (no WORM, no content persistence), there is no recorder to be "ready",
+	// so egress is gated on this EXPLICIT, default-false acknowledgement instead of recordingReady. It is set
+	// ONLY for a verified VIEW_ONLY permit under the owner-gated recording-OFF policy — never a stand-in for a
+	// WORM recorder (Codex 019f10e2: option (b) — do NOT fake recordingReady=true in recording-OFF mode).
+	recordingNotRequired bool
+	active               bool
+	aborted              bool
 
 	queue [][]byte // FIFO of admitted frame payloads awaiting the sender
 	cap   int
@@ -63,10 +69,13 @@ func NewViewSession(queueCap int) *ViewSession {
 // producer/pump aborts immediately rather than only between Next calls.
 func (s *ViewSession) AbortChan() <-chan struct{} { return s.abortCh }
 
-// canSendLocked is the single source-of-truth gate predicate. Fail-closed:
-// ALL three must hold. Any false → no egress.
+// canSendLocked is the single source-of-truth gate predicate. Fail-closed: the session must be active, not
+// aborted, AND have a satisfied recording policy — either a ready WORM recorder (recordingReady) OR an explicit
+// recording-OFF acknowledgement (recordingNotRequired, ADR-0044 D3). Both recording inputs default false, so the
+// gate is closed until one is explicitly set; recording-OFF never means "no gate", it means a distinct, owner-
+// gated, default-false input (Codex 019f10e2 option (b)).
 func (s *ViewSession) canSendLocked() bool {
-	return s.recordingReady && s.active && !s.aborted
+	return (s.recordingReady || s.recordingNotRequired) && s.active && !s.aborted
 }
 
 // CanSend reports whether the gate is currently open.
@@ -141,6 +150,20 @@ func (s *ViewSession) SetRecordingReady(ready bool) {
 	defer s.mu.Unlock()
 	s.recordingReady = ready
 	if !ready {
+		s.flushLocked()
+	}
+}
+
+// SetRecordingNotRequired toggles the recording-OFF (ADR-0044 D3) gate input — the explicit acknowledgement
+// that this VIEW_ONLY view runs without a WORM recorder (no content persistence). Going false shuts the gate
+// AND flushes the queue, exactly like SetRecordingReady(false): once the recording-OFF authorization is
+// withdrawn, no further frame may egress. This is a SEPARATE input from recordingReady — it never implies a
+// recorder is ready; it asserts a recorder is not required under the owner-gated recording-OFF policy.
+func (s *ViewSession) SetRecordingNotRequired(notRequired bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordingNotRequired = notRequired
+	if !notRequired {
 		s.flushLocked()
 	}
 }
