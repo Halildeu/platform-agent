@@ -53,14 +53,62 @@ func ListenSecurePipe(name, userSID string) (net.Listener, error) {
 	return l, nil
 }
 
+// acceptWithDeadline accepts ONE connection but bounds the blocking Accept() by
+// BOTH ctx cancellation AND timeout. winio's Accept() otherwise blocks until a
+// client dials, so a helper that is launched but never dials (crash/hang before
+// the handshake) would hang the caller forever AND orphan the helper process
+// (the caller's deferred Terminate never runs). On ctx-cancel or timeout it
+// closes the listener — which unblocks the in-flight Accept — and fails closed,
+// draining + closing any connection that raced in so none is leaked.
+func acceptWithDeadline(ctx context.Context, l net.Listener, timeout time.Duration) (net.Conn, error) {
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		conn, err := l.Accept()
+		ch <- result{conn, err}
+	}()
+	var timer <-chan time.Time
+	if timeout > 0 {
+		t := time.NewTimer(timeout)
+		defer t.Stop()
+		timer = t.C
+	}
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, fmt.Errorf("dataplane: pipe accept: %w", r.err)
+		}
+		return r.conn, nil
+	case <-ctx.Done():
+		_ = l.Close()
+		if r := <-ch; r.conn != nil {
+			_ = r.conn.Close()
+		}
+		return nil, fmt.Errorf("dataplane: pipe accept cancelled: %w", ctx.Err())
+	case <-timer:
+		_ = l.Close()
+		if r := <-ch; r.conn != nil {
+			_ = r.conn.Close()
+		}
+		return nil, fmt.Errorf("dataplane: pipe accept timeout after %s", timeout)
+	}
+}
+
 // AcceptAndVerify accepts ONE connection and reads + constant-time-verifies the
 // launch-nonce handshake within timeout before returning the conn for frame
 // reads. Fail-closed: a bad/absent/slow handshake closes the conn + errors (the
-// peer must hold the nonce AND pass the DACL).
+// peer must hold the nonce AND pass the DACL). The blocking Accept() itself is
+// now bounded by timeout via acceptWithDeadline (a helper that never dials no
+// longer hangs the caller and orphans the helper). acceptWithDeadline already
+// takes a context so a later caller (the VIEW_ONLY capture factory) can abort a
+// pending Accept on a session-scoped KILL; this entry point bounds by timeout.
 func AcceptAndVerify(l net.Listener, expectedNonce []byte, timeout time.Duration) (net.Conn, error) {
-	conn, err := l.Accept()
+	conn, err := acceptWithDeadline(context.Background(), l, timeout)
 	if err != nil {
-		return nil, fmt.Errorf("dataplane: pipe accept: %w", err)
+		return nil, err
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	if err := ReadVerifyHandshake(conn, expectedNonce); err != nil {

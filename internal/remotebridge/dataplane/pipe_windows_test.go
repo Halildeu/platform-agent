@@ -93,3 +93,60 @@ func TestSecurePipeRejectsWrongNonce(t *testing.T) {
 		t.Fatalf("wrong-nonce accept err = %v, want ErrIPCHandshake", err)
 	}
 }
+
+// A helper that is launched but never dials must NOT hang the caller: the blocking
+// Accept() is bounded by the timeout so the caller can fail closed + Terminate the
+// orphan. (Latent bug in the merged active-session ConPTY path; Codex 019f1132.)
+func TestAcceptAndVerifyTimesOutWhenNoClientDials(t *testing.T) {
+	sid := currentUserSID(t)
+	name, _ := RandomPipeName()
+	l, err := ListenSecurePipe(name, sid)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l.Close()
+
+	nonce, _ := NewLaunchNonce()
+	start := time.Now()
+	conn, err := AcceptAndVerify(l, nonce, 200*time.Millisecond) // no client ever dials
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if err == nil {
+		t.Fatal("accept must fail closed when no client dials, not hang")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("accept did not honour the timeout (hung): took %s", elapsed)
+	}
+}
+
+// A context cancellation (e.g. a session-scoped KILL before the helper connects)
+// aborts the pending Accept immediately rather than waiting out the timeout. This
+// exercises acceptWithDeadline's ctx path directly (the VIEW_ONLY capture factory
+// will consume it via a ctx-aware entry point in the follow-up capture slice).
+func TestAcceptWithDeadlineContextCancelAbortsAccept(t *testing.T) {
+	sid := currentUserSID(t)
+	name, _ := RandomPipeName()
+	l, err := ListenSecurePipe(name, sid)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	conn, err := acceptWithDeadline(ctx, l, 10*time.Second) // long timeout; the cancel must win
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ctx-cancel accept err = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("ctx cancel did not abort the accept promptly: took %s", elapsed)
+	}
+}
