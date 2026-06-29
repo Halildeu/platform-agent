@@ -747,16 +747,24 @@ type screenCancelEntry struct {
 }
 
 // registerScreenCancel records a running VIEW_ONLY screen-view dispatch's cancel so a session-scoped KILL can
-// tear it down. Keyed by sessionId; returns the entry the caller passes back to unregisterScreenCancel.
-func (h *Harness) registerScreenCancel(sessionID string, cancel context.CancelFunc) *screenCancelEntry {
+// tear it down. Keyed by sessionId; returns the entry the caller passes back to unregisterScreenCancel, plus ok.
+//
+// COMPARE-AND-SET (one active stream per session): if a stream is ALREADY registered for this session it does
+// NOT overwrite it — it returns ok=false and the caller must fail the new dispatch closed. Overwriting would
+// orphan the first (still-running) stream's cancel, so a later session-scoped KILL would look up only the second
+// entry and never tear the first stream down — a "no frame after kill" bypass (Codex 019f1112).
+func (h *Harness) registerScreenCancel(sessionID string, cancel context.CancelFunc) (*screenCancelEntry, bool) {
 	if sessionID == "" {
-		return nil
+		return nil, false
 	}
 	entry := &screenCancelEntry{cancel: cancel}
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, exists := h.screenCancels[sessionID]; exists {
+		return nil, false
+	}
 	h.screenCancels[sessionID] = entry
-	h.mu.Unlock()
-	return entry
+	return entry, true
 }
 
 // unregisterScreenCancel removes the entry registered by registerScreenCancel — but ONLY if it is still THIS

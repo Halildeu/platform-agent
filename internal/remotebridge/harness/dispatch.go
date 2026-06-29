@@ -250,7 +250,13 @@ func (h *Harness) dispatchScreenView(ctx context.Context, conn *grpc.ClientConn,
 	defer cancel()
 	// register so a session-scoped KILL (obeyKill) can tear down THIS running screen stream — no frame may
 	// egress after a kill, and a session kill keeps the transport up so sctx-cancel alone would not reach it.
-	cancelEntry := h.registerScreenCancel(permit.SessionID, cancel)
+	// COMPARE-AND-SET: refuse a second concurrent stream for this session (ok=false) — overwriting the existing
+	// entry would orphan the first running stream's cancel and defeat a later KILL (Codex 019f1112). Fail-closed.
+	cancelEntry, ok := h.registerScreenCancel(permit.SessionID, cancel)
+	if !ok {
+		_ = sender.sendSessionError(permit.SessionID, "screen-view-already-active", false)
+		return
+	}
 	defer h.unregisterScreenCancel(permit.SessionID, cancelEntry)
 
 	dataStream, err := pb.NewRemoteBridgeClient(conn).Data(opCtx)
@@ -279,7 +285,9 @@ func (h *Harness) dispatchScreenView(ctx context.Context, conn *grpc.ClientConn,
 	}
 	drainTimer.Stop()
 	if herr != nil {
-		// bounded, non-revealing CONTROL code; the DATA stream was already closed with a terminal EndStream
+		// bounded, non-revealing CONTROL code. NOTE: on an authorize/capture-start failure the dispatcher
+		// returns WITHOUT a terminal EndStream (no gate opened, no frame); the DATA stream is closed (CloseSend
+		// + cancel) and this CONTROL error is the failure signal.
 		_ = sender.sendSessionError(permit.SessionID, "screen-view-failed", false)
 	}
 }

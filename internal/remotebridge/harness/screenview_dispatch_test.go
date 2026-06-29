@@ -111,7 +111,7 @@ func newHarnessWithScreenDispatcher(t *testing.T, disp ScreenViewDispatcher) *Ha
 	h, err := New(Config{
 		DeviceIDProvider:     func() string { return "device-test" },
 		ScreenViewDispatcher: disp,
-		Dialer: func(ctx context.Context) (*grpc.ClientConn, error) { return nil, nil },
+		Dialer:               func(ctx context.Context) (*grpc.ClientConn, error) { return nil, nil },
 	}, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -227,7 +227,7 @@ func TestScreenViewSessionKillCancelsDispatch(t *testing.T) {
 		}
 		_ = s.Send(heartbeatEnv(60_000, 0))
 		_ = s.Send(operationPermitEnv(viewOnlyPermitProto()))
-		<-invoked                          // wait until the dispatch is actually running
+		<-invoked                                 // wait until the dispatch is actually running
 		_ = s.Send(killEnv("sess-1", "operator")) // session-scoped KILL for the running session
 		for {
 			if _, err := s.Recv(); err != nil {
@@ -245,5 +245,35 @@ func TestScreenViewSessionKillCancelsDispatch(t *testing.T) {
 	}
 	if _, _, _, cancelled := disp.snapshot(); !cancelled {
 		t.Fatal("the dispatch must have observed ctx cancellation after the KILL")
+	}
+}
+
+// TestScreenCancelRegistryRefusesDuplicateAndPreservesKill is the regression for the same-session orphan bug
+// (Codex 019f1112): a second VIEW_ONLY dispatch for an already-active session must be REFUSED (no overwrite),
+// so the first running stream stays registered and a later session-scoped KILL still cancels it. An overwrite
+// would orphan the first stream's cancel → a KILL would miss it → a frame could egress after the kill.
+func TestScreenCancelRegistryRefusesDuplicateAndPreservesKill(t *testing.T) {
+	h := newHarnessWithScreenDispatcher(t, &fakeScreenDispatcher{})
+
+	aCancelled, bCancelled := false, false
+	entryA, okA := h.registerScreenCancel("sess-dup", func() { aCancelled = true })
+	if !okA || entryA == nil {
+		t.Fatalf("first registration must succeed: ok=%v entry=%v", okA, entryA)
+	}
+	// a second concurrent stream for the SAME session must be refused — never overwrite the live entry
+	entryB, okB := h.registerScreenCancel("sess-dup", func() { bCancelled = true })
+	if okB || entryB != nil {
+		t.Fatalf("a duplicate same-session registration must be refused: ok=%v entry=%v", okB, entryB)
+	}
+	// the refused duplicate's deferred (identity-guarded) cleanup must NOT evict the live entry A
+	h.unregisterScreenCancel("sess-dup", entryB)
+
+	// a session-scoped KILL must still reach the FIRST (live) stream
+	h.obeyKill("sess-dup", "operator")
+	if !aCancelled {
+		t.Fatal("session KILL must cancel the first (still-registered) screen stream — overwrite would have orphaned it")
+	}
+	if bCancelled {
+		t.Fatal("the refused duplicate was never registered, so it must never be cancellable")
 	}
 }
