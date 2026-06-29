@@ -148,6 +148,44 @@ func TestLocalExecutorCollectInventory(t *testing.T) {
 	if result.Details["inventory"] == nil {
 		t.Fatalf("inventory detail missing: %#v", result.Details)
 	}
+	snap := snapshotFromDetails(t, result.Details)
+	if snap.SecurityNetwork != nil {
+		t.Fatalf("#527: default COLLECT_INVENTORY must omit securityNetwork block")
+	}
+}
+
+func TestLocalExecutorCollectInventoryIncludeSecurityNetwork(t *testing.T) {
+	executor := NewLocalExecutor([]protocol.CommandType{protocol.CommandCollectInventory}, "test")
+	command := protocol.AgentCommand{
+		CommandID:      "cmd-security-network",
+		ClaimID:        "claim-security-network",
+		AttemptNumber:  1,
+		Type:           protocol.CommandCollectInventory,
+		Payload:        map[string]interface{}{"includeSecurityNetwork": true},
+		ClaimExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	result := executor.Execute(context.Background(), command)
+
+	if result.Status != protocol.CommandStatusSucceeded {
+		t.Fatalf("status = %s, want %s; summary=%q", result.Status, protocol.CommandStatusSucceeded, result.Summary)
+	}
+	snap := snapshotFromDetails(t, result.Details)
+	if snap.SecurityNetwork == nil {
+		t.Fatalf("#527: includeSecurityNetwork=true must attach securityNetwork block")
+	}
+	if snap.SecurityNetwork.SchemaVersion != inventory.SecurityNetworkSchemaVersion {
+		t.Fatalf("schemaVersion = %d, want %d", snap.SecurityNetwork.SchemaVersion, inventory.SecurityNetworkSchemaVersion)
+	}
+	if snap.SecurityNetwork.Events == nil {
+		t.Fatalf("securityNetwork events must be an explicit empty slice, not nil")
+	}
+	if snap.SecurityNetwork.ProbeErrors == nil {
+		t.Fatalf("securityNetwork probeErrors must be an explicit empty slice, not nil")
+	}
+	if runtime.GOOS != "windows" && snap.SecurityNetwork.Supported {
+		t.Fatalf("non-Windows securityNetwork probe must report supported=false")
+	}
 }
 
 func TestLocalExecutorUnsupportedCommandReturnsUnsupported(t *testing.T) {
@@ -855,6 +893,35 @@ func TestLocalExecutorBoolPayloadIncludeHotfixPosture(t *testing.T) {
 		got := boolPayload(tc.payload, "includeHotfixPosture")
 		if got != tc.wantOn {
 			t.Errorf("%s: boolPayload(includeHotfixPosture) = %v, want %v", tc.name, got, tc.wantOn)
+		}
+	}
+}
+
+func TestLocalExecutorBoolPayloadIncludeSecurityNetwork(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]interface{}
+		wantOn  bool
+	}{
+		{"nil-payload", nil, false},
+		{"missing-key", map[string]interface{}{"includeSoftware": true}, false},
+		{"bool-true", map[string]interface{}{"includeSecurityNetwork": true}, true},
+		{"bool-false", map[string]interface{}{"includeSecurityNetwork": false}, false},
+		{"string-true", map[string]interface{}{"includeSecurityNetwork": "true"}, true},
+		{"string-1", map[string]interface{}{"includeSecurityNetwork": "1"}, true},
+		{"string-True", map[string]interface{}{"includeSecurityNetwork": "True"}, true},
+		{"string-false", map[string]interface{}{"includeSecurityNetwork": "false"}, false},
+		{"string-0", map[string]interface{}{"includeSecurityNetwork": "0"}, false},
+		{"int-1", map[string]interface{}{"includeSecurityNetwork": 1}, true},
+		{"int-0", map[string]interface{}{"includeSecurityNetwork": 0}, false},
+		{"float64-1", map[string]interface{}{"includeSecurityNetwork": float64(1)}, true},
+		{"float64-0", map[string]interface{}{"includeSecurityNetwork": float64(0)}, false},
+		{"unknown-type", map[string]interface{}{"includeSecurityNetwork": []string{"yes"}}, false},
+	}
+	for _, tc := range cases {
+		got := boolPayload(tc.payload, "includeSecurityNetwork")
+		if got != tc.wantOn {
+			t.Errorf("%s: boolPayload(includeSecurityNetwork) = %v, want %v", tc.name, got, tc.wantOn)
 		}
 	}
 }

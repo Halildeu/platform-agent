@@ -166,6 +166,19 @@ type Snapshot struct {
 	// 019e83ce iter-1 P0 #2.
 	AppControl *AppControlResult `json:"appControl,omitempty"`
 
+	// SecurityNetwork is intentionally nil unless the caller opted into
+	// the #527 security/network block probe via
+	// CollectOptions.IncludeSecurityNetwork. The JSON tag omitempty hides
+	// the field from heartbeat / auto-enroll and from COLLECT_INVENTORY
+	// runs that did not request the probe. On non-Windows runtimes the
+	// probe returns Supported=false + UNSUPPORTED_PLATFORM so backend
+	// consumers can distinguish "not supported here" from "agent did not
+	// run this probe". The wire payload is strictly redacted: process
+	// paths, destination IPs/hosts, URLs, account identifiers, command
+	// lines, provider free text and raw event-log rows are never
+	// serialized.
+	SecurityNetwork *SecurityNetworkResult `json:"securityNetwork,omitempty"`
+
 	// HotfixPosture is intentionally nil unless the caller opted into
 	// the AG-037 Windows Update / hotfix posture probe via
 	// CollectOptions.IncludeHotfixPosture. The JSON tag omitempty
@@ -465,6 +478,27 @@ type CollectOptions struct {
 	//     so consumers (backend, web) can rely on key presence with
 	//     explicit JSON null for unknown evidence.
 	IncludeAppControl bool
+
+	// IncludeSecurityNetwork gates the #527 security/network block
+	// evidence probe. When true, CollectWithOptions invokes
+	// ProbeSecurityNetwork (Windows Security event log 5157 / WFP
+	// blocked connections on Windows; Supported=false stub elsewhere)
+	// and attaches the result to Snapshot.SecurityNetwork. When false
+	// (the default), the probe is not invoked and the wire payload omits
+	// the field.
+	//
+	// HARD BOUNDARY:
+	//   - read-only. The Windows implementation only queries Security
+	//     event-log records with a fixed script and a bounded timeout.
+	//   - raw process paths, destination IPs/hosts, URLs, ports,
+	//     account identifiers, command lines, provider free text and raw
+	//     event XML are never serialized. Only SHA-256/token projections
+	//     and bounded enum fields reach the backend.
+	//   - cap=MaxSecurityNetworkEvents with EVENTS_TRUNCATED sentinel
+	//     when exceeded; probeErrors cap=MaxSecurityNetworkProbeErrors.
+	//   - no generic timeout inference: an incomplete probe emits a
+	//     typed error and probeComplete=false.
+	IncludeSecurityNetwork bool
 }
 
 // Collect returns the AG-025H lightweight default snapshot: host / os /
@@ -548,6 +582,10 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 		ac := collectAppControlForSnapshot(now)
 		snapshot.AppControl = &ac
 	}
+	if opts.IncludeSecurityNetwork {
+		sn := collectSecurityNetworkForSnapshot(now)
+		snapshot.SecurityNetwork = &sn
+	}
 	return snapshot
 }
 
@@ -562,6 +600,16 @@ func CollectWithOptions(agentVersion string, now time.Time, opts CollectOptions)
 // to thread their own cancellation.
 func collectAppControlForSnapshot(_ time.Time) AppControlResult {
 	return ProbeAppControl(context.Background(), time.Now)
+}
+
+// collectSecurityNetworkForSnapshot is the test seam for the #527
+// security/network block evidence probe. Production wires
+// ProbeSecurityNetwork with time.Now (NOT the snapshot's frozen
+// CollectedAt) so probeDurationMs measures real elapsed wall-clock and
+// the bounded-context timeout is honoured even when the snapshot is older
+// than the probe window.
+var collectSecurityNetworkForSnapshot = func(_ time.Time) SecurityNetworkResult {
+	return ProbeSecurityNetwork(context.Background(), time.Now)
 }
 
 // collectDeviceHealthForSnapshot is the test seam for the AG-033

@@ -127,6 +127,91 @@ func TestCollectWithOptionsIncludeSoftwareTrueRunsProbesAndAttachesApps(t *testi
 	}
 }
 
+func TestCollectWithOptionsIncludeSecurityNetworkFalseSkipsProbe(t *testing.T) {
+	calls := installSecurityNetworkCounter(t, SecurityNetworkResult{
+		SchemaVersion: SecurityNetworkSchemaVersion,
+		Supported:     true,
+		ProbeComplete: true,
+		Events:        []SecurityNetworkEvent{},
+		ProbeErrors:   []SecurityNetworkProbeError{},
+	})
+
+	snap := CollectWithOptions(
+		"test",
+		time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC),
+		CollectOptions{},
+	)
+
+	if snap.SecurityNetwork != nil {
+		t.Fatalf("#527: IncludeSecurityNetwork=false must leave Snapshot.SecurityNetwork nil (got %+v)", snap.SecurityNetwork)
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("#527: IncludeSecurityNetwork=false must not invoke probe (got %d calls)", got)
+	}
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	if strings.Contains(string(body), `"securityNetwork":`) {
+		t.Fatalf("#527: lightweight payload must not carry securityNetwork field: %s", body)
+	}
+}
+
+func TestCollectWithOptionsIncludeSecurityNetworkTrueRunsProbeExactlyOnce(t *testing.T) {
+	processHash := "0123456789abcdef"
+	blockedDestination := "dest-sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	firewallRuleID := "wfp-filter-bbbbbbbbbbbbbbbb"
+	calls := installSecurityNetworkCounter(t, SecurityNetworkResult{
+		SchemaVersion: SecurityNetworkSchemaVersion,
+		Supported:     true,
+		ProbeComplete: true,
+		Events: []SecurityNetworkEvent{{
+			NetworkSegmentID:         nil,
+			EDRVendor:                SecurityNetworkVendorWindowsFirewall,
+			BlockedProcessHashPrefix: &processHash,
+			BlockedDestination:       &blockedDestination,
+			FirewallRuleID:           &firewallRuleID,
+			LastSuccessfulContactAt:  nil,
+			ObservedAt:               "2026-06-29T09:00:00Z",
+		}},
+		ProbeErrors:     []SecurityNetworkProbeError{},
+		ProbeDurationMs: 42,
+	})
+
+	snap := CollectWithOptions(
+		"test",
+		time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC),
+		CollectOptions{IncludeSecurityNetwork: true},
+	)
+
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("#527: IncludeSecurityNetwork=true must invoke probe exactly once (got %d)", got)
+	}
+	if snap.SecurityNetwork == nil {
+		t.Fatalf("#527: IncludeSecurityNetwork=true must attach SecurityNetwork result")
+	}
+	if len(snap.SecurityNetwork.Events) != 1 {
+		t.Fatalf("#527: SecurityNetwork events len = %d, want 1", len(snap.SecurityNetwork.Events))
+	}
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	wire := string(body)
+	for _, want := range []string{
+		`"securityNetwork":`,
+		`"schemaVersion":1`,
+		`"networkSegmentId":null`,
+		`"lastSuccessfulContactAt":null`,
+		`"blockedDestination":"dest-sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`,
+		`"probeErrors":[]`,
+	} {
+		if !strings.Contains(wire, want) {
+			t.Fatalf("#527: securityNetwork payload missing %s: %s", want, wire)
+		}
+	}
+}
+
 // installProbeCounters swaps both probes for stubs that increment atomic
 // counters but never produce data. Used by the lightweight-path tests
 // that assert "no probe call". The AG-026A source/egress probe is also
@@ -208,6 +293,20 @@ func installProbeStubs(
 		detectWinget = prevWinget
 	})
 	return &softwareCalls, &wingetCalls
+}
+
+func installSecurityNetworkCounter(t *testing.T, fixture SecurityNetworkResult) *int32 {
+	t.Helper()
+	var calls int32
+	prev := collectSecurityNetworkForSnapshot
+	collectSecurityNetworkForSnapshot = func(now time.Time) SecurityNetworkResult {
+		atomic.AddInt32(&calls, 1)
+		return fixture
+	}
+	t.Cleanup(func() {
+		collectSecurityNetworkForSnapshot = prev
+	})
+	return &calls
 }
 
 // AG-026A — IncludeWinGetEgress wire-up tests.

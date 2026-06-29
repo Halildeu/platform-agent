@@ -1989,3 +1989,136 @@ separate slice (V26 migration adding `endpoint_app_control_snapshots` +
 GET endpoint) that will be tracked under its own PR; the agent block above
 is the exact wire shape the backend will need to deserialize.
 
+
+## 21. #527 — Security / Network Block Evidence for Failed-Device Queue
+
+### 21.1 Scope
+
+Read-only security/network block evidence probe for failed-device queue
+auto-classification. The v1 Windows source is Security event log `5157`
+(Windows Filtering Platform blocked connection). The agent projects recent
+blocked-connection rows into backend-compatible EDR_NETWORK evidence events.
+
+This probe is deliberately narrow:
+
+- It proves "a blocked network event was observed" with bounded redacted
+  attributes.
+- It does NOT infer device health from timeouts.
+- It does NOT call an EDR vendor API.
+- It does NOT emit raw firewall/event-log rows.
+- It does NOT mutate firewall, Defender, service, policy or network state.
+
+### 21.2 HARD BOUNDARY (do NOT widen)
+
+- Read-only only. The Windows implementation uses a fixed PowerShell
+  `Get-WinEvent` query against `Security` log event id `5157`, scoped to the
+  last 24 hours, with `-MaxEvents 50` and a 10s agent-side timeout.
+- The fixed inline command runs with `-NoProfile -NonInteractive
+  -ExecutionPolicy Bypass`, matching the existing read-only inventory probe
+  pattern. It does not execute a downloaded script, local script file, or any
+  operator/payload-supplied command text.
+- No payload-supplied command or filter substitution.
+- No raw process path, destination IP/host, URL, port, command line, account
+  identifier, provider free text, event XML, stdout or stderr is serialized.
+- Process path is reduced to a SHA-256 prefix.
+- Destination address/port/protocol is reduced to a `dest-sha256-*` token.
+- WFP filter id is reduced to a `wfp-filter-*` token.
+- `events` cap is `MaxSecurityNetworkEvents=20`; truncation adds typed
+  `EVENTS_TRUNCATED` probe error.
+- `probeErrors` cap is `MaxSecurityNetworkProbeErrors=16`.
+- Non-Windows builds emit an explicit `supported=false` +
+  `UNSUPPORTED_PLATFORM` block when the caller opts in.
+
+### 21.3 Operator trigger
+
+Default `COLLECT_INVENTORY` does NOT invoke this probe. The backend or
+operator must opt in explicitly:
+
+```json
+{
+  "type": "COLLECT_INVENTORY",
+  "payload": {
+    "includeSecurityNetwork": true
+  }
+}
+```
+
+The executor reads the bit through:
+
+```go
+boolPayload(command.Payload, "includeSecurityNetwork")
+```
+
+### 21.4 Wire shape v1
+
+When requested, the block is attached at
+`details.inventory.securityNetwork`:
+
+```json
+{
+  "schemaVersion": 1,
+  "supported": true,
+  "probeComplete": true,
+  "events": [
+    {
+      "networkSegmentId": null,
+      "edrVendor": "windows-firewall",
+      "blockedProcessHashPrefix": "0123456789abcdef",
+      "blockedDestination": "dest-sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "firewallRuleId": "wfp-filter-bbbbbbbbbbbbbbbb",
+      "lastSuccessfulContactAt": null,
+      "observedAt": "2026-06-29T09:00:00Z"
+    }
+  ],
+  "probeErrors": [],
+  "probeDurationMs": 42
+}
+```
+
+Stable-key contract:
+
+- `events` is `[]` when the probe completed but found no block evidence.
+- `probeErrors` is `[]` when no probe errors were observed.
+- Nullable event fields keep explicit JSON `null`; downstream policy should
+  not rely on key absence.
+- `observedAt` is RFC3339/RFC3339Nano UTC.
+
+### 21.5 ProbeErrors
+
+Each entry:
+
+```json
+{
+  "code": "ACCESS_DENIED",
+  "summary": "Windows firewall block event query failed"
+}
+```
+
+Codes:
+
+- `UNSUPPORTED_PLATFORM` — opted-in probe on a non-Windows runtime.
+- `EVENT_LOG_UNAVAILABLE` — Windows Security event log query failed.
+- `ACCESS_DENIED` — event log access was denied.
+- `PROBE_TIMEOUT` — 10s security/network probe deadline exceeded.
+- `PROBE_FAILED` — JSON or timestamp projection failed.
+- `NO_EVIDENCE` — reserved for future source-specific "source reachable but
+  no usable evidence" paths.
+- `EVENTS_TRUNCATED` — event cap applied; the payload intentionally dropped
+  additional events.
+
+Decision-critical codes (`EVENT_LOG_UNAVAILABLE`, `ACCESS_DENIED`,
+`PROBE_TIMEOUT`, `PROBE_FAILED`, `UNSUPPORTED_PLATFORM`) make
+`probeComplete=false`. `EVENTS_TRUNCATED` does not make the probe incomplete;
+it only tells consumers the event list was capped.
+
+### 21.6 Backend ingest boundary
+
+The backend structured ingest slice is separate and must validate the same
+redaction boundary before persistence. The agent block above is intentionally
+aligned with platform-backend PR `#777`
+(`feat(endpoint-admin): ingest structured security-network FDQ evidence`).
+
+No-fake-work boundary: this contract plus code merge does not close #527 by
+itself. #527 acceptance still requires deployed backend + deployed agent
+version + at least one real opted-in inventory run whose resulting
+`securityNetwork.events[]` is accepted by backend failed-device queue ingest.
