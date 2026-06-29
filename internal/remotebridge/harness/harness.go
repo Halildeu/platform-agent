@@ -129,6 +129,14 @@ type Config struct {
 	// idle — an inbound operation_dispatch is a protocol defect (disabled-by-
 	// default; LIVE activation is owner-gated, ADR-0034 §13/D10).
 	PTYDispatcher PTYDispatcher
+	// ScreenViewDispatcher, when non-nil, ENABLES VIEW_ONLY screen observation:
+	// an inbound bare operation_permit (capability VIEW_ONLY) opens a fresh
+	// per-operation DATA stream and streams captured screen frames. nil (the
+	// default) keeps the harness disabled-by-default — an inbound VIEW_ONLY
+	// operation_permit is a protocol defect (LIVE activation is owner-gated,
+	// ADR-0034 §13/D10). Independent of PTYDispatcher: enabling one never
+	// implies the other.
+	ScreenViewDispatcher ScreenViewDispatcher
 	// ConsentResponder, when non-nil, may answer a broker ConsentPrompt with a
 	// ConsentResult. nil keeps the idle harness fail-closed: consent_prompt is a
 	// protocol defect unless an owner-gated product path explicitly wires a
@@ -197,6 +205,11 @@ type Harness struct {
 
 	mu       sync.Mutex
 	sessions map[string]SessionState
+	// screenCancels: sessionId -> the cancel of a running VIEW_ONLY screen-view dispatch, so a session-scoped
+	// KILL (which keeps the transport up) can tear down that session's live screen stream (no exfil after kill).
+	// The value is a pointer so a dispatch's deferred unregister can compare by IDENTITY (Go funcs are not
+	// comparable) and never delete a newer dispatch's registration for a reused sessionId.
+	screenCancels map[string]*screenCancelEntry
 
 	connects int64 // streams that reached AgentHello
 	healthy  int64 // streams that saw >=1 valid heartbeat
@@ -242,7 +255,8 @@ func New(cfg Config, logger *log.Logger) (*Harness, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Harness{cfg: cfg, logger: logger, sessions: make(map[string]SessionState)}, nil
+	return &Harness{cfg: cfg, logger: logger, sessions: make(map[string]SessionState),
+		screenCancels: make(map[string]*screenCancelEntry)}, nil
 }
 
 // isLoopbackBrokerAddr reports whether addr targets a loopback interface — the
@@ -407,6 +421,20 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 					return healthy, fmt.Errorf("protocol defect: %s", derr.Error())
 				}
 				go h.dispatchOperation(sctx, conn, permit, commandLine, deviceID, sender)
+			case actionScreenView:
+				// A broker-authorized VIEW_ONLY bare operation_permit. Decode SYNCHRONOUSLY (a malformed
+				// frame is a protocol defect → close the stream), then capture + stream screen frames OFF
+				// the recv loop so a long-lived feed never blocks heartbeats or a KILL.
+				permit, derr := decodeOperationPermit(r.env.GetOperationPermit())
+				if derr != nil {
+					h.mu.Lock()
+					h.defects++
+					h.mu.Unlock()
+					_ = sender.sendError(derr.Error(), false)
+					_ = stream.CloseSend()
+					return healthy, fmt.Errorf("protocol defect: %s", derr.Error())
+				}
+				go h.dispatchScreenView(sctx, conn, permit, deviceID, sender)
 			case actionConsentPrompt:
 				go h.respondToConsent(sctx, r.env.GetConsentPrompt(), sender)
 			case actionDeviceKeyChallenge:
@@ -476,6 +504,10 @@ const (
 	// actionDeviceKeyChallenge: a broker DeviceKeyChallenge arrived and a DeviceKeyResponder is wired (#548) —
 	// respondToDeviceKeyChallenge answers it off the recv loop. Without a responder it defect-closes (default-off).
 	actionDeviceKeyChallenge
+	// actionScreenView: a broker-authorized VIEW_ONLY bare operation_permit arrived and a ScreenViewDispatcher
+	// is wired — connectOnce decodes it and streams screen frames off the recv loop. Without a dispatcher this
+	// never occurs (handleInbound defect-closes a VIEW_ONLY operation_permit — disabled-by-default).
+	actionScreenView
 )
 
 // inboundSeqGuard tracks the broker-push sequencing mode of one stream. The
@@ -571,6 +603,18 @@ func (h *Harness) handleInbound(env *pb.Envelope, seqGuard *inboundSeqGuard) (in
 			return actionDefectClose, "unsupported-payload-in-idle"
 		}
 		return actionDispatch, ""
+	case env.GetOperationPermit() != nil:
+		// A bare VIEW_ONLY operation_permit push (#1580). DISABLED-BY-DEFAULT: with no ScreenViewDispatcher
+		// wired the agent has no capture machinery, so it is a protocol defect like any other idle payload.
+		// When a dispatcher IS configured, only a VIEW_ONLY permit is honoured — any other capability on a bare
+		// permit is a defect (the broker pushes PTY as operation_dispatch, never a bare permit).
+		if h.cfg.ScreenViewDispatcher == nil {
+			return actionDefectClose, "unsupported-payload-in-idle"
+		}
+		if env.GetOperationPermit().GetCapability() != pb.Capability_VIEW_ONLY {
+			return actionDefectClose, "operation-permit-not-view-only"
+		}
+		return actionScreenView, ""
 	default:
 		return actionDefectClose, "unsupported-payload-in-idle"
 	}
@@ -629,10 +673,16 @@ func (h *Harness) respondToDeviceKeyChallenge(ctx context.Context, env *pb.Envel
 }
 
 func advertisedCapabilities(cfg Config) []pb.Capability {
-	if cfg.PTYDispatcher == nil {
-		return nil
+	var caps []pb.Capability
+	// advertise ONLY what is actually wired (capabilities are advisory, never authority — the broker re-decides
+	// — but advertising an unwired capability would invite a push the agent then defect-closes).
+	if cfg.ScreenViewDispatcher != nil {
+		caps = append(caps, pb.Capability_VIEW_ONLY)
 	}
-	return []pb.Capability{pb.Capability_CONSTRAINED_PTY}
+	if cfg.PTYDispatcher != nil {
+		caps = append(caps, pb.Capability_CONSTRAINED_PTY)
+	}
+	return caps
 }
 
 func helloCertFingerprint(cfg *tls.Config) string {
@@ -679,6 +729,47 @@ func (h *Harness) obeyKill(sessionID, reason string) {
 	h.mu.Lock()
 	h.sessions[sessionID] = SessionState{Killed: true, KillReason: reason, KilledAt: time.Now()}
 	h.kills++
+	// #1580: a session-scoped KILL keeps the transport up, so cancel THIS session's running VIEW_ONLY screen
+	// stream (if any) directly — no screen frame may egress after a kill. A transport kill cancels the parent
+	// stream ctx (and so every child) anyway; it has no entry under TransportKillSessionID here, so this is a
+	// no-op for it.
+	entry := h.screenCancels[sessionID]
+	h.mu.Unlock()
+	if entry != nil {
+		entry.cancel()
+	}
+}
+
+// screenCancelEntry wraps a dispatch's cancel so register/unregister can match by POINTER identity (Go funcs
+// are not comparable). One per running VIEW_ONLY screen-view dispatch.
+type screenCancelEntry struct {
+	cancel context.CancelFunc
+}
+
+// registerScreenCancel records a running VIEW_ONLY screen-view dispatch's cancel so a session-scoped KILL can
+// tear it down. Keyed by sessionId; returns the entry the caller passes back to unregisterScreenCancel.
+func (h *Harness) registerScreenCancel(sessionID string, cancel context.CancelFunc) *screenCancelEntry {
+	if sessionID == "" {
+		return nil
+	}
+	entry := &screenCancelEntry{cancel: cancel}
+	h.mu.Lock()
+	h.screenCancels[sessionID] = entry
+	h.mu.Unlock()
+	return entry
+}
+
+// unregisterScreenCancel removes the entry registered by registerScreenCancel — but ONLY if it is still THIS
+// dispatch's entry (a later dispatch for the same reused sessionId must not have its registration deleted by an
+// older dispatch's deferred cleanup).
+func (h *Harness) unregisterScreenCancel(sessionID string, entry *screenCancelEntry) {
+	if sessionID == "" || entry == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.screenCancels[sessionID] == entry {
+		delete(h.screenCancels, sessionID)
+	}
 	h.mu.Unlock()
 }
 

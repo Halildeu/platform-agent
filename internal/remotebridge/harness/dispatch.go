@@ -24,6 +24,53 @@ type PTYDispatcher interface {
 		send func(*pb.DataFrame) error, nowEpochMillis int64) (ptyexec.ExecResult, error)
 }
 
+// ScreenViewDispatcher runs ONE broker-authorized VIEW_ONLY screen-observation operation and streams its
+// captured screen frames via send (the bridge DATA stream). The production implementation lives in
+// internal/remotebridge/screenview (a later sub-slice); the harness depends on this seam — not the concrete
+// type — so the dispatch WIRING (decode → DATA stream → frames → CONTROL error) is testable without a display
+// or the Windows capture code. A nil dispatcher leaves the harness disabled-by-default: an inbound VIEW_ONLY
+// operation_permit is a protocol defect (LIVE activation is owner-gated, ADR-0034 §13/D10). Unlike the PTY
+// path, a VIEW_ONLY permit carries NO command — the agent observes the screen, it executes nothing.
+type ScreenViewDispatcher interface {
+	Handle(ctx context.Context, permit operation.OperationPermit, streamID string,
+		send func(*pb.DataFrame) error, nowEpochMillis int64) error
+}
+
+// errPermitDecode marks a broker OperationPermit that cannot be mapped to a domain permit — a protocol defect
+// (the CONTROL stream is closed), never a silent drop.
+var errPermitDecode = errors.New("operation-permit-decode-failed")
+
+// decodeOperationPermit maps a broker-pushed bare pb.OperationPermit (the VIEW_ONLY push — no OperationDispatch
+// wrapper, no command) onto the domain operation.OperationPermit. FAIL-CLOSED on a nil permit or a missing
+// session/operation id (the operation id is the DATA-stream correlation key). The AUTHORITATIVE checks
+// (signature, freshness, capability, seq) are the operation.Authorizer's job (AuthorizeViewOnly), never
+// duplicated here — this is a field map + presence check, mirroring decodeDispatch.
+func decodeOperationPermit(p *pb.OperationPermit) (operation.OperationPermit, error) {
+	if p == nil {
+		return operation.OperationPermit{}, errPermitDecode
+	}
+	if p.GetOperationId() == "" || p.GetSessionId() == "" {
+		return operation.OperationPermit{}, errPermitDecode
+	}
+	return operation.OperationPermit{
+		Alg:                  p.GetAlg(),
+		Kid:                  p.GetKid(),
+		PermitVersion:        p.GetPermitVersion(),
+		PolicyVersion:        p.GetPolicyVersion(),
+		DecisionID:           p.GetDecisionId(),
+		SessionID:            p.GetSessionId(),
+		OperationID:          p.GetOperationId(),
+		DeviceID:             p.GetDeviceId(),
+		OperatorSubject:      p.GetOperatorSubject(),
+		Capability:           p.GetCapability().String(), // the enum NAME, e.g. "VIEW_ONLY"
+		CommandHash:          p.GetCommandHash(),
+		IssuedAtEpochMillis:  p.GetIssuedAtEpochMillis(),
+		ExpiresAtEpochMillis: p.GetExpiresAtEpochMillis(),
+		Seq:                  p.GetSeq(),
+		SignatureB64:         p.GetSignatureB64(),
+	}, nil
+}
+
 // errDispatchDecode marks a broker OperationDispatch that cannot be mapped to a domain permit — a protocol
 // defect (the CONTROL stream is closed), never a silent drop.
 var errDispatchDecode = errors.New("operation-dispatch-decode-failed")
@@ -183,4 +230,56 @@ func authzReasonCode(err error) string {
 		}
 	}
 	return "not-authorized"
+}
+
+// dispatchScreenView runs ONE authorized VIEW_ONLY screen-observation operation and streams its captured frames
+// over a fresh, per-operation DATA stream, then closes it. Like dispatchOperation it runs in its OWN goroutine
+// off the CONTROL recv loop under a CHILD of the stream context, so a long-lived screen feed never blocks
+// heartbeats or a KILL. It registers its cancel under the sessionId so a SESSION-SCOPED kill (which keeps the
+// transport up) cancels THIS screen stream; a transport kill cancels the parent stream ctx and so every child
+// anyway. Device binding is the PRIMARY dynamic check (refuse a permit minted for another device, even validly
+// signed). A handler error surfaces as a bounded CONTROL ErrorFrame; the transport stays up. The dispatcher
+// honours ctx cancellation (it must Abort its ViewSession so no frame egresses after the gate closes).
+func (h *Harness) dispatchScreenView(ctx context.Context, conn *grpc.ClientConn,
+	permit operation.OperationPermit, deviceID string, sender *controlSender) {
+	if deviceID == "" || permit.DeviceID != deviceID {
+		_ = sender.sendSessionError(permit.SessionID, "operation-device-mismatch", false)
+		return
+	}
+	opCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// register so a session-scoped KILL (obeyKill) can tear down THIS running screen stream — no frame may
+	// egress after a kill, and a session kill keeps the transport up so sctx-cancel alone would not reach it.
+	cancelEntry := h.registerScreenCancel(permit.SessionID, cancel)
+	defer h.unregisterScreenCancel(permit.SessionID, cancelEntry)
+
+	dataStream, err := pb.NewRemoteBridgeClient(conn).Data(opCtx)
+	if err != nil {
+		_ = sender.sendSessionError(permit.SessionID, "data-stream-open-failed", true)
+		return
+	}
+	send := func(f *pb.DataFrame) error {
+		return dataStream.Send(&pb.Envelope{
+			SessionId:         permit.SessionID,
+			StreamId:          permit.OperationID,
+			ChannelType:       pb.ChannelType_DATA,
+			SentAtEpochMillis: time.Now().UnixMilli(),
+			Payload:           &pb.Envelope_DataFrame{DataFrame: f},
+		})
+	}
+	herr := h.cfg.ScreenViewDispatcher.Handle(opCtx, permit, permit.OperationID, send, time.Now().UnixMilli())
+	// Drain the broker's half to EOF before the deferred cancel fires so the terminal EndStream is delivered
+	// (same rationale as dispatchOperation); bound the drain against a broker that never closes.
+	_ = dataStream.CloseSend()
+	drainTimer := time.AfterFunc(dataStreamDrainGrace, cancel)
+	for {
+		if _, rerr := dataStream.Recv(); rerr != nil {
+			break
+		}
+	}
+	drainTimer.Stop()
+	if herr != nil {
+		// bounded, non-revealing CONTROL code; the DATA stream was already closed with a terminal EndStream
+		_ = sender.sendSessionError(permit.SessionID, "screen-view-failed", false)
+	}
 }
