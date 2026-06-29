@@ -149,7 +149,17 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 			session.Abort()
 			return nil
 		case <-pumpDone:
-			// producer ended: drain whatever the gate still holds, then a best-effort terminal EndStream.
+			// The producer ended. When ctx is also cancelled, BOTH this case and the ctx.Done()
+			// case are ready and select picks one at random — so the producer may have stopped
+			// BECAUSE of the cancellation. Treat that as cancellation (abort, NO terminal
+			// EndStream), matching the ctx.Done() branch, so a cancelled dispatch never emits an
+			// EndStream regardless of select ordering (deterministic; was a -race flake).
+			if ctx.Err() != nil {
+				session.Abort()
+				return nil
+			}
+			// clean producer-exhaustion: drain whatever the gate still holds, then a best-effort
+			// terminal EndStream.
 			if derr := drain(); derr != nil {
 				session.Abort()
 				return derr
@@ -157,6 +167,13 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 			_ = send(&pb.DataFrame{StreamId: streamID, FrameSeq: seq, ContentType: d.contentType, EndStream: true})
 			return nil
 		case <-ticker.C:
+			// ctx.Done() + ticker.C can both be ready; if cancelled, abort with NO further
+			// egress instead of draining queued frames — so no DATA frame egresses after a
+			// cancel regardless of select ordering (Codex 019f1132).
+			if ctx.Err() != nil {
+				session.Abort()
+				return nil
+			}
 			if derr := drain(); derr != nil {
 				session.Abort()
 				return derr
