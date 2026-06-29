@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -91,6 +92,40 @@ func TestSecurePipeRejectsWrongNonce(t *testing.T) {
 
 	if _, err := AcceptAndVerify(l, good, 5*time.Second); !errors.Is(err, ErrIPCHandshake) {
 		t.Fatalf("wrong-nonce accept err = %v, want ErrIPCHandshake", err)
+	}
+}
+
+// PipeClientProcessID returns the connecting client's real PID — the anti-spoof
+// check (the screenview factory rejects a client whose PID != the launched helper).
+// In-process the client is THIS process, so the resolved PID is os.Getpid().
+func TestPipeClientProcessIDResolvesConnectingProcess(t *testing.T) {
+	sid := currentUserSID(t)
+	name, _ := RandomPipeName()
+	l, err := ListenSecurePipe(name, sid)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l.Close()
+	nonce, _ := NewLaunchNonce()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if conn, derr := DialAndHandshake(ctx, name, nonce); derr == nil {
+			time.Sleep(500 * time.Millisecond) // hold the connection open for the PID query
+			_ = conn.Close()
+		}
+	}()
+	conn, err := AcceptAndVerify(l, nonce, 5*time.Second)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	defer conn.Close()
+	pid, err := PipeClientProcessID(conn)
+	if err != nil {
+		t.Fatalf("PipeClientProcessID: %v", err)
+	}
+	if pid != uint32(os.Getpid()) {
+		t.Fatalf("client PID = %d, want this process %d (in-process client)", pid, os.Getpid())
 	}
 }
 

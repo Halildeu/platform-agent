@@ -275,6 +275,16 @@ func NewWindowsProducerFactory() ProducerFactory {
 			}
 		}()
 
+		// ANTI-SPOOF: the connected client MUST be the helper we launched. A same-session
+		// process that read the launch nonce off the helper's argv and pre-empted the
+		// connection has a DIFFERENT PID -> reject fail-closed. This is the unspoofable
+		// check (the pipe name is already random + the nonce single-use); it closes the
+		// nonce-in-argv spoof so VIEW_ONLY frames can only originate from our own helper.
+		clientPID, perr := dataplane.PipeClientProcessID(conn)
+		if perr != nil || clientPID != helper.Pid {
+			return nil, fmt.Errorf("screenview: pipe client PID %d != launched helper PID %d (anti-spoof, fail-closed): %v", clientPID, helper.Pid, perr)
+		}
+
 		// Factory-level fail-closed (READY proof), ctx-aware: the helper emits its FIRST
 		// frame ONLY after the banner self-verified and a capture succeeded, so reading a
 		// first frame here proves the session is live + bannered. Bounded by BOTH

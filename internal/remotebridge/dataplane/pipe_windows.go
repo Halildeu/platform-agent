@@ -136,6 +136,28 @@ func AcceptAndVerifyContext(ctx context.Context, l net.Listener, expectedNonce [
 	return conn, nil
 }
 
+// PipeClientProcessID returns the PID of the process on the OTHER end of an
+// accepted server pipe connection (GetNamedPipeClientProcessId). The caller
+// verifies it equals the PID of the helper it launched — so a same-session process
+// that read the launch nonce off the helper's argv and connected first is rejected
+// fail-closed (it has a different PID). winio's pipe conn exposes the OS handle via
+// a promoted Fd(); if that is ever not the case, this fails closed (cannot verify
+// => reject). Anti-spoof for the active-session helper IPC.
+func PipeClientProcessID(conn net.Conn) (uint32, error) {
+	fdConn, ok := conn.(interface{ Fd() uintptr })
+	if !ok {
+		return 0, errors.New("dataplane: pipe conn does not expose a handle for client-PID verification")
+	}
+	var pid uint32
+	if err := windows.GetNamedPipeClientProcessId(windows.Handle(fdConn.Fd()), &pid); err != nil {
+		return 0, fmt.Errorf("dataplane: GetNamedPipeClientProcessId: %w", err)
+	}
+	if pid == 0 {
+		return 0, errors.New("dataplane: pipe client PID resolved to 0")
+	}
+	return pid, nil
+}
+
 // DialAndHandshake dials the pipe (bounded by ctx) and sends the launch nonce as
 // the first message. The caller then WriteFrame's captured frames.
 func DialAndHandshake(ctx context.Context, name string, nonce []byte) (net.Conn, error) {
