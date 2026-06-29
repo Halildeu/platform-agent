@@ -1995,9 +1995,10 @@ is the exact wire shape the backend will need to deserialize.
 ### 21.1 Scope
 
 Read-only security/network block evidence probe for failed-device queue
-auto-classification. The v1 Windows source is Security event log `5157`
-(Windows Filtering Platform blocked connection). The agent projects recent
-blocked-connection rows into backend-compatible EDR_NETWORK evidence events.
+auto-classification. The v1 Windows source is Security event log `5152`
+packet-drop and `5157` connection-block Windows Filtering Platform events. The
+agent projects recent blocked packet/connection rows into backend-compatible
+EDR_NETWORK evidence events.
 
 This probe is deliberately narrow:
 
@@ -2011,7 +2012,7 @@ This probe is deliberately narrow:
 ### 21.2 HARD BOUNDARY (do NOT widen)
 
 - Read-only only. The Windows implementation uses a fixed PowerShell
-  `Get-WinEvent` query against `Security` log event id `5157`, scoped to the
+  `Get-WinEvent` query against `Security` log event ids `5152` and `5157`, scoped to the
   last 24 hours, with `-MaxEvents 50` and a 10s agent-side timeout.
 - The fixed inline command runs with `-NoProfile -NonInteractive
   -ExecutionPolicy Bypass`, matching the existing read-only inventory probe

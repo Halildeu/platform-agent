@@ -73,9 +73,10 @@ type windowsFirewallBlockEventRow struct {
 func queryWindowsFirewallBlockEvents(ctx context.Context) ([]rawSecurityNetworkEvent, string) {
 	const psScript = `$ErrorActionPreference = 'Stop'
 $start = (Get-Date).AddHours(-24)
+$eventIds = @(5152,5157)
 try {
   try {
-    $events = Get-WinEvent -FilterHashtable @{LogName='Security'; Id=5157; StartTime=$start} -MaxEvents 50 -ErrorAction Stop
+    $events = Get-WinEvent -FilterHashtable @{LogName='Security'; Id=$eventIds; StartTime=$start} -MaxEvents 50 -ErrorAction Stop
   } catch {
     if ($_.Exception.Message -like '*No events were found*') {
       $events = @()

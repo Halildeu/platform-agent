@@ -481,8 +481,8 @@ type CollectOptions struct {
 
 	// IncludeSecurityNetwork gates the #527 security/network block
 	// evidence probe. When true, CollectWithOptions invokes
-	// ProbeSecurityNetwork (Windows Security event log 5157 / WFP
-	// blocked connections on Windows; Supported=false stub elsewhere)
+	// ProbeSecurityNetwork (Windows Security event log 5152/5157 / WFP
+	// blocked packet-or-connection events on Windows; Supported=false stub elsewhere)
 	// and attaches the result to Snapshot.SecurityNetwork. When false
 	// (the default), the probe is not invoked and the wire payload omits
 	// the field.
