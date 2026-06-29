@@ -109,12 +109,14 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex string) error {
 	producer := dataplane.NewWindowsPrimaryScreenFrameProducer(dataplane.NewPNGEncoder(), captureInterval, captureMaxErr, indicator)
 	defer producer.Close()
 
-	for {
-		// Banner LIVENESS (fail-closed): the banner is verified once above, but it could
-		// be torn down mid-session (WM_CLOSE/WM_DESTROY => ShowActiveBanner returns). We
-		// have NOT cancelled it yet (cancelBanner is deferred to exit), so ANY value on
-		// bannerErr here means the banner went down unexpectedly => stop streaming
-		// (no banner => no endpoint awareness => no frame).
+	// Banner LIVENESS (fail-closed): the banner is verified once above, but it could be
+	// torn down mid-session (WM_CLOSE/WM_DESTROY => ShowActiveBanner returns). We have
+	// NOT cancelled it yet (cancelBanner is deferred to exit), so ANY value on bannerErr
+	// means the banner went down unexpectedly. Check it BEFORE producing a frame AND
+	// again AFTER Next() returns (which may block one interval + capture) but BEFORE the
+	// frame egresses — so a banner that closes during capture never lets that frame ship
+	// ("no banner => no frame", modulo a sub-100ms TOCTOU intrinsic to async UI).
+	checkBannerAlive := func() error {
 		select {
 		case berr := <-bannerErr:
 			if berr == nil {
@@ -122,10 +124,19 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex string) error {
 			}
 			return fmt.Errorf("screenview helper: endpoint banner went down (fail-closed): %w", berr)
 		default:
+			return nil
+		}
+	}
+	for {
+		if err := checkBannerAlive(); err != nil {
+			return err
 		}
 		f, ok := producer.Next()
 		if !ok {
 			break // capture tripped fail-closed (consecutive errors) => end the stream
+		}
+		if err := checkBannerAlive(); err != nil {
+			return err // banner went down during capture — do NOT egress this frame
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if err := dataplane.WriteFrame(conn, f.Payload); err != nil {
