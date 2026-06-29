@@ -167,6 +167,13 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 			_ = send(&pb.DataFrame{StreamId: streamID, FrameSeq: seq, ContentType: d.contentType, EndStream: true})
 			return nil
 		case <-ticker.C:
+			// ctx.Done() + ticker.C can both be ready; if cancelled, abort with NO further
+			// egress instead of draining queued frames — so no DATA frame egresses after a
+			// cancel regardless of select ordering (Codex 019f1132).
+			if ctx.Err() != nil {
+				session.Abort()
+				return nil
+			}
 			if derr := drain(); derr != nil {
 				session.Abort()
 				return derr
