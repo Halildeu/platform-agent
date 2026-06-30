@@ -123,21 +123,24 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 	tlsCfg := deps.tlsConfig
 	deviceKeyResponder := deps.deviceKeyResponder
 	if cfg.RemoteBridgeOperationsEnabled && cfg.RemoteBridgeDeviceKeySessionEnabled {
-		if tlsCfg == nil || deviceKeyResponder == nil {
+		// The device-key session's mTLS leaf and challenge responder MUST come from ONE shared
+		// TPM (triple-SPKI: the live mTLS leaf and the challenge response are the same key). The
+		// deps test seams must therefore be injected together — both or neither — so a test can
+		// never pair an injected leaf with a different-keyed responder, and a half-injection can
+		// never silently open a real TPM for the other half.
+		if (tlsCfg == nil) != (deviceKeyResponder == nil) {
+			return harness.Config{}, errors.New("remote-bridge device-key session: tlsConfig and deviceKeyResponder must be provided together (both or neither) — they must share one TPM")
+		}
+		if tlsCfg == nil { // both nil → build the shared-TPM identity
 			// Catch the obvious misconfig BEFORE opening the TPM, so a config error never
 			// leaves a TPM handle held for the agent's lifetime.
 			if strings.TrimSpace(cfg.RemoteBridgeBrokerAddr) == "" {
 				return harness.Config{}, errors.New("remote-bridge device-key session requires a broker address")
 			}
-			builtTLS, builtResponder, derr := newTPMDeviceKeySessionIdentity(ctx, cfg)
+			var derr error
+			tlsCfg, deviceKeyResponder, derr = newTPMDeviceKeySessionIdentity(ctx, cfg)
 			if derr != nil {
 				return harness.Config{}, fmt.Errorf("remote-bridge device-key session: %w", derr)
-			}
-			if tlsCfg == nil {
-				tlsCfg = builtTLS
-			}
-			if deviceKeyResponder == nil {
-				deviceKeyResponder = builtResponder
 			}
 		}
 	} else if tlsCfg == nil {

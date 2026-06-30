@@ -9,9 +9,16 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"platform-agent/internal/mtls"
 )
+
+// certClockSkew tolerates a small clock difference between the issuer (Vault) and this
+// host when pre-checking the leaf validity window, so a just-issued or near-expiry cert
+// is not falsely rejected by a few seconds of skew (the TLS stack / broker apply the
+// authoritative check).
+const certClockSkew = 5 * time.Minute
 
 // buildDeviceKeySessionTLSConfig builds the remote-bridge mTLS client config for the
 // Faz 22.6 #548 device-key strong path.
@@ -38,6 +45,19 @@ func buildDeviceKeySessionTLSConfig(certPEM []byte, signer crypto.Signer, server
 	leaf := chain[0]
 	if err := assertSamePublicKey(leaf.PublicKey, signer.Public()); err != nil {
 		return nil, fmt.Errorf("device-key session: issued cert does not match the TPM device key (re-enroll required): %w", err)
+	}
+	// Fail-closed on an expired / not-yet-valid leaf with an explicit re-enroll hint, so the
+	// short-lived (~24h) device cert surfaces a clear cause instead of an opaque TLS handshake
+	// failure. The TLS stack + broker remain the authoritative validity check; this is the
+	// agent-side early diagnostic.
+	now := time.Now()
+	if now.Add(certClockSkew).Before(leaf.NotBefore) {
+		return nil, fmt.Errorf("device-key session: device cert not yet valid (NotBefore %s; now %s) — re-enroll required",
+			leaf.NotBefore.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
+	}
+	if now.Add(-certClockSkew).After(leaf.NotAfter) {
+		return nil, fmt.Errorf("device-key session: device cert expired (NotAfter %s; now %s) — re-enroll required",
+			leaf.NotAfter.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	}
 	der := make([][]byte, len(chain))
 	for i, c := range chain {

@@ -74,10 +74,19 @@ func newTPMDeviceKeySessionIdentity(ctx context.Context, cfg config.Config) (*tl
 		mu.Unlock()
 	}()
 
-	responder := func(_ context.Context, challenge *pb.DeviceKeyChallenge, sessionID string) (*pb.DeviceKeyAttestationResponse, error) {
+	responder := func(callCtx context.Context, challenge *pb.DeviceKeyChallenge, sessionID string) (*pb.DeviceKeyAttestationResponse, error) {
+		// Honor the per-call (stream) context BEFORE taking the TPM lock: a closed stream must
+		// not make the responder do TPM work and block a pending TLS handshake Sign on the
+		// shared mutex. Re-check both the call and the lifetime ctx after acquiring the lock.
+		if err := callCtx.Err(); err != nil {
+			return nil, err
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := callCtx.Err(); err != nil {
 			return nil, err
 		}
 		return devkeysession.Respond(tpm, challenge, sessionID, time.Now().UnixMilli())

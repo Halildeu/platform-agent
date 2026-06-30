@@ -22,6 +22,11 @@ import (
 // without a real TPM.
 func genSelfSignedEC(t *testing.T) ([]byte, *ecdsa.PrivateKey) {
 	t.Helper()
+	return genSelfSignedECValidity(t, time.Unix(0, 0), time.Unix(1<<31-1, 0))
+}
+
+func genSelfSignedECValidity(t *testing.T, notBefore, notAfter time.Time) ([]byte, *ecdsa.PrivateKey) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
@@ -29,8 +34,8 @@ func genSelfSignedEC(t *testing.T) ([]byte, *ecdsa.PrivateKey) {
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "device"},
-		NotBefore:    time.Unix(0, 0),
-		NotAfter:     time.Unix(1<<31-1, 0),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
@@ -88,6 +93,34 @@ func TestBuildDeviceKeySessionTLSConfig_NoCertBlockFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "CERTIFICATE block") {
 		t.Errorf("error should name the missing CERTIFICATE block, got: %v", err)
+	}
+}
+
+func TestBuildDeviceKeySessionTLSConfig_ExpiredCertFailsClosed(t *testing.T) {
+	// A device cert that expired well beyond the clock-skew leeway must fail closed with an
+	// explicit re-enroll hint (the ~24h device cert otherwise dies with an opaque handshake error).
+	notBefore := time.Now().Add(-48 * time.Hour)
+	notAfter := time.Now().Add(-24 * time.Hour)
+	certPEM, key := genSelfSignedECValidity(t, notBefore, notAfter)
+	_, err := buildDeviceKeySessionTLSConfig(certPEM, key, "broker.example", tls.VersionTLS12)
+	if err == nil {
+		t.Fatal("an expired device cert must fail closed")
+	}
+	if !strings.Contains(err.Error(), "expired") || !strings.Contains(err.Error(), "re-enroll") {
+		t.Errorf("error should name expiry + re-enroll, got: %v", err)
+	}
+}
+
+func TestBuildDeviceKeySessionTLSConfig_NotYetValidFailsClosed(t *testing.T) {
+	notBefore := time.Now().Add(24 * time.Hour)
+	notAfter := time.Now().Add(48 * time.Hour)
+	certPEM, key := genSelfSignedECValidity(t, notBefore, notAfter)
+	_, err := buildDeviceKeySessionTLSConfig(certPEM, key, "broker.example", tls.VersionTLS12)
+	if err == nil {
+		t.Fatal("a not-yet-valid device cert must fail closed")
+	}
+	if !strings.Contains(err.Error(), "not yet valid") {
+		t.Errorf("error should name not-yet-valid, got: %v", err)
 	}
 }
 
