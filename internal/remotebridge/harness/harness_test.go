@@ -1,11 +1,13 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,6 +34,23 @@ func (f *fakeBroker) Connect(stream pb.RemoteBridge_ConnectServer) error {
 type fixture struct {
 	h     *Harness
 	dials *atomic.Int64
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
 }
 
 // start spins a bufconn broker + a running harness. The returned dials
@@ -74,6 +93,69 @@ func start(t *testing.T, script func(stream pb.RemoteBridge_ConnectServer) error
 	t.Cleanup(cancel)
 	go h.Run(ctx)
 	return fixture{h: h, dials: dials}
+}
+
+func TestRunLogsIdentityWaitReadyAndDialWithoutRawDeviceID(t *testing.T) {
+	var deviceID atomic.Value
+	deviceID.Store("")
+
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	pb.RegisterRemoteBridgeServer(srv, &fakeBroker{script: func(stream pb.RemoteBridge_ConnectServer) error {
+		if _, err := stream.Recv(); err != nil {
+			return err
+		}
+		<-stream.Context().Done()
+		return nil
+	}})
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	dials := &atomic.Int64{}
+	logs := &lockedBuffer{}
+	cfg := Config{
+		BrokerAddr:             "broker.test:9444",
+		DeviceIDProvider:       func() string { return deviceID.Load().(string) },
+		AgentVersion:           "0.0.0-test",
+		FirstHeartbeatDeadline: 2 * time.Second,
+		BackoffMin:             10 * time.Millisecond,
+		BackoffMax:             50 * time.Millisecond,
+		IdentityPollInterval:   10 * time.Millisecond,
+		Dialer: func(ctx context.Context) (*grpc.ClientConn, error) {
+			dials.Add(1)
+			return grpc.NewClient("passthrough:///bufnet",
+				grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+					return lis.DialContext(ctx)
+				}),
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+			)
+		},
+	}
+	h, err := New(cfg, log.New(logs, "", 0))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go h.Run(ctx)
+
+	waitFor(t, time.Second, "identity wait log", func() bool {
+		return strings.Contains(logs.String(), "remote-bridge: waiting for device identity")
+	})
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("dials before device identity = %d, want 0", got)
+	}
+
+	deviceID.Store("device-late")
+	wantFingerprint := deviceIDFingerprint("device-late")
+	waitFor(t, time.Second, "identity ready + dial logs", func() bool {
+		logText := logs.String()
+		return strings.Contains(logText, "remote-bridge: device identity ready device_id_sha256_12="+wantFingerprint) &&
+			strings.Contains(logText, "remote-bridge: dialing broker broker_addr=\"broker.test:9444\" device_id_sha256_12="+wantFingerprint)
+	})
+	if strings.Contains(logs.String(), "device-late") {
+		t.Fatalf("remote-bridge logs leaked raw device id: %s", logs.String())
+	}
 }
 
 func heartbeatEnv(intervalMillis, frameSeq int64) *pb.Envelope {

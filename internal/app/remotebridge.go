@@ -34,12 +34,21 @@ import (
 // revision #2). The returned harness is observational (counters/session
 // state); lifecycle is owned by ctx.
 func StartRemoteBridge(ctx context.Context, cfg config.Config, deviceID func() string, logger *log.Logger) *harness.Harness {
-	if !cfg.RemoteBridgeEnabled {
-		return nil
-	}
 	if logger == nil {
 		logger = log.Default()
 	}
+	if !cfg.RemoteBridgeEnabled {
+		logger.Printf("remote-bridge: disabled enabled=false")
+		return nil
+	}
+	logger.Printf("remote-bridge: starting enabled=true broker_addr=%q operations=%t view_only=%t device_key_session=%t pilot_auto_consent=%t plaintext=%t",
+		cfg.RemoteBridgeBrokerAddr,
+		cfg.RemoteBridgeOperationsEnabled,
+		cfg.RemoteBridgeViewOnlyEnabled,
+		cfg.RemoteBridgeDeviceKeySessionEnabled,
+		cfg.RemoteBridgePilotAutoConsent,
+		cfg.RemoteBridgeInsecurePlaintext,
+	)
 	hcfg, err := remoteBridgeHarnessConfig(ctx, cfg, deviceID, remoteBridgeDeps{})
 	if err != nil {
 		logger.Printf("remote-bridge: harness config refused: %v", err)
@@ -52,6 +61,12 @@ func StartRemoteBridge(ctx context.Context, cfg config.Config, deviceID func() s
 		logger.Printf("remote-bridge: harness init refused: %v", err)
 		return nil
 	}
+	logger.Printf("remote-bridge: harness started broker_addr=%q operations=%t view_only=%t device_key_session=%t",
+		hcfg.BrokerAddr,
+		hcfg.PTYDispatcher != nil,
+		hcfg.ScreenViewDispatcher != nil,
+		hcfg.DeviceKeyResponder != nil,
+	)
 	go h.Run(ctx)
 	return h
 }

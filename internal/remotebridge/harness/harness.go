@@ -287,16 +287,29 @@ func isLoopbackBrokerAddr(addr string) bool {
 // returns a non-ctx error: every stream failure is absorbed into backoff.
 func (h *Harness) Run(ctx context.Context) {
 	backoff := h.cfg.BackoffMin
+	waitingForIdentityLogged := false
+	lastReadyDeviceFingerprint := ""
 	for {
 		deviceID := strings.TrimSpace(h.cfg.DeviceIDProvider())
 		if deviceID == "" {
 			// No identity yet — wait, NEVER dial (Codex T-3 revision #2).
+			if !waitingForIdentityLogged {
+				h.logger.Printf("remote-bridge: waiting for device identity broker_addr=%q poll_interval=%s", h.cfg.BrokerAddr, h.cfg.IdentityPollInterval)
+				waitingForIdentityLogged = true
+			}
 			if !sleepCtx(ctx, h.cfg.IdentityPollInterval) {
 				return
 			}
 			continue
 		}
+		waitingForIdentityLogged = false
+		deviceFingerprint := deviceIDFingerprint(deviceID)
+		if deviceFingerprint != lastReadyDeviceFingerprint {
+			h.logger.Printf("remote-bridge: device identity ready device_id_sha256_12=%s broker_addr=%q", deviceFingerprint, h.cfg.BrokerAddr)
+			lastReadyDeviceFingerprint = deviceFingerprint
+		}
 
+		h.logger.Printf("remote-bridge: dialing broker broker_addr=%q device_id_sha256_12=%s", h.cfg.BrokerAddr, deviceFingerprint)
 		healthy, err := h.connectOnce(ctx, deviceID)
 		if ctx.Err() != nil {
 			return
@@ -313,6 +326,15 @@ func (h *Harness) Run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func deviceIDFingerprint(deviceID string) string {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return "empty"
+	}
+	sum := sha256.Sum256([]byte(deviceID))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // errTransportKilled marks a broker-initiated transport-scoped kill; the
