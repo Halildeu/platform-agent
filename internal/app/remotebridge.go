@@ -114,8 +114,33 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 	if strings.TrimSpace(cfg.RemoteBridgePermitKeyID) == "" {
 		return harness.Config{}, errors.New("remote-bridge operations require ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID")
 	}
+	// mTLS transport. For the #548 device-key strong path the transport leaf MUST be the
+	// go-tpm device key (the broker enforces triple-SPKI: attested == LIVE mTLS leaf ==
+	// persisted), so the TLS config and the challenge responder are built together from
+	// ONE shared TPM via newTPMDeviceKeySessionIdentity — the Windows cert-store loader can
+	// never bind a go-tpm transient primary. Otherwise the bridge uses the machine-cert
+	// from the Windows cert store. deps.* are the CI test seams (no real TPM).
 	tlsCfg := deps.tlsConfig
-	if tlsCfg == nil {
+	deviceKeyResponder := deps.deviceKeyResponder
+	if cfg.RemoteBridgeOperationsEnabled && cfg.RemoteBridgeDeviceKeySessionEnabled {
+		if tlsCfg == nil || deviceKeyResponder == nil {
+			// Catch the obvious misconfig BEFORE opening the TPM, so a config error never
+			// leaves a TPM handle held for the agent's lifetime.
+			if strings.TrimSpace(cfg.RemoteBridgeBrokerAddr) == "" {
+				return harness.Config{}, errors.New("remote-bridge device-key session requires a broker address")
+			}
+			builtTLS, builtResponder, derr := newTPMDeviceKeySessionIdentity(ctx, cfg)
+			if derr != nil {
+				return harness.Config{}, fmt.Errorf("remote-bridge device-key session: %w", derr)
+			}
+			if tlsCfg == nil {
+				tlsCfg = builtTLS
+			}
+			if deviceKeyResponder == nil {
+				deviceKeyResponder = builtResponder
+			}
+		}
+	} else if tlsCfg == nil {
 		var err error
 		tlsCfg, err = remoteBridgeMTLSConfig(ctx, cfg)
 		if err != nil {
@@ -140,25 +165,12 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 			hcfg.ConsentResponder = pilotAutoConsentResponder
 		}
 		if cfg.RemoteBridgeDeviceKeySessionEnabled {
-			// #548 strong path: answer the broker's device-key session challenge with a
-			// TPM-native attestation. Gated inside the operations block because the binding
+			// #548 strong path: the device-key session challenge is answered with a TPM-native
+			// attestation over the SAME device key that signs the mTLS leaf above (the binding
 			// context pins the mTLS transport-peer key — the challenge is only meaningful over
-			// the secure channel. A TPM-open failure refuses loudly (fail-closed) instead of
-			// silently leaving the strong path unanswered.
-			responder := deps.deviceKeyResponder
-			if responder == nil {
-				// Catch the obvious misconfig (harness.New would reject it later) BEFORE opening the
-				// TPM, so a config error never leaves a TPM handle held for the agent's lifetime.
-				if strings.TrimSpace(cfg.RemoteBridgeBrokerAddr) == "" {
-					return harness.Config{}, errors.New("remote-bridge device-key session requires a broker address")
-				}
-				var rerr error
-				responder, rerr = newTPMDeviceKeyResponder(ctx)
-				if rerr != nil {
-					return harness.Config{}, fmt.Errorf("remote-bridge device-key session: %w", rerr)
-				}
-			}
-			hcfg.DeviceKeyResponder = responder
+			// the secure channel). The responder was built together with the TLS config from one
+			// shared TPM; a TPM-open failure already refused loudly above (fail-closed).
+			hcfg.DeviceKeyResponder = deviceKeyResponder
 		}
 	}
 

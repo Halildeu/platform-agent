@@ -103,11 +103,10 @@ func runTpmAutoEnroll(ctx context.Context, cfg config.Config, apiURL string) int
 		newDevice:  tpmenroll.NewWindowsTPMDevice,
 		httpClient: httpClient,
 		persist: func(certPEM string) error {
-			base := os.Getenv("ProgramData")
-			if base == "" {
-				base = "."
-			}
-			out := filepath.Join(base, "EndpointAgent", "tpm-client-cert.pem")
+			// Shared with the remote-bridge #548 device-key session reader
+			// (internal/app/newTPMDeviceKeySessionIdentity) via the same helper so the
+			// write and read locations can never drift.
+			out := tpmenroll.DeviceClientCertPath()
 			if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 				return err
 			}
