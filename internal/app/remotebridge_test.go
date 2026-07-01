@@ -68,6 +68,37 @@ func TestRemoteBridgeOperationDispatcherDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestRemoteBridgeIdleHarnessCarriesMTLSWhenProvided(t *testing.T) {
+	cfg := config.Default()
+	cfg.RemoteBridgeEnabled = true
+	cfg.RemoteBridgeBrokerAddr = "broker.example:443"
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{[]byte("cert")}}}}
+
+	hcfg, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, remoteBridgeDeps{
+		tlsConfig: tlsCfg,
+	})
+	if err != nil {
+		t.Fatalf("idle harness config should accept mTLS transport identity without operation permits: %v", err)
+	}
+	if hcfg.PTYDispatcher != nil || hcfg.ScreenViewDispatcher != nil || hcfg.DeviceKeyResponder != nil {
+		t.Fatal("idle mTLS transport must not enable any operation dispatcher or device-key responder")
+	}
+	if hcfg.TLSConfig != tlsCfg {
+		t.Fatal("idle harness must carry the mTLS transport config so mTLS brokers can complete the handshake")
+	}
+}
+
+func TestRemoteBridgeAutoEnrollCertFilterEnablesIdleMTLSPath(t *testing.T) {
+	cfg := config.Default()
+	if remoteBridgeHasMTLSCertFilter(cfg) {
+		t.Fatal("default config must not imply an mTLS cert-store lookup")
+	}
+	cfg.AutoEnrollCertSANURIPrefix = "adcomputer:"
+	if !remoteBridgeHasMTLSCertFilter(cfg) {
+		t.Fatal("auto-enroll SAN URI prefix must enable the idle mTLS transport path")
+	}
+}
+
 func TestRemoteBridgeRawAttestationEvidenceOverridesStructuredProducer(t *testing.T) {
 	cfg := config.Default()
 	cfg.RemoteBridgeEnabled = true
