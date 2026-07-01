@@ -112,31 +112,29 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		return harness.Config{}, errors.New("remote-bridge device-key session requires ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED")
 	}
 
-	// VIEW_ONLY (screen observation, #1580) and CONSTRAINED_PTY (command execution) are INDEPENDENT capabilities
-	// (ADR-0034 §13/D10; least-privilege). Each is wired only by its own flag — enabling VIEW_ONLY never enables
-	// PTY and vice-versa — but both are "operation-capable" and so share the secure-channel + broker-permit
-	// trust-anchor preconditions below. With neither enabled the harness stays idle (observational only).
+	// mTLS transport identity is independent of operation dispatch. The live
+	// remote-bridge endpoint is an mTLS endpoint and refuses the TLS handshake
+	// before any AgentHello when the client does not present a machine cert.
+	// Therefore an idle, observational harness must still present the enrolled
+	// machine cert whenever a cert filter is configured. Operation permits and
+	// dispatchers remain separately gated below.
 	operationCapable := cfg.RemoteBridgeOperationsEnabled || cfg.RemoteBridgeViewOnlyEnabled
-	if !operationCapable {
+	tlsCfg := deps.tlsConfig
+	deviceKeyResponder := deps.deviceKeyResponder
+	if cfg.RemoteBridgeInsecurePlaintext {
+		if operationCapable {
+			return harness.Config{}, errors.New("remote-bridge operations require TLS/mTLS; plaintext is refused")
+		}
 		return hcfg, nil
 	}
-	if cfg.RemoteBridgeInsecurePlaintext {
-		return harness.Config{}, errors.New("remote-bridge operations require TLS/mTLS; plaintext is refused")
-	}
-	if strings.TrimSpace(cfg.RemoteBridgePermitBrokerPublicKeyB64) == "" {
-		return harness.Config{}, errors.New("remote-bridge operations require ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64")
-	}
-	if strings.TrimSpace(cfg.RemoteBridgePermitKeyID) == "" {
-		return harness.Config{}, errors.New("remote-bridge operations require ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID")
-	}
-	// mTLS transport. For the #548 device-key strong path the transport leaf MUST be the
+
+	// For the #548 device-key strong path the transport leaf MUST be the
 	// go-tpm device key (the broker enforces triple-SPKI: attested == LIVE mTLS leaf ==
 	// persisted), so the TLS config and the challenge responder are built together from
 	// ONE shared TPM via newTPMDeviceKeySessionIdentity — the Windows cert-store loader can
-	// never bind a go-tpm transient primary. Otherwise the bridge uses the machine-cert
-	// from the Windows cert store. deps.* are the CI test seams (no real TPM).
-	tlsCfg := deps.tlsConfig
-	deviceKeyResponder := deps.deviceKeyResponder
+	// never bind a go-tpm transient primary. Otherwise, when configured, the bridge uses
+	// the machine-cert from the Windows cert store. deps.* are the CI test seams (no real
+	// TPM / no Windows cert store).
 	if cfg.RemoteBridgeOperationsEnabled && cfg.RemoteBridgeDeviceKeySessionEnabled {
 		// The device-key session's mTLS leaf and challenge responder MUST come from ONE shared
 		// TPM (triple-SPKI: the live mTLS leaf and the challenge response are the same key). The
@@ -158,7 +156,7 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 				return harness.Config{}, fmt.Errorf("remote-bridge device-key session: %w", derr)
 			}
 		}
-	} else if tlsCfg == nil {
+	} else if tlsCfg == nil && remoteBridgeHasMTLSCertFilter(cfg) {
 		var err error
 		tlsCfg, err = remoteBridgeMTLSConfig(ctx, cfg)
 		if err != nil {
@@ -166,6 +164,20 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		}
 	}
 	hcfg.TLSConfig = tlsCfg
+
+	// VIEW_ONLY (screen observation, #1580) and CONSTRAINED_PTY (command execution) are INDEPENDENT capabilities
+	// (ADR-0034 §13/D10; least-privilege). Each is wired only by its own flag — enabling VIEW_ONLY never enables
+	// PTY and vice-versa — but both are "operation-capable" and so share the broker-permit trust-anchor
+	// preconditions below. With neither enabled the harness stays idle (observational only).
+	if !operationCapable {
+		return hcfg, nil
+	}
+	if strings.TrimSpace(cfg.RemoteBridgePermitBrokerPublicKeyB64) == "" {
+		return harness.Config{}, errors.New("remote-bridge operations require ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64")
+	}
+	if strings.TrimSpace(cfg.RemoteBridgePermitKeyID) == "" {
+		return harness.Config{}, errors.New("remote-bridge operations require ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID")
+	}
 
 	// ONE shared device-bound authorizer provider for BOTH capabilities: PTY and VIEW_ONLY fetch the SAME
 	// *operation.Authorizer for a given device id, so the broker's per-session seq (monotonic ACROSS
@@ -305,9 +317,14 @@ func remoteBridgeCertFilter(cfg config.Config) (autoenroll.CertFilter, error) {
 	filter.SubjectSuffix = firstNonBlank(cfg.RemoteBridgeMTLSCertSubjectSuffix, cfg.AutoEnrollCertSubjectSuffix)
 	filter.SANURIPrefix = firstNonBlank(cfg.RemoteBridgeMTLSCertSANURIPrefix, cfg.AutoEnrollCertSANURIPrefix)
 	if strings.TrimSpace(filter.SubjectSuffix) == "" && strings.TrimSpace(filter.SANURIPrefix) == "" {
-		return autoenroll.CertFilter{}, errors.New("remote-bridge operations require an mTLS cert subject suffix or SAN URI prefix")
+		return autoenroll.CertFilter{}, errors.New("remote-bridge mTLS requires a cert subject suffix or SAN URI prefix")
 	}
 	return filter, nil
+}
+
+func remoteBridgeHasMTLSCertFilter(cfg config.Config) bool {
+	return strings.TrimSpace(firstNonBlank(cfg.RemoteBridgeMTLSCertSubjectSuffix, cfg.AutoEnrollCertSubjectSuffix)) != "" ||
+		strings.TrimSpace(firstNonBlank(cfg.RemoteBridgeMTLSCertSANURIPrefix, cfg.AutoEnrollCertSANURIPrefix)) != ""
 }
 
 func remoteBridgeServerName(cfg config.Config) (string, error) {
