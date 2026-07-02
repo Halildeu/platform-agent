@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"platform-agent/internal/autoenroll"
@@ -168,6 +171,42 @@ func TestDecideMode(t *testing.T) {
 				t.Fatalf("decideMode(%v, %q, %+v)=%q want %q", tc.flagSet, tc.regMode, tc.sig, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestHandleAutoEnrollServiceLoopExit_ReturnsOriginalWhenDeviceKeyBridgeOff(t *testing.T) {
+	want := errors.New("auto-enroll failed")
+	got := handleAutoEnrollServiceLoopExit(context.Background(), config.Config{}, want, nil)
+	if !errors.Is(got, want) {
+		t.Fatalf("error = %v, want original %v", got, want)
+	}
+}
+
+func TestHandleAutoEnrollServiceLoopExit_PreservesDeviceKeyBridgeUntilServiceStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := fmt.Errorf("heartbeat rejected: %w", autoenroll.ErrAuthFailure)
+	cfg := config.Config{
+		RemoteBridgeEnabled:                 true,
+		RemoteBridgeOperationsEnabled:       true,
+		RemoteBridgeDeviceKeySessionEnabled: true,
+	}
+	got := handleAutoEnrollServiceLoopExit(ctx, cfg, err, nil)
+	if !errors.Is(got, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled after preserving bridge until service stop", got)
+	}
+}
+
+func TestHandleAutoEnrollServiceLoopExit_DoesNotHideNonAuthFailures(t *testing.T) {
+	want := errors.New("config corrupted")
+	cfg := config.Config{
+		RemoteBridgeEnabled:                 true,
+		RemoteBridgeOperationsEnabled:       true,
+		RemoteBridgeDeviceKeySessionEnabled: true,
+	}
+	got := handleAutoEnrollServiceLoopExit(context.Background(), cfg, want, nil)
+	if !errors.Is(got, want) {
+		t.Fatalf("error = %v, want original %v", got, want)
 	}
 }
 
