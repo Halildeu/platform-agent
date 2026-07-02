@@ -295,6 +295,11 @@ Describe "Remote bridge installer env gating" {
             Should Throw "-RemoteBridgePilotAutoConsent requires -RemoteBridgeOperationsEnabled"
     }
 
+    It "rejects view-only attended consent when the bridge is disabled" {
+        { Assert-RemoteBridgeInstallConfig -Enabled $false -BrokerAddr "" -InsecurePlaintext $false -ViewOnlyAttendedConsent $true } |
+            Should Throw "-RemoteBridgeViewOnlyAttendedConsent requires -RemoteBridgeEnabled"
+    }
+
     It "writes only explicit remote bridge service environment values" {
         $values = @{
             "ENDPOINT_AGENT_LOG_DIR" = "C:\ProgramData\EndpointAgent\logs"
@@ -312,6 +317,7 @@ Describe "Remote bridge installer env gating" {
             -PermitBrokerPublicKeyB64 "pub-key-b64" `
             -PermitKeyID "kid-1" `
             -PilotAutoConsent $true `
+            -ViewOnlyAttendedConsent $true `
             -TLSServerName "remote-bridge-mtls.testai.acik.com"
 
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED"] | Should Be "true"
@@ -324,6 +330,7 @@ Describe "Remote bridge installer env gating" {
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64"] | Should Be "pub-key-b64"
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID"] | Should Be "kid-1"
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT"] | Should Be "true"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ATTENDED_CONSENT_ENABLED"] | Should Be "true"
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME"] | Should Be "remote-bridge-mtls.testai.acik.com"
     }
 

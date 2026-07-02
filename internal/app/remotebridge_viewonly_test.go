@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"testing"
+	"time"
 
 	"platform-agent/internal/config"
 	"platform-agent/internal/remotebridge/operation"
+	remotebridgepb "platform-agent/internal/remotebridge/pb"
 	"platform-agent/internal/remotebridge/screenview"
 )
 
@@ -41,11 +43,71 @@ func TestRemoteBridgeViewOnlyOnlyWiresScreenNotPTY(t *testing.T) {
 	if hcfg.PTYDispatcher != nil {
 		t.Fatal("view-only must NOT auto-enable the PTY dispatcher (least-privilege)")
 	}
-	if hcfg.ConsentResponder != nil || hcfg.DeviceKeyResponder != nil {
-		t.Fatal("view-only must not wire PTY-operation consent/device-key responders")
+	if hcfg.ConsentResponder == nil {
+		t.Fatal("view-only must wire an explicit consent deny responder until attended consent is enabled")
+	}
+	if hcfg.DeviceKeyResponder != nil {
+		t.Fatal("view-only must not wire device-key responders")
 	}
 	if hcfg.TLSConfig == nil {
 		t.Fatal("view-only is operation-capable and must require mTLS")
+	}
+	result, err := hcfg.ConsentResponder(context.Background(), &remotebridgepb.ConsentPrompt{
+		SessionId:         "sess-view",
+		Capabilities:      []remotebridgepb.Capability{remotebridgepb.Capability_VIEW_ONLY},
+		ExpiryEpochMillis: time.Now().Add(time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("view-only disabled consent responder: %v", err)
+	}
+	if result.GetGranted() || result.GetWindowsInteractiveSession() != "view-only-attended-consent-disabled" {
+		t.Fatalf("view-only without attended consent should explicitly deny: %+v", result)
+	}
+}
+
+func TestRemoteBridgeViewOnlyAttendedConsentWiresResponderWithoutPTY(t *testing.T) {
+	cfg := operationCapableCfg()
+	cfg.RemoteBridgeViewOnlyEnabled = true
+	cfg.RemoteBridgeViewOnlyAttendedConsentEnabled = true
+
+	called := false
+	fakeResponder := func(_ context.Context, prompt *remotebridgepb.ConsentPrompt) (*remotebridgepb.ConsentResult, error) {
+		called = true
+		return &remotebridgepb.ConsentResult{
+			SessionId:                 prompt.GetSessionId(),
+			Granted:                   true,
+			WindowsInteractiveSession: "test-attended-session",
+			GrantedAtEpochMillis:      time.Now().UnixMilli(),
+			ExpiryEpochMillis:         prompt.GetExpiryEpochMillis(),
+		}, nil
+	}
+	hcfg, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, remoteBridgeDeps{
+		tlsConfig:                &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{[]byte("cert")}}}},
+		viewOnlyConsentResponder: fakeResponder,
+	})
+	if err != nil {
+		t.Fatalf("view-only attended harness config: %v", err)
+	}
+	if hcfg.ScreenViewDispatcher == nil {
+		t.Fatal("view-only attended consent must still wire ScreenViewDispatcher")
+	}
+	if hcfg.PTYDispatcher != nil {
+		t.Fatal("view-only attended consent must not enable PTY")
+	}
+	if hcfg.ConsentResponder == nil {
+		t.Fatal("view-only attended consent did not wire a consent responder")
+	}
+	result, err := hcfg.ConsentResponder(context.Background(), &remotebridgepb.ConsentPrompt{
+		SessionId:           "sess-view",
+		OperatorDisplayName: "operator",
+		Capabilities:        []remotebridgepb.Capability{remotebridgepb.Capability_VIEW_ONLY},
+		ExpiryEpochMillis:   time.Now().Add(time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("view-only consent responder: %v", err)
+	}
+	if !called || !result.GetGranted() || result.GetWindowsInteractiveSession() != "test-attended-session" {
+		t.Fatalf("view-only consent did not route to attended responder: called=%v result=%+v", called, result)
 	}
 }
 
