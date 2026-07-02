@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -155,7 +156,10 @@ func main() {
 				app.StartRemoteBridge(ctx, cfg, func() string {
 					return runner.DeviceID(ctx)
 				}, logger)
-				return runner.RunLoop(ctx)
+				if err := runner.RunLoop(ctx); err != nil {
+					return handleAutoEnrollServiceLoopExit(ctx, cfg, err, logger)
+				}
+				return nil
 			}); err != nil {
 				logger.Fatalf("auto-enroll service run failed: %v", err)
 			}
@@ -228,6 +232,27 @@ const (
 	modeHMAC       = "hmac"
 	modeAutoEnroll = "auto-enroll"
 )
+
+func handleAutoEnrollServiceLoopExit(ctx context.Context, cfg config.Config, err error, logger *log.Logger) error {
+	if err == nil {
+		return nil
+	}
+	if !preserveDeviceKeyRemoteBridgeAfterAutoEnrollExit(cfg, err) {
+		return err
+	}
+	if logger != nil {
+		logger.Printf("auto-enroll lifecycle stopped fail-closed; preserving TPM device-key remote bridge until service stop: %v", err)
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func preserveDeviceKeyRemoteBridgeAfterAutoEnrollExit(cfg config.Config, err error) bool {
+	return errors.Is(err, autoenroll.ErrAuthFailure) &&
+		cfg.RemoteBridgeEnabled &&
+		cfg.RemoteBridgeOperationsEnabled &&
+		cfg.RemoteBridgeDeviceKeySessionEnabled
+}
 
 // resolveMode picks between the existing HMAC-signed mode and the
 // ADR-0029 mTLS auto-enroll mode. Precedence:
