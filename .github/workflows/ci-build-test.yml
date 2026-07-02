@@ -78,6 +78,9 @@ jobs:
       - name: Release policy contract gate
         run: bash scripts/test/release-policy-contract.sh
 
+      - name: Trusted MSI manifest contract gate
+        run: bash scripts/test/release-msi-signed-manifest-contract.sh
+
       - name: Cross-compile Windows amd64
         env:
           GOOS: windows

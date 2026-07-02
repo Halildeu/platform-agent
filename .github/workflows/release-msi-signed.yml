@@ -323,8 +323,16 @@ jobs:
           # The manifest came from the UNSIGNED build; signing changed the MSI bytes,
           # so its files[]/signatures[] entries are stale. Recompute the MSI hash and
           # mark its signature Valid so the manifest describes the SHIPPED artifact.
+          # Top-level msi_file/msi_sha256 are consumer-facing deploy selectors and
+          # must identify the signed MSI. Preserve the unsigned input explicitly so
+          # provenance remains available without letting consumers pick the wrong hash.
           $msiName = Split-Path $msi -Leaf
           $msiHash = (Get-FileHash -Algorithm SHA256 $msi).Hash
+          $unsignedMsiFile = [string]$m.msi_file
+          $unsignedMsiSha256 = [string]$m.msi_sha256
+          if (-not $unsignedMsiFile -or -not $unsignedMsiSha256) {
+            throw "unsigned build manifest must carry top-level msi_file/msi_sha256 before production finalization"
+          }
           if (-not $m.files)      { $m | Add-Member -Force NoteProperty files      ([pscustomobject]@{}) }
           if (-not $m.signatures) { $m | Add-Member -Force NoteProperty signatures ([pscustomobject]@{}) }
           # The sign job renamed the MSI to 'EndpointAgent-<ver>-signed.msi'; the build
@@ -334,6 +342,12 @@ jobs:
           foreach ($p in @($m.signatures.PSObject.Properties.Name | Where-Object { $_ -like '*.msi' -and $_ -ne $msiName })) { $m.signatures.PSObject.Properties.Remove($p) }
           $m.files      | Add-Member -Force NoteProperty $msiName $msiHash
           $m.signatures | Add-Member -Force NoteProperty $msiName 'Valid'
+          $m | Add-Member -Force NoteProperty unsigned_input ([pscustomobject]@{
+            msi_file   = $unsignedMsiFile
+            msi_sha256 = $unsignedMsiSha256
+          })
+          $m | Add-Member -Force NoteProperty msi_file $msiName
+          $m | Add-Member -Force NoteProperty msi_sha256 $msiHash
           $m | Add-Member -Force NoteProperty production       $true
           $m | Add-Member -Force NoteProperty signing_tier     'trusted-internal-ca'
           $m | Add-Member -Force NoteProperty trust_scope      'installer-imported-internal-ca'
@@ -345,6 +359,17 @@ jobs:
           $m | Add-Member -Force NoteProperty vault_backed      $false
           $m | Add-Member -Force NoteProperty wrapper_required  $true
           $m | Add-Member -Force NoteProperty next_phase_plan  'vault-transit-or-hsm (platform-agent#132)'
+          if ($m.msi_file -ne $msiName) { throw "production manifest top-level msi_file '$($m.msi_file)' != signed artifact '$msiName'" }
+          if ($m.msi_sha256 -ne $msiHash) { throw "production manifest top-level msi_sha256 '$($m.msi_sha256)' != signed artifact hash '$msiHash'" }
+          if (-not $m.unsigned_input -or $m.unsigned_input.msi_file -ne $unsignedMsiFile -or $m.unsigned_input.msi_sha256 -ne $unsignedMsiSha256) {
+            throw "production manifest must preserve unsigned input under unsigned_input"
+          }
+          if ($m.unsigned_input.msi_file -eq $m.msi_file) {
+            throw "unsigned_input.msi_file must differ from top-level signed msi_file"
+          }
+          if ($m.unsigned_input.msi_sha256 -eq $m.msi_sha256) {
+            throw "unsigned_input.msi_sha256 must differ from top-level signed msi_sha256 (signing must mutate MSI bytes)"
+          }
           $m | ConvertTo-Json -Depth 8 | Set-Content signed\msi-build-manifest.json -Encoding utf8
           Write-Host "OK production manifest emitted (custody=host-fs-restricted, vault_backed=false)"
 
