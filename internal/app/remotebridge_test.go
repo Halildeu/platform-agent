@@ -292,6 +292,68 @@ func TestRemoteBridgePilotAutoConsentWiring(t *testing.T) {
 	if denied.GetGranted() {
 		t.Fatal("expired prompt must not be granted")
 	}
+	viewDenied, err := hcfg.ConsentResponder(context.Background(), &remotebridgepb.ConsentPrompt{
+		SessionId:           "sess-view",
+		ExpiryEpochMillis:   time.Now().Add(time.Minute).UnixMilli(),
+		Capabilities:        []remotebridgepb.Capability{remotebridgepb.Capability_VIEW_ONLY},
+		OperatorDisplayName: "operator",
+	})
+	if err != nil {
+		t.Fatalf("view-only prompt on pilot responder: %v", err)
+	}
+	if viewDenied.GetGranted() {
+		t.Fatal("pilot auto-consent must not grant VIEW_ONLY prompts")
+	}
+}
+
+func TestRemoteBridgeCombinedConsentRoutesByCapability(t *testing.T) {
+	cfg := config.Default()
+	cfg.RemoteBridgeEnabled = true
+	cfg.RemoteBridgeOperationsEnabled = true
+	cfg.RemoteBridgePilotAutoConsent = true
+	cfg.RemoteBridgeViewOnlyEnabled = true
+	cfg.RemoteBridgeViewOnlyAttendedConsentEnabled = true
+	cfg.RemoteBridgeBrokerAddr = "broker.example:443"
+	cfg.RemoteBridgePermitBrokerPublicKeyB64 = testBrokerPermitPublicKeyB64
+	cfg.RemoteBridgePermitKeyID = "kid-1"
+
+	viewCalled := false
+	fakeViewResponder := func(_ context.Context, prompt *remotebridgepb.ConsentPrompt) (*remotebridgepb.ConsentResult, error) {
+		viewCalled = true
+		return &remotebridgepb.ConsentResult{
+			SessionId:                 prompt.GetSessionId(),
+			Granted:                   true,
+			WindowsInteractiveSession: "attended-test",
+			GrantedAtEpochMillis:      time.Now().UnixMilli(),
+			ExpiryEpochMillis:         prompt.GetExpiryEpochMillis(),
+		}, nil
+	}
+	hcfg, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, remoteBridgeDeps{
+		tlsConfig:                &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{[]byte("cert")}}}},
+		viewOnlyConsentResponder: fakeViewResponder,
+	})
+	if err != nil {
+		t.Fatalf("combined harness config: %v", err)
+	}
+	ptyResult, err := hcfg.ConsentResponder(context.Background(), consentPrompt("sess-pty"))
+	if err != nil {
+		t.Fatalf("pty consent: %v", err)
+	}
+	if !ptyResult.GetGranted() || ptyResult.GetWindowsInteractiveSession() != "pilot-auto-consent" {
+		t.Fatalf("pty consent result = %+v", ptyResult)
+	}
+	viewResult, err := hcfg.ConsentResponder(context.Background(), &remotebridgepb.ConsentPrompt{
+		SessionId:           "sess-view",
+		ExpiryEpochMillis:   time.Now().Add(time.Minute).UnixMilli(),
+		Capabilities:        []remotebridgepb.Capability{remotebridgepb.Capability_VIEW_ONLY},
+		OperatorDisplayName: "operator",
+	})
+	if err != nil {
+		t.Fatalf("view consent: %v", err)
+	}
+	if !viewCalled || !viewResult.GetGranted() || viewResult.GetWindowsInteractiveSession() != "attended-test" {
+		t.Fatalf("view-only consent did not route to attended responder: called=%v result=%+v", viewCalled, viewResult)
+	}
 }
 
 func TestRemoteBridgeDeviceKeySessionWiring(t *testing.T) {

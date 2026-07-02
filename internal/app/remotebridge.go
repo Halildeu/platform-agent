@@ -16,6 +16,7 @@ import (
 	"platform-agent/internal/mtls"
 	"platform-agent/internal/platform/windows/certstore"
 	"platform-agent/internal/remotebridge/attestation"
+	"platform-agent/internal/remotebridge/consent"
 	"platform-agent/internal/remotebridge/harness"
 	"platform-agent/internal/remotebridge/operation"
 	pb "platform-agent/internal/remotebridge/pb"
@@ -41,10 +42,11 @@ func StartRemoteBridge(ctx context.Context, cfg config.Config, deviceID func() s
 		logger.Printf("remote-bridge: disabled enabled=false")
 		return nil
 	}
-	logger.Printf("remote-bridge: starting enabled=true broker_addr=%q operations=%t view_only=%t device_key_session=%t pilot_auto_consent=%t plaintext=%t",
+	logger.Printf("remote-bridge: starting enabled=true broker_addr=%q operations=%t view_only=%t view_only_attended_consent=%t device_key_session=%t pilot_auto_consent=%t plaintext=%t",
 		cfg.RemoteBridgeBrokerAddr,
 		cfg.RemoteBridgeOperationsEnabled,
 		cfg.RemoteBridgeViewOnlyEnabled,
+		cfg.RemoteBridgeViewOnlyAttendedConsentEnabled,
 		cfg.RemoteBridgeDeviceKeySessionEnabled,
 		cfg.RemoteBridgePilotAutoConsent,
 		cfg.RemoteBridgeInsecurePlaintext,
@@ -82,6 +84,10 @@ type remoteBridgeDeps struct {
 	// wiring (a real capture needs an active desktop; the default is fail-closed
 	// off-Windows).
 	screenViewProducerFactory screenview.ProducerFactory
+	// viewOnlyConsentResponder, when non-nil, overrides the platform default
+	// attended VIEW_ONLY responder — the test seam for routing without opening a
+	// real interactive Windows desktop prompt.
+	viewOnlyConsentResponder harness.ConsentResponder
 }
 
 func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID func() string, deps remoteBridgeDeps) (harness.Config, error) {
@@ -222,6 +228,9 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		}
 		hcfg.ScreenViewDispatcher = dispatcher
 	}
+	if responder := remoteBridgeConsentResponder(cfg, deps.viewOnlyConsentResponder); responder != nil {
+		hcfg.ConsentResponder = responder
+	}
 
 	return hcfg, nil
 }
@@ -280,6 +289,53 @@ func constrainedPTYOnly(caps []pb.Capability) bool {
 		}
 	}
 	return true
+}
+
+func remoteBridgeConsentResponder(cfg config.Config, viewOnlyResponder harness.ConsentResponder) harness.ConsentResponder {
+	ptyPilotEnabled := cfg.RemoteBridgeOperationsEnabled && cfg.RemoteBridgePilotAutoConsent
+	viewOnlyAttendedEnabled := cfg.RemoteBridgeViewOnlyEnabled && cfg.RemoteBridgeViewOnlyAttendedConsentEnabled
+	if !ptyPilotEnabled && !cfg.RemoteBridgeViewOnlyEnabled {
+		return nil
+	}
+	if viewOnlyAttendedEnabled && viewOnlyResponder == nil {
+		viewOnlyResponder = consent.NewViewOnlyAttendedResponder()
+	}
+	return func(ctx context.Context, prompt *pb.ConsentPrompt) (*pb.ConsentResult, error) {
+		switch {
+		case consent.ViewOnlyOnly(prompt.GetCapabilities()):
+			if viewOnlyAttendedEnabled {
+				return viewOnlyResponder(ctx, prompt)
+			}
+			return deniedConsentResult(prompt, "view-only-attended-consent-disabled"), nil
+		case constrainedPTYOnly(prompt.GetCapabilities()):
+			if ptyPilotEnabled {
+				return pilotAutoConsentResponder(ctx, prompt)
+			}
+			return deniedConsentResult(prompt, "pilot-auto-consent-disabled"), nil
+		default:
+			return deniedConsentResult(prompt, "unsupported-consent-capability"), nil
+		}
+	}
+}
+
+func deniedConsentResult(prompt *pb.ConsentPrompt, interactiveSession string) *pb.ConsentResult {
+	now := time.Now().UnixMilli()
+	expiry := int64(0)
+	sessionID := ""
+	if prompt != nil {
+		sessionID = prompt.GetSessionId()
+		expiry = prompt.GetExpiryEpochMillis()
+	}
+	if expiry <= 0 {
+		expiry = now
+	}
+	return &pb.ConsentResult{
+		SessionId:                 sessionID,
+		Granted:                   false,
+		WindowsInteractiveSession: interactiveSession,
+		GrantedAtEpochMillis:      now,
+		ExpiryEpochMillis:         expiry,
+	}
 }
 
 func remoteBridgeMTLSConfig(ctx context.Context, cfg config.Config) (*tls.Config, error) {

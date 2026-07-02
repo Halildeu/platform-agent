@@ -661,6 +661,8 @@ func (h *Harness) respondToConsent(ctx context.Context, prompt *pb.ConsentPrompt
 		_ = sender.sendError("consent-result-session-mismatch", false)
 		return
 	}
+	h.logger.Printf("remote-bridge: consent result session=%q granted=%v interactive_session=%q",
+		result.GetSessionId(), result.GetGranted(), result.GetWindowsInteractiveSession())
 	if err := sender.sendConsentResult(result); err != nil {
 		h.logger.Printf("remote-bridge: send consent result failed session=%q err=%v", result.GetSessionId(), err)
 	}
