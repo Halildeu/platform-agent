@@ -16,6 +16,14 @@ sha_file() {
   shasum -a 256 "$1" | awk '{print tolower($1)}'
 }
 
+file_mode() {
+  if stat -f '%Lp' "$1" >/dev/null 2>&1; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+
 expect_fail() {
   local name="$1"
   shift
@@ -47,6 +55,7 @@ cat > "$dist/remote-bridge-attestation-evidence-summary.json" <<'JSON'
   "raw_private_key_logged": false
 }
 JSON
+chmod 0600 "$dist/remote-bridge-attestation-evidence.b64" "$dist/remote-bridge-attestation-evidence-summary.json"
 
 exe_sha="$(sha_file "$dist/endpoint-agent.exe")"
 bootstrap_sha="$(sha_file "$dist/bootstrap-package.ps1")"
@@ -118,6 +127,16 @@ scripts/release/validate-release-manifest.sh \
   --source-commit 10361a60ca8ca1fb4c6efe3823b433297e16ae3a \
   --previous-release v0.2.28 \
   --release-class rollout-candidate
+
+served_assets="$tmp/artifact-host-assets"
+scripts/release/stage-artifact-host-assets.sh "$dist" "$served_assets"
+for asset in \
+  remote-bridge-attestation-evidence.b64 \
+  remote-bridge-attestation-evidence-summary.json
+do
+  [ "$(file_mode "$served_assets/$asset")" = "644" ] \
+    || fail "served asset mode for $asset must be 644, got $(file_mode "$served_assets/$asset")"
+done
 
 jq 'del(.source_commit)' "$dist/release-manifest.json" > "$tmp/missing-source.json"
 expect_fail missing-source scripts/release/validate-release-manifest.sh --policy "$policy" --manifest "$tmp/missing-source.json"

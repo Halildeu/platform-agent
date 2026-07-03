@@ -89,6 +89,8 @@ while IFS=$'\t' read -r name expected_sha; do
     || fail "release-manifest asset sha mismatch for $name: manifest=$expected_sha served=$actual_sha"
 done < <(jq -r '.assets[] | [.name, .sha256] | @tsv' "$manifest")
 
+find "$assets_dir" -type f -exec chmod 0644 {} +
+
 (
   cd "$assets_dir"
   {
