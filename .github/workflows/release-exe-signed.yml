@@ -276,6 +276,9 @@ jobs:
       PREVIOUS_RELEASE: ${{ needs.classify.outputs.previous_release }}
       WORKFLOW_RUN_ID: ${{ github.run_id }}
       GH_TOKEN: ${{ github.token }}
+      REMOTE_BRIDGE_ATTESTATION_BUILDER_ID: faz22-agent-builder@acik
+      REMOTE_BRIDGE_ATTESTATION_POLICY_HASH: faz22-remote-bridge-policy-v1
+      REMOTE_BRIDGE_ATTESTATION_SIGNATURE_ALGORITHM: SHA256withECDSA
     steps:
       - uses: actions/checkout@v4
         with:
@@ -313,6 +316,34 @@ jobs:
           fi
           echo "SHA256=$SHA256" >> "$GITHUB_ENV"
           echo "binary sha256 = $SHA256 (matches verify-exe)"
+      - name: Generate remote-bridge attestation evidence
+        shell: bash
+        env:
+          PRIVATE_KEY_PEM: ${{ secrets.REMOTE_BRIDGE_ATTESTATION_PRIVATE_KEY_PEM }}
+          PUBLIC_KEY_PEM: ${{ vars.REMOTE_BRIDGE_ATTESTATION_PUBLIC_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PRIVATE_KEY_PEM:-}" ]; then
+            echo "::error::REMOTE_BRIDGE_ATTESTATION_PRIVATE_KEY_PEM secret is required for trusted releases"
+            exit 1
+          fi
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          umask 077
+          printf '%s\n' "$PRIVATE_KEY_PEM" > "$tmp/attestation-private.pem"
+          public_args=()
+          if [ -n "${PUBLIC_KEY_PEM:-}" ]; then
+            printf '%s\n' "$PUBLIC_KEY_PEM" > "$tmp/attestation-public.pem"
+            public_args=(--public-key-pem "$tmp/attestation-public.pem")
+          fi
+          ./scripts/release/generate-remote-bridge-attestation-evidence.sh \
+            --binary-digest "$SHA256" \
+            --builder-id "$REMOTE_BRIDGE_ATTESTATION_BUILDER_ID" \
+            --policy-hash "$REMOTE_BRIDGE_ATTESTATION_POLICY_HASH" \
+            --signature-algorithm "$REMOTE_BRIDGE_ATTESTATION_SIGNATURE_ALGORITHM" \
+            --private-key-pem "$tmp/attestation-private.pem" \
+            "${public_args[@]}" \
+            --out-dir dist
       - name: Patch installer manifest (install.ps1)
         shell: pwsh
         env:
@@ -338,10 +369,19 @@ jobs:
       - name: SHA256SUMS + release-manifest.json
         shell: pwsh
         run: |
-          $assets = @("endpoint-agent.exe","bootstrap-package.ps1","install.ps1","uninstall.ps1")
+          $assets = @(
+            "endpoint-agent.exe",
+            "bootstrap-package.ps1",
+            "install.ps1",
+            "uninstall.ps1",
+            "remote-bridge-attestation-evidence.b64",
+            "remote-bridge-attestation-evidence-summary.json"
+          )
           $sumLines = @()
           foreach ($a in $assets) { $h = (Get-FileHash -Algorithm SHA256 "dist/$a").Hash.ToLowerInvariant(); $sumLines += "$h  $a" }
           $sumLines -join "`n" | Out-File -Encoding ascii dist/SHA256SUMS
+          $attestationEvidenceSha = (Get-FileHash -Algorithm SHA256 dist/remote-bridge-attestation-evidence.b64).Hash.ToLowerInvariant()
+          $attestationSummarySha = (Get-FileHash -Algorithm SHA256 dist/remote-bridge-attestation-evidence-summary.json).Hash.ToLowerInvariant()
           $manifest = [ordered]@{
             schema_version = 1
             source_commit = $env:SOURCE_COMMIT
@@ -355,11 +395,24 @@ jobs:
             signer_thumbprint = $env:THUMB
             endpoint_agent_sha256 = $env:SHA256
             phase = "22.6-release-lineage"
+            remote_bridge_attestation = [ordered]@{
+              evidence_file = "remote-bridge-attestation-evidence.b64"
+              evidence_sha256 = $attestationEvidenceSha
+              summary_file = "remote-bridge-attestation-evidence-summary.json"
+              summary_sha256 = $attestationSummarySha
+              binary_digest = $env:SHA256
+              builder_id = $env:REMOTE_BRIDGE_ATTESTATION_BUILDER_ID
+              policy_hash = $env:REMOTE_BRIDGE_ATTESTATION_POLICY_HASH
+              signature_algorithm = $env:REMOTE_BRIDGE_ATTESTATION_SIGNATURE_ALGORITHM
+              private_key_included = $false
+            }
             assets = @(
               [ordered]@{ name = "endpoint-agent.exe"; sha256 = $env:SHA256 }
               [ordered]@{ name = "bootstrap-package.ps1"; sha256 = (Get-FileHash -Algorithm SHA256 dist/bootstrap-package.ps1).Hash.ToLowerInvariant() }
               [ordered]@{ name = "install.ps1"; sha256 = (Get-FileHash -Algorithm SHA256 dist/install.ps1).Hash.ToLowerInvariant() }
               [ordered]@{ name = "uninstall.ps1"; sha256 = (Get-FileHash -Algorithm SHA256 dist/uninstall.ps1).Hash.ToLowerInvariant() }
+              [ordered]@{ name = "remote-bridge-attestation-evidence.b64"; sha256 = $attestationEvidenceSha }
+              [ordered]@{ name = "remote-bridge-attestation-evidence-summary.json"; sha256 = $attestationSummarySha }
             )
           }
           ($manifest | ConvertTo-Json -Depth 6) | Out-File -Encoding utf8 dist/release-manifest.json
@@ -448,6 +501,8 @@ jobs:
           ASSETS=(
             dist/endpoint-agent.exe dist/bootstrap-package.ps1 dist/install.ps1
             dist/uninstall.ps1 dist/SHA256SUMS dist/release-manifest.json
+            dist/remote-bridge-attestation-evidence.b64
+            dist/remote-bridge-attestation-evidence-summary.json
             dist/windows/EndpointAgent.zip dist/windows/EndpointAgent.zip.sha256
           )
           RUN_MARKER="F22_6_RELEASE_RUN_ID:$WORKFLOW_RUN_ID"

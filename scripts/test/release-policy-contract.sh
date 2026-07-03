@@ -37,12 +37,24 @@ printf 'install\n' > "$dist/install.ps1"
 printf 'uninstall\n' > "$dist/uninstall.ps1"
 printf 'zip\n' > "$dist/windows/EndpointAgent.zip"
 printf '%s  EndpointAgent.zip\n' "$(sha_file "$dist/windows/EndpointAgent.zip")" > "$dist/windows/EndpointAgent.zip.sha256"
+printf 'test-remote-bridge-attestation-evidence\n' > "$dist/remote-bridge-attestation-evidence.b64"
+cat > "$dist/remote-bridge-attestation-evidence-summary.json" <<'JSON'
+{
+  "schema_version": 1,
+  "artifact": "remote-bridge-attestation-evidence.b64",
+  "signature_present": true,
+  "private_key_included": false,
+  "raw_private_key_logged": false
+}
+JSON
 
 exe_sha="$(sha_file "$dist/endpoint-agent.exe")"
 bootstrap_sha="$(sha_file "$dist/bootstrap-package.ps1")"
 install_sha="$(sha_file "$dist/install.ps1")"
 uninstall_sha="$(sha_file "$dist/uninstall.ps1")"
 zip_sha="$(sha_file "$dist/windows/EndpointAgent.zip")"
+attestation_evidence_sha="$(sha_file "$dist/remote-bridge-attestation-evidence.b64")"
+attestation_summary_sha="$(sha_file "$dist/remote-bridge-attestation-evidence-summary.json")"
 
 jq -n \
   --arg source_commit "10361a60ca8ca1fb4c6efe3823b433297e16ae3a" \
@@ -58,6 +70,8 @@ jq -n \
   --arg bootstrap_sha "$bootstrap_sha" \
   --arg install_sha "$install_sha" \
   --arg uninstall_sha "$uninstall_sha" \
+  --arg attestation_evidence_sha "$attestation_evidence_sha" \
+  --arg attestation_summary_sha "$attestation_summary_sha" \
   '{
     schema_version: 1,
     source_commit: $source_commit,
@@ -74,12 +88,25 @@ jq -n \
     artifact_host_image: "ghcr.io/halildeu/platform-agent-artifacts:v0.3.0",
     artifact_host_image_ref: ("ghcr.io/halildeu/platform-agent-artifacts:v0.3.0@" + $artifact_host_digest),
     previous_release: $previous_release,
+    remote_bridge_attestation: {
+      evidence_file: "remote-bridge-attestation-evidence.b64",
+      evidence_sha256: $attestation_evidence_sha,
+      summary_file: "remote-bridge-attestation-evidence-summary.json",
+      summary_sha256: $attestation_summary_sha,
+      binary_digest: $endpoint_agent_sha256,
+      builder_id: "faz22-agent-builder@acik",
+      policy_hash: "faz22-remote-bridge-policy-v1",
+      signature_algorithm: "SHA256withECDSA",
+      private_key_included: false
+    },
     assets: [
       {name: "endpoint-agent.exe", sha256: $endpoint_agent_sha256},
       {name: "bootstrap-package.ps1", sha256: $bootstrap_sha},
       {name: "install.ps1", sha256: $install_sha},
       {name: "uninstall.ps1", sha256: $uninstall_sha},
-      {name: "EndpointAgent.zip", sha256: $endpoint_agent_zip_sha256}
+      {name: "EndpointAgent.zip", sha256: $endpoint_agent_zip_sha256},
+      {name: "remote-bridge-attestation-evidence.b64", sha256: $attestation_evidence_sha},
+      {name: "remote-bridge-attestation-evidence-summary.json", sha256: $attestation_summary_sha}
     ]
   }' > "$dist/release-manifest.json"
 
