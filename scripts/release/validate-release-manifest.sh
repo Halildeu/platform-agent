@@ -117,6 +117,26 @@ ref_digest="${artifact_host_image_ref##*@}"
 jq -e '.assets | type == "array" and length > 0' "$manifest" >/dev/null \
   || fail "release manifest must contain a non-empty assets array"
 
+jq -e '
+  .remote_bridge_attestation as $a
+  | ($a | type == "object")
+  and ($a.evidence_file == "remote-bridge-attestation-evidence.b64")
+  and ($a.summary_file == "remote-bridge-attestation-evidence-summary.json")
+  and ($a.binary_digest == .endpoint_agent_sha256)
+  and (($a.evidence_sha256 // "") | test("^[0-9a-f]{64}$"))
+  and (($a.summary_sha256 // "") | test("^[0-9a-f]{64}$"))
+  and (($a.builder_id // "") | length > 0)
+  and (($a.policy_hash // "") | length > 0)
+  and (($a.signature_algorithm // "") | length > 0)
+  and ($a.private_key_included == false)
+' "$manifest" >/dev/null || fail "release manifest remote_bridge_attestation is missing or invalid"
+
+jq -e '
+  .remote_bridge_attestation as $a
+  | any(.assets[]; .name == $a.evidence_file and .sha256 == $a.evidence_sha256)
+  and any(.assets[]; .name == $a.summary_file and .sha256 == $a.summary_sha256)
+' "$manifest" >/dev/null || fail "remote_bridge_attestation files must be declared in assets with matching sha256"
+
 assert_eq release_tag "$expect_tag" "$release_tag"
 assert_eq source_commit "$(printf '%s' "$expect_source_commit" | tr '[:upper:]' '[:lower:]')" "$source_commit"
 assert_eq previous_release "$expect_previous_release" "$previous_release"

@@ -47,6 +47,19 @@ cp "$dist_dir/windows/EndpointAgent.zip" "$assets_dir/"
 cp "$dist_dir/windows/EndpointAgent.zip.sha256" "$assets_dir/"
 cp "$manifest" "$assets_dir/"
 
+asset_path() {
+  local name="$1"
+  if [ -f "$dist_dir/$name" ]; then
+    printf '%s/%s\n' "$dist_dir" "$name"
+    return 0
+  fi
+  if [ -f "$dist_dir/windows/$name" ]; then
+    printf '%s/windows/%s\n' "$dist_dir" "$name"
+    return 0
+  fi
+  return 1
+}
+
 zip_sha="$(sha256_file "$assets_dir/EndpointAgent.zip")"
 zip_sha_file="$(awk 'NF {print tolower($1); exit}' "$assets_dir/EndpointAgent.zip.sha256")"
 [ "$zip_sha" = "$zip_sha_file" ] \
@@ -65,6 +78,10 @@ while IFS=$'\t' read -r name expected_sha; do
   case "$name" in
     ""|*/*|*..*) fail "unsafe release-manifest asset name: $name" ;;
   esac
+  if [ ! -f "$assets_dir/$name" ]; then
+    src="$(asset_path "$name")" || fail "manifest asset missing from dist-dir: $name"
+    cp "$src" "$assets_dir/"
+  fi
   require_file "$assets_dir/$name"
   actual_sha="$(sha256_file "$assets_dir/$name")"
   expected_sha="$(normalize_sha "$expected_sha")"
@@ -74,10 +91,19 @@ done < <(jq -r '.assets[] | [.name, .sha256] | @tsv' "$manifest")
 
 (
   cd "$assets_dir"
-  shasum -a 256 \
-    endpoint-agent.exe bootstrap-package.ps1 install.ps1 uninstall.ps1 \
-    EndpointAgent.zip EndpointAgent.zip.sha256 release-manifest.json \
-    > SHA256SUMS
+  {
+    printf '%s\n' \
+      endpoint-agent.exe \
+      bootstrap-package.ps1 \
+      install.ps1 \
+      uninstall.ps1 \
+      EndpointAgent.zip \
+      EndpointAgent.zip.sha256 \
+      release-manifest.json
+    jq -r '.assets[].name' release-manifest.json
+  } | sort -u | while IFS= read -r asset; do
+    shasum -a 256 "$asset"
+  done > SHA256SUMS
 )
 
 echo "artifact-host assets staged and verified in $assets_dir"
