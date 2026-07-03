@@ -156,5 +156,7 @@ with open(os.environ["SUMMARY_OUT"], "w", encoding="utf-8") as out:
     out.write("\n")
 PY
 
+chmod 0644 "$evidence_b64" "$summary"
+
 echo "remote-bridge attestation evidence generated: $evidence_b64"
 echo "remote-bridge attestation evidence summary: $summary"
