@@ -21,8 +21,10 @@ var ErrEmptyUserSID = errors.New("dataplane: empty user SID for pipe DACL")
 // session's user, for the pipe DACL. Fail-closed if there is no interactive
 // session (so the service never opens a SYSTEM-only / unscoped capture pipe).
 func ActiveSessionUserSID() (string, error) {
-	session := windows.WTSGetActiveConsoleSessionId()
-	if session == 0xFFFFFFFF || session == 0 {
+	// Match LaunchInActiveSession: the pipe DACL must be scoped to the SAME
+	// active interactive user (RDP or console) the helper is launched into.
+	session, ok := activeInteractiveSessionId()
+	if !ok {
 		return "", ErrNoInteractiveSession
 	}
 	var tok windows.Token
