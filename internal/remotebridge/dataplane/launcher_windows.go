@@ -78,8 +78,11 @@ func (h *LaunchedHelper) Terminate() error {
 // leaks into the user session) on the interactive desktop. Fail-closed with a
 // typed error on any precondition failure.
 func LaunchInActiveSession(exePath string, args ...string) (*LaunchedHelper, error) {
-	session := windows.WTSGetActiveConsoleSessionId()
-	if session == 0xFFFFFFFF || session == 0 {
+	// Target the ACTIVE interactive user session (RDP or physical console),
+	// not just the physical console: WTSGetActiveConsoleSessionId is empty when
+	// the operator is on RDP, which blanks the capture (see activeInteractiveSessionId).
+	session, ok := activeInteractiveSessionId()
+	if !ok {
 		return nil, ErrNoInteractiveSession
 	}
 
