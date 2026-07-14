@@ -22,6 +22,30 @@ func TestMaybeRunScreenViewHelperFlagParsing(t *testing.T) {
 	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{helperNonceFlag + "abcd"}); !handled || code != 2 {
 		t.Fatalf("nonce flag without pipe must be a malformed launch (true,2): handled=%v code=%d", handled, code)
 	}
+	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{
+		helperPipeFlag + "somepipe", helperNonceFlag + "abcd", helperMaskFlag + "9000,0,1001,1000",
+	}); !handled || code != 2 {
+		t.Fatalf("invalid mask policy must fail closed (true,2): handled=%v code=%d", handled, code)
+	}
+	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{helperMaskFlag + "0,0,1000,1000"}); !handled || code != 2 {
+		t.Fatalf("mask-only helper invocation must fail closed (true,2): handled=%v code=%d", handled, code)
+	}
+	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{
+		helperPipeFlag + "somepipe", helperNonceFlag + "abcd",
+		helperMaskFlag + "0,0,1000,1000", helperMaskFlag + "1000,1000,1000,1000",
+	}); !handled || code != 2 {
+		t.Fatalf("duplicate mask policy must fail closed (true,2): handled=%v code=%d", handled, code)
+	}
+	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{
+		helperPipeFlag + "first", helperPipeFlag + "second", helperNonceFlag + "abcd",
+	}); !handled || code != 2 {
+		t.Fatalf("duplicate pipe flag must fail closed (true,2): handled=%v code=%d", handled, code)
+	}
+	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{
+		helperPipeFlag + "somepipe", helperNonceFlag + "abcd", helperNonceFlag + "ef01",
+	}); !handled || code != 2 {
+		t.Fatalf("duplicate nonce flag must fail closed (true,2): handled=%v code=%d", handled, code)
+	}
 }
 
 // ipcFrameProducer replays the prefetched first frame, then reads framed frames off

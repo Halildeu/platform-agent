@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/tls"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,16 @@ func TestRemoteBridgeViewOnlyOnlyWiresScreenNotPTY(t *testing.T) {
 	}
 	if result.GetGranted() || result.GetWindowsInteractiveSession() != "view-only-attended-consent-disabled" {
 		t.Fatalf("view-only without attended consent should explicitly deny: %+v", result)
+	}
+}
+
+func TestRemoteBridgeViewOnlyRejectsMalformedMaskPolicy(t *testing.T) {
+	cfg := operationCapableCfg()
+	cfg.RemoteBridgeViewOnlyEnabled = true
+	cfg.RemoteBridgeViewOnlyMaskRectBPS = "9000,0,1001,1000"
+	_, err := remoteBridgeHarnessConfig(context.Background(), cfg, func() string { return "dev-1" }, viewOnlyTLSDeps())
+	if err == nil || !strings.Contains(err.Error(), "view-only mask policy") {
+		t.Fatalf("malformed mask policy must fail closed, got: %v", err)
 	}
 }
 
@@ -274,7 +285,7 @@ func TestProviderViewOnlyAuthorizerFailsClosedOnDevice(t *testing.T) {
 // — non-nil so VIEW_ONLY can be WIRED, but every call errors so no frame ever egresses until real capture (the
 // Session-0 helper, sub-slice #6) is wired and proven on a Windows host.
 func TestScreenViewProducerFactoryDefaultFailsClosed(t *testing.T) {
-	factory := screenview.NewWindowsProducerFactory()
+	factory := screenview.NewWindowsProducerFactory(screenview.MaskPolicy{})
 	if factory == nil {
 		t.Fatal("the producer factory must be non-nil so VIEW_ONLY can be wired")
 	}

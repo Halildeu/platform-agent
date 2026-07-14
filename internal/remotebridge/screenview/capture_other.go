@@ -21,7 +21,7 @@ func MaybeRunActiveSessionScreenViewHelper(_ []string) (bool, int) { return fals
 // NewWindowsProducerFactory returns a fail-closed factory off Windows so the
 // dispatcher opens no gate and emits no frame (build-tag parity with the Windows
 // implementation).
-func NewWindowsProducerFactory() ProducerFactory {
+func NewWindowsProducerFactory(_ MaskPolicy) ProducerFactory {
 	return func(context.Context, string) (dataplane.FrameProducer, error) {
 		return nil, errCaptureUnavailable
 	}

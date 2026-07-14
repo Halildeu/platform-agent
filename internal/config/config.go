@@ -151,6 +151,11 @@ type Config struct {
 	// Windows session. Timeout/cancel/no-session all fail closed with
 	// granted=false.
 	RemoteBridgeViewOnlyAttendedConsentEnabled bool
+	// RemoteBridgeViewOnlyMaskRectBPS is an optional DLP screen mask expressed
+	// as canonical x,y,width,height basis points (0-10000) of the primary
+	// monitor. Empty is disabled. When VIEW_ONLY is enabled, malformed or
+	// out-of-bounds policy fails bridge construction closed.
+	RemoteBridgeViewOnlyMaskRectBPS string
 	// RemoteBridgeTLSServerName optionally overrides SNI/hostname validation
 	// for the broker TLS connection. Blank means derive it from BrokerAddr.
 	RemoteBridgeTLSServerName string
@@ -279,6 +284,7 @@ func LoadFromEnv() Config {
 	cfg.RemoteBridgeDeviceKeySessionEnabled = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SESSION_ENABLED", cfg.RemoteBridgeDeviceKeySessionEnabled)
 	cfg.RemoteBridgeViewOnlyEnabled = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ENABLED", cfg.RemoteBridgeViewOnlyEnabled)
 	cfg.RemoteBridgeViewOnlyAttendedConsentEnabled = envBool("ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ATTENDED_CONSENT_ENABLED", cfg.RemoteBridgeViewOnlyAttendedConsentEnabled)
+	cfg.RemoteBridgeViewOnlyMaskRectBPS = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_MASK_RECT_BPS", cfg.RemoteBridgeViewOnlyMaskRectBPS)
 	cfg.RemoteBridgeTLSServerName = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME", cfg.RemoteBridgeTLSServerName)
 	cfg.RemoteBridgeMTLSCertSubjectSuffix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SUBJECT_SUFFIX", cfg.RemoteBridgeMTLSCertSubjectSuffix)
 	cfg.RemoteBridgeMTLSCertSANURIPrefix = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_MTLS_CERT_SAN_URI_PREFIX", cfg.RemoteBridgeMTLSCertSANURIPrefix)

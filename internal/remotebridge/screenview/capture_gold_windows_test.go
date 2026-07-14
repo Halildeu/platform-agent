@@ -26,7 +26,11 @@ func TestRealScreenViewProductionCaptureInSession(t *testing.T) {
 		t.Skip("set SCREENVIEW_REAL=1 as SYSTEM on a Windows desktop session")
 	}
 
-	factory := NewWindowsProducerFactory()
+	maskPolicy, err := ParseMaskPolicy(os.Getenv("SCREENVIEW_MASK_RECT_BPS"))
+	if err != nil {
+		t.Fatalf("SCREENVIEW_MASK_RECT_BPS: %v", err)
+	}
+	factory := NewWindowsProducerFactory(maskPolicy)
 	// A successful factory call proves: helper launched in the active session, banner
 	// shown + BannerSelfVerify passed, and the first frame arrived (fail-closed READY).
 	producer, err := factory(context.Background(), "gold-proof-stream")
@@ -65,6 +69,25 @@ func TestRealScreenViewProductionCaptureInSession(t *testing.T) {
 		}
 		if total == 0 || red*100/total < 70 {
 			t.Fatalf("frame %d missing the mandatory active-indicator red band: %d/%d red samples", got, red, total)
+		}
+		if maskPolicy.Enabled() {
+			x0 := b.Min.X + b.Dx()*maskPolicy.X/maskBasisPoints
+			y0 := b.Min.Y + b.Dy()*maskPolicy.Y/maskBasisPoints
+			x1 := b.Min.X + (b.Dx()*(maskPolicy.X+maskPolicy.Width)+maskBasisPoints-1)/maskBasisPoints
+			y1 := b.Min.Y + (b.Dy()*(maskPolicy.Y+maskPolicy.Height)+maskBasisPoints-1)/maskBasisPoints
+			black, samples := 0, 0
+			for y := y0; y < y1; y += max(1, (y1-y0)/12) {
+				for x := x0; x < x1; x += max(1, (x1-x0)/12) {
+					r, g, bl, a := img.At(x, y).RGBA()
+					samples++
+					if uint8(r>>8) == 0 && uint8(g>>8) == 0 && uint8(bl>>8) == 0 && uint8(a>>8) == 0xFF {
+						black++
+					}
+				}
+			}
+			if samples == 0 || black != samples {
+				t.Fatalf("frame %d DLP mask is not opaque black across policy region: %d/%d", got, black, samples)
+			}
 		}
 		got++
 	}

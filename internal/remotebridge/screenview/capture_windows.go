@@ -26,6 +26,7 @@ import (
 const (
 	helperPipeFlag  = "--rb-screenview-pipe="
 	helperNonceFlag = "--rb-screenview-nonce="
+	helperMaskFlag  = "--rb-screenview-mask-bps="
 
 	acceptTimeout      = 15 * time.Second       // bound the launch->dial handshake (Accept is ctx+timeout bounded)
 	firstFrameDeadline = 12 * time.Second       // the helper must banner-verify + capture a first frame within this
@@ -42,22 +43,36 @@ const (
 // (false, 0) when the process was NOT invoked as the helper (normal startup).
 // main() must call this before starting the service.
 func MaybeRunActiveSessionScreenViewHelper(args []string) (bool, int) {
-	var pipeName, nonceHex string
+	var pipeName, nonceHex, maskRaw string
+	pipeCount, nonceCount, maskCount := 0, 0, 0
 	for _, a := range args {
 		switch {
 		case strings.HasPrefix(a, helperPipeFlag):
 			pipeName = strings.TrimPrefix(a, helperPipeFlag)
+			pipeCount++
 		case strings.HasPrefix(a, helperNonceFlag):
 			nonceHex = strings.TrimPrefix(a, helperNonceFlag)
+			nonceCount++
+		case strings.HasPrefix(a, helperMaskFlag):
+			maskRaw = strings.TrimPrefix(a, helperMaskFlag)
+			maskCount++
 		}
 	}
-	if pipeName == "" && nonceHex == "" {
+	if pipeCount == 0 && nonceCount == 0 && maskCount == 0 {
 		return false, 0 // not a helper invocation
 	}
-	if pipeName == "" || nonceHex == "" {
+	if pipeCount != 1 || nonceCount != 1 || maskCount > 1 || pipeName == "" || nonceHex == "" {
 		return true, 2 // partial flags = malformed launch
 	}
-	if err := runActiveSessionScreenViewHelper(pipeName, nonceHex); err != nil {
+	maskPolicy := MaskPolicy{}
+	if maskCount == 1 {
+		var err error
+		maskPolicy, err = ParseMaskPolicy(maskRaw)
+		if err != nil || !maskPolicy.Enabled() {
+			return true, 2
+		}
+	}
+	if err := runActiveSessionScreenViewHelper(pipeName, nonceHex, maskPolicy); err != nil {
 		return true, 1
 	}
 	return true, 0
@@ -66,7 +81,7 @@ func MaybeRunActiveSessionScreenViewHelper(args []string) (bool, int) {
 // runActiveSessionScreenViewHelper runs in the ACTIVE user session: dial+handshake,
 // show+self-verify the banner (fail-closed), then stream indicator-stamped
 // primary-monitor frames until the service closes the pipe, then a graceful EOF.
-func runActiveSessionScreenViewHelper(pipeName, nonceHex string) error {
+func runActiveSessionScreenViewHelper(pipeName, nonceHex string, maskPolicy MaskPolicy) error {
 	nonce, err := hex.DecodeString(nonceHex)
 	if err != nil {
 		return err
@@ -100,13 +115,20 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex string) error {
 		return fmt.Errorf("screenview helper: endpoint banner not visible (fail-closed): %w", err)
 	}
 
-	// MANDATORY in-frame active-indicator on EVERY frame (red awareness band) +
-	// PRIMARY-monitor capture so the captured region matches the primary-monitor
-	// banner (no un-bannered secondary monitor is ever captured).
+	// Optional DLP mask first, then the MANDATORY in-frame active-indicator on
+	// EVERY frame. Indicator-last means a mask policy can never cover the red
+	// awareness band. PRIMARY-monitor capture keeps the captured region aligned
+	// with the primary-monitor banner (no un-bannered secondary monitor).
 	indicator := func(fr *dataplane.RawFrame) {
 		dataplane.ApplyActiveIndicator(fr, indicatorBand, 0, 0, 0xFF, 0xFF) // BGRA red
 	}
-	producer := dataplane.NewWindowsPrimaryScreenFrameProducer(dataplane.NewPNGEncoder(), captureInterval, captureMaxErr, indicator)
+	processors := make([]func(*dataplane.RawFrame), 0, 2)
+	if maskPolicy.Enabled() {
+		processors = append(processors, maskPolicy.apply)
+	}
+	processors = append(processors, indicator)
+	producer := dataplane.NewWindowsPrimaryScreenFrameProducer(
+		dataplane.NewPNGEncoder(), captureInterval, captureMaxErr, processors...)
 	defer producer.Close()
 
 	// Banner LIVENESS (fail-closed): the banner is verified once above, but it could be
@@ -222,7 +244,7 @@ func readFirstFrame(ctx context.Context, conn net.Conn, deadline time.Duration) 
 // its frame stream. Fail-closed everywhere: no interactive session, a launch
 // failure, a handshake failure, or a helper that never produces a first frame
 // (banner/capture failed) all return an error and leave NO orphan helper.
-func NewWindowsProducerFactory() ProducerFactory {
+func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
 	return func(ctx context.Context, _ string) (dataplane.FrameProducer, error) {
 		self, err := os.Executable()
 		if err != nil {
@@ -250,8 +272,11 @@ func NewWindowsProducerFactory() ProducerFactory {
 		if err != nil {
 			return nil, err
 		}
-		helper, err := dataplane.LaunchInActiveSession(self,
-			helperPipeFlag+name, helperNonceFlag+hex.EncodeToString(nonce))
+		helperArgs := []string{helperPipeFlag + name, helperNonceFlag + hex.EncodeToString(nonce)}
+		if maskPolicy.Enabled() {
+			helperArgs = append(helperArgs, helperMaskFlag+maskPolicy.String())
+		}
+		helper, err := dataplane.LaunchInActiveSession(self, helperArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("screenview: launch helper in active session: %w", err)
 		}
