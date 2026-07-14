@@ -29,10 +29,10 @@ const (
 	defaultContentType   = "image/png"
 )
 
-// ProducerFactory builds a fresh FrameProducer for one screen-view stream (the stream id correlates the DATA
-// frames). The production factory is the Session-0 active-desktop capture helper (a later sub-slice); tests
-// inject a mock. An error fails the dispatch fail-closed (no gate opened, no frames).
-type ProducerFactory func(ctx context.Context, streamID string) (dataplane.FrameProducer, error)
+// ProducerFactory builds a fresh FrameProducer for one session-bound screen-view stream. The production
+// factory uses sessionID only to bind the non-production indicator-loss acceptance trigger to the exact live
+// banner; streamID still correlates DATA frames. Tests inject a mock. An error fails the dispatch fail-closed.
+type ProducerFactory func(ctx context.Context, sessionID, streamID string) (dataplane.FrameProducer, error)
 
 // ViewOnlyAuthorizer is the VIEW_ONLY permit gate the dispatcher consults. The production implementation is
 // *operation.Authorizer (whose AuthorizeViewOnly shares the per-session seq guard with the PTY path — pass the
@@ -119,7 +119,7 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 	session.SetRecordingNotRequired(true)
 	session.Activate()
 
-	producer, err := d.newProducer(streamCtx, streamID)
+	producer, err := d.newProducer(streamCtx, permit.SessionID, streamID)
 	if err != nil {
 		session.Abort()
 		return fmt.Errorf("view-only-capture-start-failed: %w", err)

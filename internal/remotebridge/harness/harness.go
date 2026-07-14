@@ -210,6 +210,10 @@ type Harness struct {
 	// The value is a pointer so a dispatch's deferred unregister can compare by IDENTITY (Go funcs are not
 	// comparable) and never delete a newer dispatch's registration for a reused sessionId.
 	screenCancels map[string]*screenCancelEntry
+	// killAckReady binds one just-applied session KILL to the exact running
+	// screen dispatch it cancelled. The ACK is emitted only after that dispatch
+	// has fully returned; no active screen means an already-closed signal.
+	killAckReady map[string]<-chan struct{}
 
 	connects int64 // streams that reached AgentHello
 	healthy  int64 // streams that saw >=1 valid heartbeat
@@ -256,7 +260,7 @@ func New(cfg Config, logger *log.Logger) (*Harness, error) {
 		logger = log.Default()
 	}
 	return &Harness{cfg: cfg, logger: logger, sessions: make(map[string]SessionState),
-		screenCancels: make(map[string]*screenCancelEntry)}, nil
+		screenCancels: make(map[string]*screenCancelEntry), killAckReady: make(map[string]<-chan struct{})}, nil
 }
 
 // isLoopbackBrokerAddr reports whether addr targets a loopback interface — the
@@ -418,6 +422,23 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 			switch action {
 			case actionContinue:
 				// nothing to do — recvLoop pipelines the next frame
+			case actionKillApplied:
+				// The KILL state transition and cancel signal have already happened
+				// synchronously. Wait off the recv loop for the exact screen dispatch to
+				// finish before acknowledging, so ACK never races ahead of an in-flight DATA
+				// send. No active screen yields an already-closed signal.
+				sessionID := r.env.GetKill().GetSessionId()
+				ready := h.takeKillAckReady(sessionID)
+				go func() {
+					select {
+					case <-ready:
+						if err := sender.sendAuditEvent(sessionID, "AGENT_KILL_APPLIED"); err != nil {
+							h.logger.Printf("remote-bridge: send kill-applied acknowledgement failed session_id_sha256_12=%s err=%v",
+								deviceIDFingerprint(sessionID), err)
+						}
+					case <-sctx.Done():
+					}
+				}()
 			case actionHeartbeat:
 				interval := clampInterval(time.Duration(r.env.GetHeartbeat().GetHeartbeatIntervalMillis()) * time.Millisecond)
 				resetTimer(watchdog, interval*time.Duration(h.cfg.HeartbeatMissFactor))
@@ -516,6 +537,7 @@ type inboundAction int
 const (
 	actionContinue inboundAction = iota
 	actionHeartbeat
+	actionKillApplied
 	actionTransportKill
 	actionDefectClose
 	// actionDispatch: a broker-authorized CONSTRAINED_PTY operation_dispatch arrived and a PTY dispatcher is
@@ -598,9 +620,10 @@ func (h *Harness) handleInbound(env *pb.Envelope, seqGuard *inboundSeqGuard) (in
 		if kill.GetSessionId() == TransportKillSessionID {
 			return actionTransportKill, ""
 		}
-		// Session-scoped kill: the session state is dead, the transport
-		// stays up (the broker decides stream lifetime).
-		return actionContinue, ""
+		// Session-scoped kill: local state is already dead. The caller emits
+		// AGENT_KILL_APPLIED on the same serialized CONTROL stream; the transport
+		// otherwise stays up (the broker decides stream lifetime).
+		return actionKillApplied, ""
 	case env.GetError() != nil:
 		h.logger.Printf("remote-bridge: broker error frame code=%q retryable=%v",
 			env.GetError().GetCode(), env.GetError().GetRetryable())
@@ -758,6 +781,13 @@ func (h *Harness) obeyKill(sessionID, reason string) {
 	// stream ctx (and so every child) anyway; it has no entry under TransportKillSessionID here, so this is a
 	// no-op for it.
 	entry := h.screenCancels[sessionID]
+	if sessionID != TransportKillSessionID {
+		if entry == nil {
+			h.killAckReady[sessionID] = closedScreenStop()
+		} else {
+			h.killAckReady[sessionID] = entry.done
+		}
+	}
 	h.mu.Unlock()
 	if entry != nil {
 		entry.cancel()
@@ -768,6 +798,14 @@ func (h *Harness) obeyKill(sessionID, reason string) {
 // are not comparable). One per running VIEW_ONLY screen-view dispatch.
 type screenCancelEntry struct {
 	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+}
+
+func closedScreenStop() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }
 
 // registerScreenCancel records a running VIEW_ONLY screen-view dispatch's cancel so a session-scoped KILL can
@@ -781,7 +819,7 @@ func (h *Harness) registerScreenCancel(sessionID string, cancel context.CancelFu
 	if sessionID == "" {
 		return nil, false
 	}
-	entry := &screenCancelEntry{cancel: cancel}
+	entry := &screenCancelEntry{cancel: cancel, done: make(chan struct{})}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if _, exists := h.screenCancels[sessionID]; exists {
@@ -803,6 +841,18 @@ func (h *Harness) unregisterScreenCancel(sessionID string, entry *screenCancelEn
 		delete(h.screenCancels, sessionID)
 	}
 	h.mu.Unlock()
+	entry.once.Do(func() { close(entry.done) })
+}
+
+func (h *Harness) takeKillAckReady(sessionID string) <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ready := h.killAckReady[sessionID]
+	delete(h.killAckReady, sessionID)
+	if ready == nil {
+		return closedScreenStop()
+	}
+	return ready
 }
 
 // Session returns the recorded state for a session id.

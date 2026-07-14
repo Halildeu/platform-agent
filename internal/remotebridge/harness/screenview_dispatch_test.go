@@ -249,6 +249,60 @@ func TestScreenViewSessionKillCancelsDispatch(t *testing.T) {
 	}
 }
 
+func TestKillAppliedAckWaitsForExactScreenDispatchToStop(t *testing.T) {
+	invoked := make(chan struct{})
+	cancelObserved := make(chan struct{})
+	allowReturn := make(chan struct{})
+	ackReceived := make(chan *pb.AuditEvent, 1)
+	disp := &fakeScreenDispatcher{invoked: invoked}
+	disp.run = func(ctx context.Context, _ func(*pb.DataFrame) error) error {
+		<-ctx.Done()
+		close(cancelObserved)
+		<-allowReturn // model bounded in-flight DATA cleanup after cancellation
+		return nil
+	}
+	broker := &dispatchBroker{connect: func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		_ = s.Send(heartbeatEnv(60_000, 0))
+		_ = s.Send(operationPermitEnv(viewOnlyPermitProto()))
+		<-invoked
+		_ = s.Send(killEnv("sess-1", "OPERATOR_CLOSE"))
+		for {
+			env, err := s.Recv()
+			if err != nil {
+				return nil
+			}
+			if event := env.GetAuditEvent(); event != nil && event.GetEventType() == "AGENT_KILL_APPLIED" {
+				ackReceived <- event
+				return nil
+			}
+		}
+	}}
+	startDispatchScreenView(t, broker, disp)
+
+	select {
+	case <-cancelObserved:
+	case <-time.After(3 * time.Second):
+		t.Fatal("screen dispatch did not observe KILL cancellation")
+	}
+	select {
+	case <-ackReceived:
+		t.Fatal("KILL ACK arrived before the exact screen dispatch returned")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(allowReturn)
+	select {
+	case event := <-ackReceived:
+		if event.GetSessionId() != "sess-1" || event.GetEventType() != "AGENT_KILL_APPLIED" {
+			t.Fatalf("ack = session %q type %q", event.GetSessionId(), event.GetEventType())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("KILL ACK did not arrive after the screen dispatch stopped")
+	}
+}
+
 func TestScreenViewTypedTerminationEmitsAllowlistedAuditEvent(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -3,6 +3,7 @@
 package screenview
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -10,9 +11,41 @@ import (
 	"platform-agent/internal/remotebridge/dataplane"
 )
 
+func TestBannerTerminationMapsToTypedIPC(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   error
+		want error
+	}{
+		{"indicator-lost", dataplane.ErrIndicatorLost, dataplane.ErrIndicatorLost},
+		{"local-abort", dataplane.ErrLocalAbort, dataplane.ErrLocalAbort},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writer, reader := net.Pipe()
+			defer reader.Close()
+			done := make(chan error, 1)
+			go func() {
+				done <- writeBannerTermination(writer, tc.in)
+				_ = writer.Close()
+			}()
+			_, err := dataplane.ReadFrame(reader)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("typed IPC err=%v, want %v", err, tc.want)
+			}
+			if err := <-done; err != nil {
+				t.Fatalf("write typed IPC: %v", err)
+			}
+		})
+	}
+}
+
 // flag parsing: a normal startup is NOT a helper invocation; partial helper flags
 // are a malformed launch (exit 2). (The full happy path dials a pipe → VM-only.)
 func TestMaybeRunScreenViewHelperFlagParsing(t *testing.T) {
+	validBinding, err := AcceptanceWindowBinding("sess-test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{"--once", "--version"}); handled || code != 0 {
 		t.Fatalf("non-helper args must not be handled: handled=%v code=%d", handled, code)
 	}
@@ -45,6 +78,17 @@ func TestMaybeRunScreenViewHelperFlagParsing(t *testing.T) {
 		helperPipeFlag + "somepipe", helperNonceFlag + "abcd", helperNonceFlag + "ef01",
 	}); !handled || code != 2 {
 		t.Fatalf("duplicate nonce flag must fail closed (true,2): handled=%v code=%d", handled, code)
+	}
+	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{
+		helperPipeFlag + "somepipe", helperNonceFlag + "abcd", helperSessionBindingFlag + "not-a-binding",
+	}); !handled || code != 2 {
+		t.Fatalf("invalid session binding must fail closed (true,2): handled=%v code=%d", handled, code)
+	}
+	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{
+		helperPipeFlag + "somepipe", helperNonceFlag + "abcd",
+		helperSessionBindingFlag + validBinding, helperSessionBindingFlag + validBinding,
+	}); !handled || code != 2 {
+		t.Fatalf("duplicate session binding must fail closed (true,2): handled=%v code=%d", handled, code)
 	}
 }
 
