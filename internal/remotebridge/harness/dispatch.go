@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"platform-agent/internal/remotebridge/dataplane"
 	"platform-agent/internal/remotebridge/operation"
 	pb "platform-agent/internal/remotebridge/pb"
 	"platform-agent/internal/remotebridge/ptyexec"
@@ -288,6 +289,15 @@ func (h *Harness) dispatchScreenView(ctx context.Context, conn *grpc.ClientConn,
 		// bounded, non-revealing CONTROL code. NOTE: on an authorize/capture-start failure the dispatcher
 		// returns WITHOUT a terminal EndStream (no gate opened, no frame); the DATA stream is closed (CloseSend
 		// + cancel) and this CONTROL error is the failure signal.
-		_ = sender.sendSessionError(permit.SessionID, "screen-view-failed", false)
+		switch {
+		case errors.Is(herr, dataplane.ErrLocalAbort):
+			_ = sender.sendAuditEvent(permit.SessionID, "LOCAL_ABORT")
+		case errors.Is(herr, dataplane.ErrIndicatorLost):
+			_ = sender.sendAuditEvent(permit.SessionID, "AGENT_INDICATOR_LOST")
+		case errors.Is(herr, dataplane.ErrPermitExpired):
+			_ = sender.sendSessionError(permit.SessionID, "screen-view-permit-expired", false)
+		default:
+			_ = sender.sendSessionError(permit.SessionID, "screen-view-failed", false)
+		}
 	}
 }

@@ -25,7 +25,11 @@ func (f *fakeAuthorizer) AuthorizeViewOnly(operation.OperationPermit, int64) ope
 }
 
 func viewOnlyPermit() operation.OperationPermit {
-	return operation.OperationPermit{Capability: operation.CapabilityViewOnly, SessionID: "s", OperationID: "op-1", Seq: 1}
+	now := time.Now().UnixMilli()
+	return operation.OperationPermit{
+		Capability: operation.CapabilityViewOnly, SessionID: "s", OperationID: "op-1", Seq: 1,
+		IssuedAtEpochMillis: now - 1_000, ExpiresAtEpochMillis: now + 60_000,
+	}
 }
 
 type frameSink struct {
@@ -55,6 +59,12 @@ func mockFactory(max int64, payload []byte) ProducerFactory {
 		return dataplane.NewMockFrameProducer(max, payload), nil
 	}
 }
+
+type terminatingProducer struct{ err error }
+
+func (p *terminatingProducer) Next() (dataplane.Frame, bool) { return dataplane.Frame{}, false }
+func (p *terminatingProducer) Close() error                  { return nil }
+func (p *terminatingProducer) Err() error                    { return p.err }
 
 func TestDispatchDeniedAuthorizationFailsClosed(t *testing.T) {
 	factoryCalled := false
@@ -157,6 +167,53 @@ func TestDispatchSendErrorAbortsAndReturnsError(t *testing.T) {
 	herr := d.Handle(context.Background(), viewOnlyPermit(), "op-1", sink.send, 1)
 	if herr == nil || !strings.Contains(herr.Error(), "broker stream broken") {
 		t.Fatalf("a broken DATA send must surface the error, got %v", herr)
+	}
+}
+
+func TestDispatchPermitExpiryAbortsWithoutTerminalFrame(t *testing.T) {
+	permit := viewOnlyPermit()
+	permit.ExpiresAtEpochMillis = time.Now().Add(40 * time.Millisecond).UnixMilli()
+	d, _ := New(&fakeAuthorizer{allow: true}, mockFactory(0, []byte("PNG")), Options{
+		DrainInterval: time.Millisecond,
+	})
+	sink := &frameSink{}
+	started := time.Now()
+	err := d.Handle(context.Background(), permit, "op-1", sink.send, time.Now().UnixMilli())
+	if !errors.Is(err, dataplane.ErrPermitExpired) {
+		t.Fatalf("expiry err = %v, want ErrPermitExpired", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("permit expiry took %v, want a bounded prompt stop", elapsed)
+	}
+	for _, frame := range sink.snapshot() {
+		if frame.GetEndStream() {
+			t.Fatal("permit expiry is an abort and must not emit a normal EndStream")
+		}
+	}
+}
+
+func TestDispatchPropagatesTypedSourceTerminationWithoutEndStream(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"local-abort", dataplane.ErrLocalAbort},
+		{"indicator-lost", dataplane.ErrIndicatorLost},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			factory := func(context.Context, string) (dataplane.FrameProducer, error) {
+				return &terminatingProducer{err: tc.err}, nil
+			}
+			d, _ := New(&fakeAuthorizer{allow: true}, factory, Options{})
+			sink := &frameSink{}
+			err := d.Handle(context.Background(), viewOnlyPermit(), "op-1", sink.send, time.Now().UnixMilli())
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("termination err = %v, want %v", err, tc.err)
+			}
+			if len(sink.snapshot()) != 0 {
+				t.Fatal("typed fail-closed termination must emit no frame or normal EndStream")
+			}
+		})
 	}
 }
 

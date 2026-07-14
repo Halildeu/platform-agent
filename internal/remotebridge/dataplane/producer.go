@@ -1,6 +1,20 @@
 package dataplane
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
+
+// Typed VIEW_ONLY termination causes propagated from the interactive helper to
+// the service and then to the broker. They are deliberately distinct from EOF:
+// EOF is a normal producer completion, while these events must terminate the
+// session fail-closed and leave an auditable reason.
+var (
+	ErrLocalAbort    = errors.New("dataplane: endpoint user aborted the view-only session")
+	ErrIndicatorLost = errors.New("dataplane: endpoint awareness indicator was lost")
+	ErrPermitExpired = errors.New("dataplane: view-only permit expired")
+	ErrCaptureFailed = errors.New("dataplane: screen capture failed closed")
+)
 
 // Frame is one captured VIEW_ONLY frame as a domain value. Payload is opaque
 // already-encoded bytes (the encoding is the producer's concern). The harness
@@ -29,6 +43,10 @@ type FrameProducer interface {
 	// Close releases capture resources. Safe to call once after Next returns
 	// ok=false (or to stop early). Idempotent implementations are preferred.
 	Close() error
+	// Err distinguishes clean exhaustion/cancellation (nil) from a source failure.
+	// Every producer implements it so a capture failure cannot accidentally become
+	// a normal EndStream.
+	Err() error
 }
 
 // MockFrameProducer is a deterministic synthetic producer for wiring + guard
@@ -71,3 +89,6 @@ func (m *MockFrameProducer) Close() error {
 	m.closed = true
 	return nil
 }
+
+// Err reports clean synthetic exhaustion.
+func (m *MockFrameProducer) Err() error { return nil }

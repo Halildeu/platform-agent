@@ -246,6 +246,8 @@ func (b *blockingProducer) Close() error {
 	return nil
 }
 
+func (b *blockingProducer) Err() error { return nil }
+
 // Local-abort must interrupt a BLOCKING producer immediately (the watcher
 // Closes it), not wait for Next to return on its own.
 func TestPumpImmediateAbortUnblocksBlockingProducer(t *testing.T) {

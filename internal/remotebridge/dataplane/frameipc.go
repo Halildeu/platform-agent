@@ -26,6 +26,8 @@ import (
 //   FRAME — one encoded VIEW_ONLY frame; length-bounded (anti-DoS, reject
 //     before alloc).
 //   EOF — graceful end-of-stream.
+//   LOCAL_ABORT — the endpoint user explicitly ended the attended session.
+//   INDICATOR_LOST — the mandatory endpoint-awareness UI disappeared.
 //
 // Disabled-by-default + LIVE owner-gated (ADR-0034 §13/D10): plumbing, not an
 // activation. The named-pipe ACL + client-PID verification + read/write
@@ -43,9 +45,11 @@ const (
 type ipcMsgType byte
 
 const (
-	msgHandshake ipcMsgType = 1
-	msgFrame     ipcMsgType = 2
-	msgEOF       ipcMsgType = 3
+	msgHandshake     ipcMsgType = 1
+	msgFrame         ipcMsgType = 2
+	msgEOF           ipcMsgType = 3
+	msgLocalAbort    ipcMsgType = 4
+	msgIndicatorLost ipcMsgType = 5
 )
 
 var (
@@ -150,6 +154,15 @@ func WriteFrame(w io.Writer, payload []byte) error {
 // WriteEOF signals a graceful end-of-stream.
 func WriteEOF(w io.Writer) error { return writeMsg(w, msgEOF, nil) }
 
+// WriteLocalAbort reports an explicit endpoint-user termination. It carries no
+// caller-controlled payload, so the service can map it to the fixed allowlisted
+// broker audit event without trusting helper text.
+func WriteLocalAbort(w io.Writer) error { return writeMsg(w, msgLocalAbort, nil) }
+
+// WriteIndicatorLost reports that the mandatory visible endpoint indicator was
+// closed or otherwise lost while the stream was active.
+func WriteIndicatorLost(w io.Writer) error { return writeMsg(w, msgIndicatorLost, nil) }
+
 // ReadFrame reads the next FRAME payload. A graceful EOF message surfaces as
 // io.EOF; any other (unexpected) type is a fail-closed protocol violation.
 func ReadFrame(r io.Reader) ([]byte, error) {
@@ -162,6 +175,16 @@ func ReadFrame(r io.Reader) ([]byte, error) {
 		return payload, nil
 	case msgEOF:
 		return nil, io.EOF
+	case msgLocalAbort:
+		if len(payload) != 0 {
+			return nil, fmt.Errorf("%w: local-abort payload must be empty", ErrIPCProtocol)
+		}
+		return nil, ErrLocalAbort
+	case msgIndicatorLost:
+		if len(payload) != 0 {
+			return nil, fmt.Errorf("%w: indicator-lost payload must be empty", ErrIPCProtocol)
+		}
+		return nil, ErrIndicatorLost
 	default:
 		return nil, fmt.Errorf("%w: expected frame, got type %d", ErrIPCProtocol, t)
 	}

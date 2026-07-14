@@ -1,7 +1,10 @@
 package harness
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -50,6 +53,21 @@ func (s *controlSender) sendConsentResult(result *pb.ConsentResult) error {
 	return s.send(&pb.Envelope{
 		SessionId: result.GetSessionId(),
 		Payload:   &pb.Envelope_ConsentResult{ConsentResult: result},
+	})
+}
+
+func (s *controlSender) sendAuditEvent(sessionID, eventType string) error {
+	eventAt := time.Now().UnixMilli()
+	canonical := sessionID + "\n" + eventType + "\n" + strconv.FormatInt(eventAt, 10)
+	digest := sha256.Sum256([]byte(canonical))
+	return s.send(&pb.Envelope{
+		SessionId: sessionID,
+		Payload: &pb.Envelope_AuditEvent{AuditEvent: &pb.AuditEvent{
+			SessionId:   sessionID,
+			EventType:   eventType,
+			ContentHash: hex.EncodeToString(digest[:]),
+			EpochMillis: eventAt,
+		}},
 	})
 }
 

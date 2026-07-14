@@ -144,3 +144,37 @@ func TestWriteEOFSurfacesAsEOF(t *testing.T) {
 		t.Fatalf("after WriteEOF, ReadFrame err = %v, want io.EOF", err)
 	}
 }
+
+func TestTypedTerminationMessagesRemainDistinctFromEOF(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(io.Writer) error
+		want  error
+	}{
+		{"local-abort", WriteLocalAbort, ErrLocalAbort},
+		{"indicator-lost", WriteIndicatorLost, ErrIndicatorLost},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := tc.write(&buf); err != nil {
+				t.Fatalf("write termination: %v", err)
+			}
+			if _, err := ReadFrame(&buf); !errors.Is(err, tc.want) {
+				t.Fatalf("ReadFrame err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestTypedTerminationMessagesRejectPayloads(t *testing.T) {
+	for _, typ := range []ipcMsgType{msgLocalAbort, msgIndicatorLost} {
+		var buf bytes.Buffer
+		if err := writeMsg(&buf, typ, []byte("untrusted-detail")); err != nil {
+			t.Fatalf("write raw test message: %v", err)
+		}
+		if _, err := ReadFrame(&buf); !errors.Is(err, ErrIPCProtocol) {
+			t.Fatalf("type %d payload err = %v, want ErrIPCProtocol", typ, err)
+		}
+	}
+}
