@@ -33,7 +33,7 @@ func TestRealScreenViewProductionCaptureInSession(t *testing.T) {
 	factory := NewWindowsProducerFactory(maskPolicy)
 	// A successful factory call proves: helper launched in the active session, banner
 	// shown + BannerSelfVerify passed, and the first frame arrived (fail-closed READY).
-	producer, err := factory(context.Background(), "gold-proof-stream")
+	producer, err := factory(context.Background(), "gold-proof-session", "gold-proof-stream")
 	if err != nil {
 		t.Fatalf("production factory failed (no live bannered capture): %v", err)
 	}

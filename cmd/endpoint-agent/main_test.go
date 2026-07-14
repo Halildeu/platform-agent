@@ -8,6 +8,7 @@ import (
 
 	"platform-agent/internal/autoenroll"
 	"platform-agent/internal/config"
+	"platform-agent/internal/remotebridge/screenview"
 )
 
 // stubRegistry implements the small interface resolveAutoEnrollAPIURL
@@ -24,6 +25,29 @@ func (s stubRegistry) ReadString(key, value, def string) string {
 		return v
 	}
 	return def
+}
+
+func TestAcceptanceMaintenanceTokenHashUsesProtectedMachineRegistrySource(t *testing.T) {
+	const want = "0123456789abcdef"
+	reader := stubRegistry{stringMap: map[string]string{
+		acceptanceMachineEnvironmentKey + "|ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256": "  " + want + "  ",
+	}}
+	if got := acceptanceMaintenanceTokenHash(reader); got != want {
+		t.Fatalf("protected maintenance hash = %q, want %q", got, want)
+	}
+	if got := acceptanceMaintenanceTokenHash(nil); got != "" {
+		t.Fatalf("nil protected source must fail closed, got %q", got)
+	}
+	t.Setenv("ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256", "caller-controlled-hash")
+	if got := acceptanceMaintenanceTokenHash(stubRegistry{}); got != "" {
+		t.Fatalf("process env must not override protected source, got %q", got)
+	}
+	modeReader := stubRegistry{stringMap: map[string]string{
+		acceptanceMachineEnvironmentKey + "|" + screenview.ProtectedAcceptanceValue: "  test  ",
+	}}
+	if got := acceptanceProtectedMode(modeReader); got != "test" {
+		t.Fatalf("protected acceptance mode = %q, want test", got)
+	}
 }
 
 func TestHostnameOnly_AcceptsHTTPS(t *testing.T) {

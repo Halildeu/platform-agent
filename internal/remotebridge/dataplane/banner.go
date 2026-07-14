@@ -56,7 +56,22 @@ var (
 	ErrBannerCreate = errors.New("dataplane: endpoint banner window creation failed")
 	// ErrBannerShow: the window could not be shown / verified visible.
 	ErrBannerShow = errors.New("dataplane: endpoint banner could not be shown")
+	// ErrBannerNotFound is returned when the acceptance trigger cannot find the
+	// exact session-bound active banner. Wrong/stale sessions fail closed here.
+	ErrBannerNotFound = errors.New("dataplane: session-bound endpoint banner not found")
+	// ErrBannerTrigger is returned when Win32 refuses the fixed WM_CLOSE signal.
+	ErrBannerTrigger = errors.New("dataplane: endpoint banner close signal failed")
 )
+
+func bannerWindowTitle(binding string) string {
+	if binding == "" {
+		return BannerTitle
+	}
+	// Keep the opaque binding in the exact title. TriggerIndicatorLoss searches
+	// by BOTH this title and the private banner class, preventing a stale/wrong
+	// session from falling back to an unrelated active banner.
+	return BannerTitle + " [acceptance:" + binding + "]"
+}
 
 // rgb packs r,g,b into a Win32 COLORREF (0x00BBGGRR). OS-agnostic (pure bit-pack)
 // so the colour constants are unit-testable off Windows.

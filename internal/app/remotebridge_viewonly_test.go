@@ -289,7 +289,7 @@ func TestScreenViewProducerFactoryDefaultFailsClosed(t *testing.T) {
 	if factory == nil {
 		t.Fatal("the producer factory must be non-nil so VIEW_ONLY can be wired")
 	}
-	if _, err := factory(context.Background(), "stream-1"); err == nil {
+	if _, err := factory(context.Background(), "session-1", "stream-1"); err == nil {
 		t.Fatal("the default screen-view producer factory must be fail-closed (no active-desktop capture off-Windows)")
 	}
 }

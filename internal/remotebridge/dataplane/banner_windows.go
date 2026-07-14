@@ -26,6 +26,7 @@ var (
 	procDestroyWindow      = user32.NewProc("DestroyWindow")
 	procShowWindow         = user32.NewProc("ShowWindow")
 	procUpdateWindow       = user32.NewProc("UpdateWindow")
+	procIsWindow           = user32.NewProc("IsWindow")
 	procIsWindowVisible    = user32.NewProc("IsWindowVisible")
 	procFindWindowW        = user32.NewProc("FindWindowW")
 	procGetMessageW        = user32.NewProc("GetMessageW")
@@ -121,12 +122,20 @@ type msgW struct {
 // streaming any frame: no verified banner ⇒ no endpoint awareness ⇒ fail-closed
 // (do not capture). It is an AWARENESS assertion, not tamper-proofing (a user can
 // still kill the process; enforcement is the session gate + local-abort).
-func BannerSelfVerify() error {
+func BannerSelfVerify() error { return BannerSelfVerifyBound("") }
+
+// BannerSelfVerifyBound verifies the exact session-bound window used by the
+// non-production indicator-loss acceptance trigger.
+func BannerSelfVerifyBound(binding string) error {
 	classPtr, err := windows.UTF16PtrFromString(bannerClassName)
 	if err != nil {
 		return ErrBannerShow
 	}
-	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(classPtr)), 0)
+	titlePtr, err := windows.UTF16PtrFromString(bannerWindowTitle(binding))
+	if err != nil {
+		return ErrBannerShow
+	}
+	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(classPtr)), uintptr(unsafe.Pointer(titlePtr)))
 	if hwnd == 0 {
 		return ErrBannerShow
 	}
@@ -144,7 +153,11 @@ func BannerSelfVerify() error {
 //
 // Single PRIMARY-monitor scope (MVP); a user solely on a secondary monitor may
 // not see it (multi-monitor coverage is a follow-up).
-func ShowActiveBanner(ctx context.Context) (retErr error) {
+func ShowActiveBanner(ctx context.Context) error { return ShowActiveBannerBound(ctx, "") }
+
+// ShowActiveBannerBound displays the normal user-visible banner while giving
+// its non-visible Win32 title an opaque session binding for acceptance runs.
+func ShowActiveBannerBound(ctx context.Context, binding string) (retErr error) {
 	// Win32 message loops MUST stay on a single OS thread for the window's life.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -176,7 +189,7 @@ func ShowActiveBanner(ctx context.Context) (retErr error) {
 	defer procDeleteObject.Call(uintptr(redBrush))
 
 	classNamePtr, _ := windows.UTF16PtrFromString(bannerClassName)
-	titlePtr, _ := windows.UTF16PtrFromString(BannerTitle)
+	titlePtr, _ := windows.UTF16PtrFromString(bannerWindowTitle(binding))
 	textPtr, _ := windows.UTF16PtrFromString(BannerText)
 	abortTextPtr, _ := windows.UTF16PtrFromString("BITIR / END")
 	staticClassPtr, _ := windows.UTF16PtrFromString("STATIC")
@@ -340,4 +353,34 @@ func ShowActiveBanner(ctx context.Context) (retErr error) {
 			procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
 		}
 	}
+}
+
+// TriggerIndicatorLoss posts the one fixed message accepted by the supported
+// non-production acceptance path. It cannot inject arbitrary IPC, window
+// messages, input, or control data. Authorization and mode checks live in the
+// screenview package before this Win32 primitive is called.
+func TriggerIndicatorLoss(binding string) error {
+	if binding == "" {
+		return ErrBannerNotFound
+	}
+	classPtr, err := windows.UTF16PtrFromString(bannerClassName)
+	if err != nil {
+		return ErrBannerNotFound
+	}
+	titlePtr, err := windows.UTF16PtrFromString(bannerWindowTitle(binding))
+	if err != nil {
+		return ErrBannerNotFound
+	}
+	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(classPtr)), uintptr(unsafe.Pointer(titlePtr)))
+	if hwnd == 0 {
+		return ErrBannerNotFound
+	}
+	if live, _, _ := procIsWindow.Call(hwnd); live == 0 {
+		return ErrBannerNotFound
+	}
+	posted, _, _ := procPostMessageW.Call(hwnd, wmClose, 0, 0)
+	if posted == 0 {
+		return ErrBannerTrigger
+	}
+	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -96,6 +97,10 @@ func main() {
 	}
 	if len(flag.Args()) > 0 && flag.Args()[0] == "diagnose" {
 		handleDiagnoseCommand(flag.Args()[1:])
+		return
+	}
+	if len(flag.Args()) > 0 && flag.Args()[0] == "acceptance" {
+		handleAcceptanceCommand(flag.Args()[1:])
 		return
 	}
 
@@ -614,6 +619,93 @@ func requireMaintenanceToken(token string, hashOverride string) error {
 		return fmt.Errorf("%w: stop/uninstall requires --maintenance-token", err)
 	}
 	return nil
+}
+
+const acceptanceMachineEnvironmentKey = `HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
+
+func acceptanceMaintenanceTokenHash(reader winregistry.Reader) string {
+	if reader == nil {
+		return ""
+	}
+	return strings.TrimSpace(reader.ReadString(
+		acceptanceMachineEnvironmentKey,
+		"ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256", ""))
+}
+
+func acceptanceProtectedMode(reader winregistry.Reader) string {
+	if reader == nil {
+		return ""
+	}
+	return strings.TrimSpace(reader.ReadString(
+		acceptanceMachineEnvironmentKey,
+		screenview.ProtectedAcceptanceValue, ""))
+}
+
+func handleAcceptanceCommand(args []string) {
+	if len(args) == 0 || args[0] != "trigger-indicator-loss" {
+		printAcceptanceUsage()
+		os.Exit(2)
+	}
+	flags := flag.NewFlagSet("acceptance trigger-indicator-loss", flag.ExitOnError)
+	sessionID := flags.String("session-id", "", "exact active VIEW_ONLY broker session id")
+	if err := flags.Parse(args[1:]); err != nil {
+		log.Fatalf("acceptance command parse failed: %v", err)
+	}
+	if flags.NArg() != 0 {
+		log.Fatal("acceptance trigger-indicator-loss accepts no positional arguments")
+	}
+	protectedMode := acceptanceProtectedMode(winregistry.New())
+	if err := screenview.IndicatorLossAcceptanceHostPreflight(protectedMode); err != nil {
+		log.Fatalf("acceptance indicator-loss host preflight refused: %v", err)
+	}
+
+	// stdin-only credential handling: the raw maintenance token never appears in
+	// argv, process listings, shell history, JSON evidence, or logs. Bound the
+	// read so a pipe cannot grow process memory without limit.
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, 257))
+	if err != nil {
+		log.Fatalf("read maintenance token from stdin: %v", err)
+	}
+	if len(raw) == 0 || len(raw) > 256 {
+		log.Fatal("maintenance token stdin must contain 1..256 bytes")
+	}
+	end := len(raw)
+	for end > 0 && (raw[end-1] == '\r' || raw[end-1] == '\n') {
+		end--
+	}
+	maintenanceToken := string(raw[:end])
+	for i := range raw {
+		raw[i] = 0
+	}
+
+	// Never trust the caller-controlled process environment as the expected
+	// credential. Read the hash directly from the Administrator-writable HKLM
+	// machine environment key; missing/non-Windows lookup returns blank and the
+	// acceptance gate refuses closed.
+	expectedHash := acceptanceMaintenanceTokenHash(winregistry.New())
+	if err := screenview.TriggerIndicatorLossAcceptance(*sessionID, maintenanceToken, expectedHash, protectedMode); err != nil {
+		log.Fatalf("acceptance indicator-loss trigger refused: %v", err)
+	}
+	binding, err := screenview.AcceptanceWindowBinding(*sessionID)
+	if err != nil {
+		log.Fatalf("acceptance evidence binding: %v", err)
+	}
+	evidence := map[string]any{
+		"schemaVersion":                 "faz22.6-view-only-indicator-loss-trigger-v1",
+		"indicatorLossTriggerSubmitted": true,
+		"sessionBindingSha256":          binding,
+		"acceptanceMode":                "test",
+		"rawSessionIdIncluded":          false,
+		"rawMaintenanceTokenIncluded":   false,
+		"submittedAtUtc":                time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(evidence); err != nil {
+		log.Fatalf("encode acceptance trigger evidence: %v", err)
+	}
+}
+
+func printAcceptanceUsage() {
+	fmt.Fprintln(os.Stderr, "usage: endpoint-agent acceptance trigger-indicator-loss --session-id <active-session-id> < maintenance-token-stdin")
 }
 
 func handleDiagnoseCommand(args []string) {

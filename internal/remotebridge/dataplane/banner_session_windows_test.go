@@ -4,6 +4,8 @@ package dataplane
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -11,6 +13,45 @@ import (
 	"testing"
 	"time"
 )
+
+func TestTriggerIndicatorLossRejectsUnboundTarget(t *testing.T) {
+	if err := TriggerIndicatorLoss(""); !errors.Is(err, ErrBannerNotFound) {
+		t.Fatalf("empty binding err=%v, want ErrBannerNotFound", err)
+	}
+}
+
+func TestRealBoundBannerWMCloseReturnsIndicatorLost(t *testing.T) {
+	if os.Getenv("DATAPLANE_REAL_BANNER") != "1" {
+		t.Skip("set DATAPLANE_REAL_BANNER=1 in an interactive Windows desktop session")
+	}
+	const binding = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- ShowActiveBannerBound(ctx, binding) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := BannerSelfVerifyBound(binding); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session-bound banner did not become visible")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := TriggerIndicatorLoss(binding); err != nil {
+		t.Fatalf("post fixed WM_CLOSE: %v", err)
+	}
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrIndicatorLost) {
+			t.Fatalf("WM_CLOSE result=%v, want ErrIndicatorLost", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("WM_CLOSE did not terminate the bound banner")
+	}
+}
 
 // (procFindWindowW + bannerSelfVerify were lifted to production as
 // dataplane.BannerSelfVerify in banner_windows.go — the VIEW_ONLY capture helper

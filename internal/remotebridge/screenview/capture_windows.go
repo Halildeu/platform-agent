@@ -26,9 +26,10 @@ import (
 )
 
 const (
-	helperPipeFlag  = "--rb-screenview-pipe="
-	helperNonceFlag = "--rb-screenview-nonce="
-	helperMaskFlag  = "--rb-screenview-mask-bps="
+	helperPipeFlag           = "--rb-screenview-pipe="
+	helperNonceFlag          = "--rb-screenview-nonce="
+	helperMaskFlag           = "--rb-screenview-mask-bps="
+	helperSessionBindingFlag = "--rb-screenview-session-binding="
 
 	acceptTimeout      = 15 * time.Second       // bound the launch->dial handshake (Accept is ctx+timeout bounded)
 	firstFrameDeadline = 12 * time.Second       // the helper must banner-verify + capture a first frame within this
@@ -45,8 +46,8 @@ const (
 // (false, 0) when the process was NOT invoked as the helper (normal startup).
 // main() must call this before starting the service.
 func MaybeRunActiveSessionScreenViewHelper(args []string) (bool, int) {
-	var pipeName, nonceHex, maskRaw string
-	pipeCount, nonceCount, maskCount := 0, 0, 0
+	var pipeName, nonceHex, maskRaw, sessionBinding string
+	pipeCount, nonceCount, maskCount, bindingCount := 0, 0, 0, 0
 	for _, a := range args {
 		switch {
 		case strings.HasPrefix(a, helperPipeFlag):
@@ -58,12 +59,16 @@ func MaybeRunActiveSessionScreenViewHelper(args []string) (bool, int) {
 		case strings.HasPrefix(a, helperMaskFlag):
 			maskRaw = strings.TrimPrefix(a, helperMaskFlag)
 			maskCount++
+		case strings.HasPrefix(a, helperSessionBindingFlag):
+			sessionBinding = strings.TrimPrefix(a, helperSessionBindingFlag)
+			bindingCount++
 		}
 	}
-	if pipeCount == 0 && nonceCount == 0 && maskCount == 0 {
+	if pipeCount == 0 && nonceCount == 0 && maskCount == 0 && bindingCount == 0 {
 		return false, 0 // not a helper invocation
 	}
-	if pipeCount != 1 || nonceCount != 1 || maskCount > 1 || pipeName == "" || nonceHex == "" {
+	if pipeCount != 1 || nonceCount != 1 || maskCount > 1 || bindingCount != 1 ||
+		pipeName == "" || nonceHex == "" || !validAcceptanceWindowBinding(sessionBinding) {
 		return true, 2 // partial flags = malformed launch
 	}
 	maskPolicy := MaskPolicy{}
@@ -74,16 +79,27 @@ func MaybeRunActiveSessionScreenViewHelper(args []string) (bool, int) {
 			return true, 2
 		}
 	}
-	if err := runActiveSessionScreenViewHelper(pipeName, nonceHex, maskPolicy); err != nil {
+	if err := runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding, maskPolicy); err != nil {
 		return true, 1
 	}
 	return true, 0
 }
 
+func writeBannerTermination(w io.Writer, bannerErr error) error {
+	switch {
+	case errors.Is(bannerErr, dataplane.ErrLocalAbort):
+		return dataplane.WriteLocalAbort(w)
+	case errors.Is(bannerErr, dataplane.ErrIndicatorLost):
+		return dataplane.WriteIndicatorLost(w)
+	default:
+		return bannerErr
+	}
+}
+
 // runActiveSessionScreenViewHelper runs in the ACTIVE user session: dial+handshake,
 // show+self-verify the banner (fail-closed), then stream indicator-stamped
 // primary-monitor frames until the service closes the pipe, then a graceful EOF.
-func runActiveSessionScreenViewHelper(pipeName, nonceHex string, maskPolicy MaskPolicy) error {
+func runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding string, maskPolicy MaskPolicy) error {
 	nonce, err := hex.DecodeString(nonceHex)
 	if err != nil {
 		return err
@@ -104,29 +120,19 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex string, maskPolicy Mask
 	bannerCtx, cancelBanner := context.WithCancel(context.Background())
 	defer cancelBanner()
 	bannerErr := make(chan error, 1)
-	go func() { bannerErr <- dataplane.ShowActiveBanner(bannerCtx) }()
-	reportBannerTermination := func(berr error) error {
-		switch {
-		case errors.Is(berr, dataplane.ErrLocalAbort):
-			return dataplane.WriteLocalAbort(conn)
-		case errors.Is(berr, dataplane.ErrIndicatorLost):
-			return dataplane.WriteIndicatorLost(conn)
-		default:
-			return berr
-		}
-	}
+	go func() { bannerErr <- dataplane.ShowActiveBannerBound(bannerCtx, sessionBinding) }()
 	select {
 	case err := <-bannerErr: // returned before it could settle => window creation failed
 		if err == nil {
 			err = fmt.Errorf("banner exited before showing")
 		}
-		if signalErr := reportBannerTermination(err); signalErr == nil {
+		if signalErr := writeBannerTermination(conn, err); signalErr == nil {
 			return nil
 		}
 		return fmt.Errorf("screenview helper: endpoint banner failed (fail-closed): %w", err)
 	case <-time.After(bannerSettle):
 	}
-	if err := dataplane.BannerSelfVerify(); err != nil {
+	if err := dataplane.BannerSelfVerifyBound(sessionBinding); err != nil {
 		return fmt.Errorf("screenview helper: endpoint banner not visible (fail-closed): %w", err)
 	}
 
@@ -166,14 +172,14 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex string, maskPolicy Mask
 	}
 	for {
 		if err := checkBannerAlive(); err != nil {
-			return reportBannerTermination(err)
+			return writeBannerTermination(conn, err)
 		}
 		f, ok := producer.Next()
 		if !ok {
 			break // capture tripped fail-closed (consecutive errors) => end the stream
 		}
 		if err := checkBannerAlive(); err != nil {
-			return reportBannerTermination(err) // do NOT egress this frame
+			return writeBannerTermination(conn, err) // do NOT egress this frame
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if err := dataplane.WriteFrame(conn, f.Payload); err != nil {
@@ -268,7 +274,11 @@ func readFirstFrame(ctx context.Context, conn net.Conn, deadline time.Duration) 
 // failure, a handshake failure, or a helper that never produces a first frame
 // (banner/capture failed) all return an error and leave NO orphan helper.
 func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
-	return func(ctx context.Context, _ string) (dataplane.FrameProducer, error) {
+	return func(ctx context.Context, sessionID, _ string) (dataplane.FrameProducer, error) {
+		sessionBinding, err := AcceptanceWindowBinding(sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("screenview: acceptance session binding: %w", err)
+		}
 		self, err := os.Executable()
 		if err != nil {
 			return nil, fmt.Errorf("screenview: resolve helper executable: %w", err)
@@ -295,7 +305,11 @@ func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
 		if err != nil {
 			return nil, err
 		}
-		helperArgs := []string{helperPipeFlag + name, helperNonceFlag + hex.EncodeToString(nonce)}
+		helperArgs := []string{
+			helperPipeFlag + name,
+			helperNonceFlag + hex.EncodeToString(nonce),
+			helperSessionBindingFlag + sessionBinding,
+		}
 		if maskPolicy.Enabled() {
 			helperArgs = append(helperArgs, helperMaskFlag+maskPolicy.String())
 		}

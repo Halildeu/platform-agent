@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -522,6 +523,7 @@ func TestDeviceKeyChallengeWithoutResponderIsAProtocolDefect(t *testing.T) {
 // in well under a second and does NOT tear down the transport.
 func TestKillObeySubSecond(t *testing.T) {
 	killSent := make(chan time.Time, 16)
+	killApplied := make(chan *pb.AuditEvent, 1)
 	script := func(s pb.RemoteBridge_ConnectServer) error {
 		if _, err := s.Recv(); err != nil {
 			return err
@@ -529,8 +531,17 @@ func TestKillObeySubSecond(t *testing.T) {
 		_ = s.Send(heartbeatEnv(60_000, 0))
 		killSent <- time.Now()
 		_ = s.Send(killEnv("sess-x", "policy-revoked"))
-		<-s.Context().Done() // hold the stream open: session kill ≠ stream end
-		return nil
+		for {
+			env, err := s.Recv()
+			if err != nil {
+				return err
+			}
+			if event := env.GetAuditEvent(); event != nil && event.GetEventType() == "AGENT_KILL_APPLIED" {
+				killApplied <- event
+				<-s.Context().Done() // hold the stream open: session kill ≠ stream end
+				return nil
+			}
+		}
 	}
 	fx := start(t, script, nil)
 
@@ -551,6 +562,18 @@ func TestKillObeySubSecond(t *testing.T) {
 	st, _ := fx.h.Session("sess-x")
 	if st.KillReason != "policy-revoked" {
 		t.Errorf("kill reason %q", st.KillReason)
+	}
+	select {
+	case event := <-killApplied:
+		if event.GetSessionId() != "sess-x" {
+			t.Fatalf("kill-applied session = %q, want sess-x", event.GetSessionId())
+		}
+		if len(event.GetContentHash()) != 64 || event.GetEpochMillis() <= 0 {
+			t.Fatalf("kill-applied provenance missing: hash=%q epoch=%d",
+				event.GetContentHash(), event.GetEpochMillis())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session KILL was applied but no AGENT_KILL_APPLIED acknowledgement arrived")
 	}
 	// Transport must stay up after a session-scoped kill.
 	time.Sleep(100 * time.Millisecond)
@@ -582,6 +605,29 @@ func TestTransportKillClosesStreamAndReconnects(t *testing.T) {
 	waitFor(t, 3*time.Second, "reconnect after transport kill", func() bool {
 		return fx.dials.Load() >= 2
 	})
+}
+
+func TestRepeatedUnknownSessionKillsLeaveNoPendingAckState(t *testing.T) {
+	h := &Harness{
+		sessions:      make(map[string]SessionState),
+		screenCancels: make(map[string]*screenCancelEntry),
+		killAckReady:  make(map[string]<-chan struct{}),
+	}
+	for i := 0; i < 1000; i++ {
+		sessionID := fmt.Sprintf("unknown-session-%d", i)
+		h.obeyKill(sessionID, "stale-redelivery")
+		select {
+		case <-h.takeKillAckReady(sessionID):
+		case <-time.After(time.Second):
+			t.Fatalf("session %q did not expose an immediate no-screen ACK boundary", sessionID)
+		}
+	}
+	h.mu.Lock()
+	pending := len(h.killAckReady)
+	h.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending kill ACK state leaked after repeated KILLs: %d", pending)
+	}
 }
 
 // TestMissedFirstHeartbeatReconnects: a silent fresh stream trips the

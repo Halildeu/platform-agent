@@ -9,5 +9,11 @@ import "context"
 // without endpoint awareness (build-tag parity with banner_windows.go).
 func ShowActiveBanner(_ context.Context) error { return ErrBannerUnsupported }
 
+func ShowActiveBannerBound(_ context.Context, _ string) error { return ErrBannerUnsupported }
+
 // BannerSelfVerify is unsupported off Windows (build-tag parity): fail-closed.
 func BannerSelfVerify() error { return ErrBannerUnsupported }
+
+func BannerSelfVerifyBound(_ string) error { return ErrBannerUnsupported }
+
+func TriggerIndicatorLoss(_ string) error { return ErrBannerUnsupported }

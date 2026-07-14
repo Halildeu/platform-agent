@@ -55,7 +55,7 @@ func (s *frameSink) snapshot() []*pb.DataFrame {
 }
 
 func mockFactory(max int64, payload []byte) ProducerFactory {
-	return func(context.Context, string) (dataplane.FrameProducer, error) {
+	return func(context.Context, string, string) (dataplane.FrameProducer, error) {
 		return dataplane.NewMockFrameProducer(max, payload), nil
 	}
 }
@@ -68,7 +68,7 @@ func (p *terminatingProducer) Err() error                    { return p.err }
 
 func TestDispatchDeniedAuthorizationFailsClosed(t *testing.T) {
 	factoryCalled := false
-	factory := func(context.Context, string) (dataplane.FrameProducer, error) {
+	factory := func(context.Context, string, string) (dataplane.FrameProducer, error) {
 		factoryCalled = true
 		return nil, nil
 	}
@@ -90,7 +90,7 @@ func TestDispatchDeniedAuthorizationFailsClosed(t *testing.T) {
 }
 
 func TestDispatchCaptureStartFailureFailsClosed(t *testing.T) {
-	factory := func(context.Context, string) (dataplane.FrameProducer, error) {
+	factory := func(context.Context, string, string) (dataplane.FrameProducer, error) {
 		return nil, errors.New("no display")
 	}
 	d, _ := New(&fakeAuthorizer{allow: true}, factory, Options{})
@@ -201,7 +201,7 @@ func TestDispatchPropagatesTypedSourceTerminationWithoutEndStream(t *testing.T) 
 		{"indicator-lost", dataplane.ErrIndicatorLost},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			factory := func(context.Context, string) (dataplane.FrameProducer, error) {
+			factory := func(context.Context, string, string) (dataplane.FrameProducer, error) {
 				return &terminatingProducer{err: tc.err}, nil
 			}
 			d, _ := New(&fakeAuthorizer{allow: true}, factory, Options{})
