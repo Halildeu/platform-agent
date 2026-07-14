@@ -216,11 +216,15 @@ func remoteBridgeHarnessConfig(ctx context.Context, cfg config.Config, deviceID 
 		// producer factory is fail-closed by default on every platform without an active-desktop capture impl
 		// (sub-slice #6), so an enabled flag wires the gate + routing but never egresses a frame until capture
 		// is proven on a real host.
+		maskPolicy, err := screenview.ParseMaskPolicy(cfg.RemoteBridgeViewOnlyMaskRectBPS)
+		if err != nil {
+			return harness.Config{}, fmt.Errorf("remote-bridge view-only mask policy: %w", err)
+		}
 		producerFactory := deps.screenViewProducerFactory
 		if producerFactory == nil {
 			// Production VIEW_ONLY capture: launches an active-session helper over a
 			// DACL-restricted nonce-verified pipe (Windows); fail-closed off Windows.
-			producerFactory = screenview.NewWindowsProducerFactory()
+			producerFactory = screenview.NewWindowsProducerFactory(maskPolicy)
 		}
 		dispatcher, err := screenview.New(newProviderViewOnlyAuthorizer(authzProvider), producerFactory, screenview.Options{})
 		if err != nil {

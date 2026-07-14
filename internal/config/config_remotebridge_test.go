@@ -34,6 +34,9 @@ func TestRemoteBridgeDefaultsDisabled(t *testing.T) {
 	if cfg.RemoteBridgeViewOnlyAttendedConsentEnabled {
 		t.Fatal("remote-bridge view-only attended consent must default to false")
 	}
+	if cfg.RemoteBridgeViewOnlyMaskRectBPS != "" {
+		t.Fatal("remote-bridge view-only mask must default to disabled")
+	}
 	if cfg.RemoteBridgePilotAutoConsent {
 		t.Fatal("remote-bridge pilot auto-consent must default to false")
 	}
@@ -68,6 +71,7 @@ func TestRemoteBridgeEnvOverrides(t *testing.T) {
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_OPERATIONS_ENABLED", "true")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ENABLED", "true")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ATTENDED_CONSENT_ENABLED", "true")
+	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_MASK_RECT_BPS", "7500,7500,2500,2500")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64", "pub")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID", "kid-1")
 	t.Setenv("ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT", "true")
@@ -96,6 +100,7 @@ func TestRemoteBridgeEnvOverrides(t *testing.T) {
 		!cfg.RemoteBridgeOperationsEnabled ||
 		!cfg.RemoteBridgeViewOnlyEnabled ||
 		!cfg.RemoteBridgeViewOnlyAttendedConsentEnabled ||
+		cfg.RemoteBridgeViewOnlyMaskRectBPS != "7500,7500,2500,2500" ||
 		cfg.RemoteBridgePermitBrokerPublicKeyB64 != "pub" ||
 		cfg.RemoteBridgePermitKeyID != "kid-1" ||
 		!cfg.RemoteBridgePilotAutoConsent ||
