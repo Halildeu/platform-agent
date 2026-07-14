@@ -13,6 +13,7 @@ package screenview
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -104,6 +105,13 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 	if decision := d.authorizer.AuthorizeViewOnly(permit, nowEpochMillis); !decision.Allowed {
 		return fmt.Errorf("view-only-authorize-denied:%s", decision.Reason)
 	}
+	remainingMillis := permit.ExpiresAtEpochMillis - d.clock()
+	if remainingMillis <= 0 {
+		return dataplane.ErrPermitExpired
+	}
+	streamCtx, cancelStream := context.WithTimeoutCause(ctx,
+		time.Duration(remainingMillis)*time.Millisecond, dataplane.ErrPermitExpired)
+	defer cancelStream()
 
 	session := dataplane.NewViewSession(d.queueCap)
 	// recording-OFF mode (ADR-0044 D3): no WORM recorder — the gate egresses on the explicit recording-OFF
@@ -111,17 +119,17 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 	session.SetRecordingNotRequired(true)
 	session.Activate()
 
-	producer, err := d.newProducer(ctx, streamID)
+	producer, err := d.newProducer(streamCtx, streamID)
 	if err != nil {
 		session.Abort()
-		return fmt.Errorf("view-only-capture-start-failed")
+		return fmt.Errorf("view-only-capture-start-failed: %w", err)
 	}
 
 	pump := dataplane.NewPump(producer, session)
 	pumpDone := make(chan struct{})
 	go func() {
 		defer close(pumpDone)
-		_ = pump.Run(ctx) // Pump closes the producer once; offers frames to the gate (drop-tolerant)
+		_ = pump.Run(streamCtx) // Pump closes the producer once; offers frames to the gate (drop-tolerant)
 	}()
 
 	var seq int64
@@ -144,9 +152,12 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-streamCtx.Done():
 			// KILL / transport teardown: abort the gate (flush, no further egress) — intentional, not a failure.
 			session.Abort()
+			if errors.Is(context.Cause(streamCtx), dataplane.ErrPermitExpired) {
+				return dataplane.ErrPermitExpired
+			}
 			return nil
 		case <-pumpDone:
 			// The producer ended. When ctx is also cancelled, BOTH this case and the ctx.Done()
@@ -154,9 +165,16 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 			// BECAUSE of the cancellation. Treat that as cancellation (abort, NO terminal
 			// EndStream), matching the ctx.Done() branch, so a cancelled dispatch never emits an
 			// EndStream regardless of select ordering (deterministic; was a -race flake).
-			if ctx.Err() != nil {
+			if streamCtx.Err() != nil {
 				session.Abort()
+				if errors.Is(context.Cause(streamCtx), dataplane.ErrPermitExpired) {
+					return dataplane.ErrPermitExpired
+				}
 				return nil
+			}
+			if sourceErr := producer.Err(); sourceErr != nil {
+				session.Abort()
+				return sourceErr
 			}
 			// clean producer-exhaustion: drain whatever the gate still holds, then a best-effort
 			// terminal EndStream.
@@ -170,8 +188,11 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 			// ctx.Done() + ticker.C can both be ready; if cancelled, abort with NO further
 			// egress instead of draining queued frames — so no DATA frame egresses after a
 			// cancel regardless of select ordering (Codex 019f1132).
-			if ctx.Err() != nil {
+			if streamCtx.Err() != nil {
 				session.Abort()
+				if errors.Is(context.Cause(streamCtx), dataplane.ErrPermitExpired) {
+					return dataplane.ErrPermitExpired
+				}
 				return nil
 			}
 			if derr := drain(); derr != nil {

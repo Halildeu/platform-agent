@@ -13,7 +13,9 @@ package screenview
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -103,10 +105,23 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex string, maskPolicy Mask
 	defer cancelBanner()
 	bannerErr := make(chan error, 1)
 	go func() { bannerErr <- dataplane.ShowActiveBanner(bannerCtx) }()
+	reportBannerTermination := func(berr error) error {
+		switch {
+		case errors.Is(berr, dataplane.ErrLocalAbort):
+			return dataplane.WriteLocalAbort(conn)
+		case errors.Is(berr, dataplane.ErrIndicatorLost):
+			return dataplane.WriteIndicatorLost(conn)
+		default:
+			return berr
+		}
+	}
 	select {
 	case err := <-bannerErr: // returned before it could settle => window creation failed
 		if err == nil {
 			err = fmt.Errorf("banner exited before showing")
+		}
+		if signalErr := reportBannerTermination(err); signalErr == nil {
+			return nil
 		}
 		return fmt.Errorf("screenview helper: endpoint banner failed (fail-closed): %w", err)
 	case <-time.After(bannerSettle):
@@ -151,14 +166,14 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex string, maskPolicy Mask
 	}
 	for {
 		if err := checkBannerAlive(); err != nil {
-			return err
+			return reportBannerTermination(err)
 		}
 		f, ok := producer.Next()
 		if !ok {
 			break // capture tripped fail-closed (consecutive errors) => end the stream
 		}
 		if err := checkBannerAlive(); err != nil {
-			return err // banner went down during capture — do NOT egress this frame
+			return reportBannerTermination(err) // do NOT egress this frame
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if err := dataplane.WriteFrame(conn, f.Payload); err != nil {
@@ -175,12 +190,13 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex string, maskPolicy Mask
 // frame (liveness proof), so Next replays it first, then reads the rest. Close is
 // idempotent and ALWAYS terminates the helper (no orphan capture survives).
 type ipcFrameProducer struct {
-	conn      net.Conn
-	helper    *dataplane.LaunchedHelper
-	listener  net.Listener
-	first     []byte
-	firstUsed bool
-	closeOnce sync.Once
+	conn        net.Conn
+	helper      *dataplane.LaunchedHelper
+	listener    net.Listener
+	first       []byte
+	firstUsed   bool
+	closeOnce   sync.Once
+	terminalErr error
 }
 
 func (p *ipcFrameProducer) Next() (dataplane.Frame, bool) {
@@ -192,10 +208,17 @@ func (p *ipcFrameProducer) Next() (dataplane.Frame, bool) {
 	}
 	payload, err := dataplane.ReadFrame(p.conn)
 	if err != nil {
+		if !errors.Is(err, io.EOF) {
+			p.terminalErr = err
+		}
 		return dataplane.Frame{}, false // EOF (helper done) or read error => exhausted
 	}
 	return dataplane.Frame{Payload: payload}, true
 }
+
+// Err distinguishes a normal helper EOF from a typed fail-closed termination.
+// It is read only after the pumpDone synchronization point.
+func (p *ipcFrameProducer) Err() error { return p.terminalErr }
 
 func (p *ipcFrameProducer) Close() error {
 	p.closeOnce.Do(func() {

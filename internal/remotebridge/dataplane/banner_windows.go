@@ -51,6 +51,7 @@ const (
 	wsPopup     = 0x80000000
 	wsVisible   = 0x10000000
 	wsChild     = 0x40000000
+	wsTabStop   = 0x00010000
 	wsExTopmost = 0x00000008
 	wsExToolWin = 0x00000080
 	wsExNoActiv = 0x08000000
@@ -59,15 +60,19 @@ const (
 	ssCenter   = 0x00000001
 	ssCenterIm = 0x00000200 // SS_CENTERIMAGE (vertical center, single line)
 
-	wmDestroy        = 0x0002
-	wmClose          = 0x0010
-	wmCtlColorStatic = 0x0138
-	wmSetFont        = 0x0030
-	idcArrow         = 32512
-	smCXScreen       = 0
-	smCYScreen       = 1
-	fwBold           = 700
-	defaultCharset   = 1
+	wmDestroy          = 0x0002
+	wmClose            = 0x0010
+	wmCommand          = 0x0111
+	wmCtlColorStatic   = 0x0138
+	wmSetFont          = 0x0030
+	idcArrow           = 32512
+	smCXScreen         = 0
+	smCYScreen         = 1
+	fwBold             = 700
+	defaultCharset     = 1
+	bsDefPushButton    = 0x00000001
+	bnClicked          = 0
+	localAbortButtonID = 1001
 )
 
 // systemDPI returns the system DPI, falling back to 96 (100%) if the API is
@@ -173,7 +178,9 @@ func ShowActiveBanner(ctx context.Context) (retErr error) {
 	classNamePtr, _ := windows.UTF16PtrFromString(bannerClassName)
 	titlePtr, _ := windows.UTF16PtrFromString(BannerTitle)
 	textPtr, _ := windows.UTF16PtrFromString(BannerText)
+	abortTextPtr, _ := windows.UTF16PtrFromString("BITIR / END")
 	staticClassPtr, _ := windows.UTF16PtrFromString("STATIC")
+	buttonClassPtr, _ := windows.UTF16PtrFromString("BUTTON")
 	cursor, _, _ := procLoadCursorW.Call(0, uintptr(idcArrow))
 
 	// WndProc: paint-free (a STATIC child carries the text); we colour that child
@@ -185,8 +192,19 @@ func ShowActiveBanner(ctx context.Context) (retErr error) {
 			procSetBkColor.Call(wparam, rgb(200, 0, 0))       // red background
 			return uintptr(redBrush)
 		case wmClose:
+			if ctx.Err() == nil && retErr == nil {
+				retErr = ErrIndicatorLost
+			}
 			procDestroyWindow.Call(uintptr(hwnd))
 			return 0
+		case wmCommand:
+			controlID := int(wparam & 0xffff)
+			notifyCode := int((wparam >> 16) & 0xffff)
+			if controlID == localAbortButtonID && notifyCode == bnClicked {
+				retErr = ErrLocalAbort
+				procDestroyWindow.Call(uintptr(hwnd))
+				return 0
+			}
 		case wmDestroy:
 			procPostQuitMessage.Call(0)
 			return 0
@@ -226,20 +244,47 @@ func ShowActiveBanner(ctx context.Context) (retErr error) {
 	hwnd := windows.Handle(hwndR)
 	defer procDestroyWindow.Call(uintptr(hwnd))
 
-	// STATIC child fills the popup, single-line centered both ways.
+	// Reserve a bounded right-hand region for an explicit local-abort button. The
+	// button is part of the attended safety control, not decorative UI.
+	buttonW := scaleForDPI(220, dpi)
+	if buttonW > w/3 {
+		buttonW = w / 3
+	}
+	if buttonW < scaleForDPI(120, dpi) {
+		buttonW = scaleForDPI(120, dpi)
+	}
+	if buttonW >= w {
+		buttonW = w / 3
+	}
+	textW := w - buttonW
+
+	// STATIC child carries the bilingual awareness notice.
 	childStyle := uintptr(wsChild | wsVisible | ssCenter | ssCenterIm)
 	childR, _, _ := procCreateWindowExW.Call(
 		0,
 		uintptr(unsafe.Pointer(staticClassPtr)),
 		uintptr(unsafe.Pointer(textPtr)),
 		childStyle,
-		0, 0, uintptr(int32(w)), uintptr(int32(h)),
+		0, 0, uintptr(int32(textW)), uintptr(int32(h)),
 		uintptr(hwnd), 0, uintptr(inst), 0,
 	)
 	if childR == 0 {
 		return ErrBannerCreate
 	}
 	child := windows.Handle(childR)
+	buttonStyle := uintptr(wsChild | wsVisible | wsTabStop | bsDefPushButton)
+	buttonR, _, _ := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(buttonClassPtr)),
+		uintptr(unsafe.Pointer(abortTextPtr)),
+		buttonStyle,
+		uintptr(int32(textW)), 0, uintptr(int32(buttonW)), uintptr(int32(h)),
+		uintptr(hwnd), uintptr(localAbortButtonID), uintptr(inst), 0,
+	)
+	if buttonR == 0 {
+		return ErrBannerCreate
+	}
+	button := windows.Handle(buttonR)
 
 	// Bold legible font scaled to ~45% of the bar height.
 	fontH := -(h * 45 / 100)
@@ -253,6 +298,19 @@ func ShowActiveBanner(ctx context.Context) (retErr error) {
 		font := windows.Handle(fontR)
 		defer procDeleteObject.Call(uintptr(font))
 		procSendMessageW.Call(uintptr(child), wmSetFont, fontR, 1)
+	}
+	// The command button uses a smaller font so its complete bilingual label fits
+	// at minimum supported banner width and high DPI.
+	buttonFontH := -(h * 30 / 100)
+	buttonFontR, _, _ := procCreateFontW.Call(
+		uintptr(int32(buttonFontH)), 0, 0, 0, uintptr(fwBold),
+		0, 0, 0, uintptr(defaultCharset), 0, 0, 0, 0,
+		uintptr(unsafe.Pointer(facePtr)),
+	)
+	if buttonFontR != 0 {
+		buttonFont := windows.Handle(buttonFontR)
+		defer procDeleteObject.Call(uintptr(buttonFont))
+		procSendMessageW.Call(uintptr(button), wmSetFont, buttonFontR, 1)
 	}
 
 	// Show WITHOUT activating (no focus theft), then confirm it is actually visible.
@@ -274,7 +332,7 @@ func ShowActiveBanner(ctx context.Context) (retErr error) {
 		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
 		switch int32(r) {
 		case 0: // WM_QUIT
-			return nil
+			return retErr
 		case -1: // error
 			return ErrBannerShow
 		default:

@@ -104,6 +104,7 @@ type WindowsFrameProducer struct {
 	mu      sync.Mutex
 	seq     int64
 	consErr int
+	lastErr error
 	started bool
 }
 
@@ -183,6 +184,7 @@ func (w *WindowsFrameProducer) Next() (Frame, bool) {
 			if encErr == nil {
 				w.mu.Lock()
 				w.consErr = 0
+				w.lastErr = nil
 				w.seq++
 				seq := w.seq
 				w.mu.Unlock()
@@ -193,6 +195,7 @@ func (w *WindowsFrameProducer) Next() (Frame, bool) {
 		// failure: count + kill-switch
 		w.mu.Lock()
 		w.consErr++
+		w.lastErr = err
 		tripped := w.consErr >= w.maxErr
 		w.mu.Unlock()
 		if tripped {
@@ -211,6 +214,17 @@ func (w *WindowsFrameProducer) Next() (Frame, bool) {
 // (idempotent). GDI handles are per-frame, so there is nothing else to free.
 func (w *WindowsFrameProducer) Close() error {
 	w.stopOnce.Do(func() { close(w.stop) })
+	return nil
+}
+
+// Err returns a bounded sentinel when the consecutive-error kill-switch ended
+// capture. Raw GDI/encoder details remain local and never cross the control wire.
+func (w *WindowsFrameProducer) Err() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.consErr >= w.maxErr && w.lastErr != nil {
+		return ErrCaptureFailed
+	}
 	return nil
 }
 

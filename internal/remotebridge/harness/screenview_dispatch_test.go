@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
+	"platform-agent/internal/remotebridge/dataplane"
 	"platform-agent/internal/remotebridge/operation"
 	pb "platform-agent/internal/remotebridge/pb"
 )
@@ -245,6 +246,54 @@ func TestScreenViewSessionKillCancelsDispatch(t *testing.T) {
 	}
 	if _, _, _, cancelled := disp.snapshot(); !cancelled {
 		t.Fatal("the dispatch must have observed ctx cancellation after the KILL")
+	}
+}
+
+func TestScreenViewTypedTerminationEmitsAllowlistedAuditEvent(t *testing.T) {
+	tests := []struct {
+		name        string
+		dispatchErr error
+		wantEvent   string
+	}{
+		{"local-abort", dataplane.ErrLocalAbort, "LOCAL_ABORT"},
+		{"indicator-lost", dataplane.ErrIndicatorLost, "AGENT_INDICATOR_LOST"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			received := make(chan *pb.AuditEvent, 1)
+			disp := &fakeScreenDispatcher{run: func(context.Context, func(*pb.DataFrame) error) error {
+				return tc.dispatchErr
+			}}
+			broker := &dispatchBroker{connect: func(s pb.RemoteBridge_ConnectServer) error {
+				if _, err := s.Recv(); err != nil {
+					return err
+				}
+				_ = s.Send(heartbeatEnv(60_000, 0))
+				_ = s.Send(operationPermitEnv(viewOnlyPermitProto()))
+				for {
+					env, err := s.Recv()
+					if err != nil {
+						return nil
+					}
+					if event := env.GetAuditEvent(); event != nil {
+						received <- event
+						return nil
+					}
+				}
+			}}
+			startDispatchScreenView(t, broker, disp)
+			select {
+			case event := <-received:
+				if event.GetSessionId() != "sess-1" || event.GetEventType() != tc.wantEvent {
+					t.Fatalf("audit event = session %q type %q", event.GetSessionId(), event.GetEventType())
+				}
+				if len(event.GetContentHash()) != 64 || event.GetEpochMillis() <= 0 {
+					t.Fatalf("audit provenance missing: hash=%q epoch=%d", event.GetContentHash(), event.GetEpochMillis())
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("typed termination did not reach CONTROL as an audit event")
+			}
+		})
 	}
 }
 
