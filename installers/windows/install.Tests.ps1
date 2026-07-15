@@ -172,6 +172,7 @@ Import-InstallHelper -Name "Get-ServiceFailurePolicy"
 Import-InstallHelper -Name "Restore-ServiceFailurePolicy"
 Import-InstallHelper -Name "Assert-ServiceFailurePolicy"
 Import-InstallHelper -Name "Get-ServiceStartMode"
+Import-InstallHelper -Name "Get-FileSystemAclCanonical"
 Import-InstallHelper -Name "Get-InstallTreeAclSnapshot"
 Import-InstallHelper -Name "Restore-InstallTreeAclSnapshot"
 Import-InstallHelper -Name "Assert-InstallTreeAclSnapshot"
@@ -917,6 +918,43 @@ Describe "Transactional service replacement helpers" {
         $script:aclRestoreOrder.Count | Should Be 2
         $script:aclRestoreOrder[0] | Should Be $installPath
         $script:aclRestoreOrder[1] | Should Be $childPath
+    }
+
+    It "canonicalizes equivalent ACL rules independently of ACE insertion order" {
+        $systemSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+        $adminsSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
+        $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+            [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+        $propagation = [System.Security.AccessControl.PropagationFlags]::None
+        $allow = [System.Security.AccessControl.AccessControlType]::Allow
+        $systemRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $systemSid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $propagation,
+            $allow
+        )
+        $adminsRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $adminsSid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $propagation,
+            $allow
+        )
+        $first = [System.Security.AccessControl.DirectorySecurity]::new()
+        $second = [System.Security.AccessControl.DirectorySecurity]::new()
+        foreach ($acl in @($first, $second)) {
+            $acl.SetOwner($adminsSid)
+            $acl.SetGroup($adminsSid)
+            $acl.SetAccessRuleProtection($true, $false)
+        }
+        $first.AddAccessRule($systemRule)
+        $first.AddAccessRule($adminsRule)
+        $second.AddAccessRule($adminsRule)
+        $second.AddAccessRule($systemRule)
+
+        Get-FileSystemAclCanonical -Acl $first |
+            Should Be (Get-FileSystemAclCanonical -Acl $second)
     }
 
     It "snapshots manual services when optional registry values are absent" {

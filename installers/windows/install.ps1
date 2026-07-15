@@ -721,6 +721,31 @@ function Get-ServiceStartMode {
     }
 }
 
+function Get-FileSystemAclCanonical {
+    param([Parameter(Mandatory)] $Acl)
+
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $owner = $Acl.GetOwner($sidType).Value
+    $group = $Acl.GetGroup($sidType).Value
+    $rules = @($Acl.GetAccessRules($true, $true, $sidType) | ForEach-Object {
+        @(
+            $_.IdentityReference.Value,
+            ([int]$_.AccessControlType),
+            ([int]$_.FileSystemRights),
+            ([int]$_.InheritanceFlags),
+            ([int]$_.PropagationFlags),
+            $_.IsInherited.ToString().ToLowerInvariant()
+        ) -join "|"
+    } | Sort-Object)
+    return @(
+        "owner=$owner",
+        "group=$group",
+        "protected=$($Acl.AreAccessRulesProtected.ToString().ToLowerInvariant())",
+        "rules=$($rules.Count)",
+        $rules
+    ) -join "`n"
+}
+
 function Get-InstallTreeAclSnapshot {
     param([string]$Path)
 
@@ -738,6 +763,7 @@ function Get-InstallTreeAclSnapshot {
             RelativePath = $relativePath
             Acl = $acl
             Sddl = [string]$acl.Sddl
+            CanonicalAcl = Get-FileSystemAclCanonical -Acl $acl
         }
     })
 }
@@ -779,7 +805,13 @@ function Assert-InstallTreeAclSnapshot {
             throw "restored install-tree ACL target missing: $($entry.RelativePath)"
         }
         $actual = Get-Acl -LiteralPath $target -ErrorAction Stop
-        if ([string]$actual.Sddl -cne [string]$entry.Sddl) {
+        $actualCanonical = Get-FileSystemAclCanonical -Acl $actual
+        $expectedCanonical = if ($null -ne $entry.PSObject.Properties["CanonicalAcl"]) {
+            [string]$entry.CanonicalAcl
+        } else {
+            Get-FileSystemAclCanonical -Acl $entry.Acl
+        }
+        if ($actualCanonical -cne $expectedCanonical) {
             throw "restored install-tree ACL mismatch: $($entry.RelativePath)"
         }
     }

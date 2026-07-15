@@ -243,13 +243,36 @@ jobs:
             return [string]$value[0]
           }
 
+          function Get-FileSystemAclCanonical($Acl) {
+            $sidType = [System.Security.Principal.SecurityIdentifier]
+            $owner = $Acl.GetOwner($sidType).Value
+            $group = $Acl.GetGroup($sidType).Value
+            $rules = @($Acl.GetAccessRules($true, $true, $sidType) | ForEach-Object {
+              @(
+                $_.IdentityReference.Value,
+                ([int]$_.AccessControlType),
+                ([int]$_.FileSystemRights),
+                ([int]$_.InheritanceFlags),
+                ([int]$_.PropagationFlags),
+                $_.IsInherited.ToString().ToLowerInvariant()
+              ) -join "|"
+            } | Sort-Object)
+            return @(
+              "owner=$owner",
+              "group=$group",
+              "protected=$($Acl.AreAccessRulesProtected.ToString().ToLowerInvariant())",
+              "rules=$($rules.Count)",
+              $rules
+            ) -join "`n"
+          }
+
           function Get-InstallTreeAclDigest {
             $root = (Resolve-Path -LiteralPath $installDir).ProviderPath.TrimEnd('\')
             $items = @((Get-Item -LiteralPath $root -Force))
             $items += @(Get-ChildItem -LiteralPath $root -Force -Recurse)
             $records = @($items | ForEach-Object {
               $relative = if ($_.FullName -eq $root) { "." } else { $_.FullName.Substring($root.Length).TrimStart('\') }
-              "$relative|$([string](Get-Acl -LiteralPath $_.FullName).Sddl)"
+              "$relative|$(Get-FileSystemAclCanonical (Get-Acl -LiteralPath $_.FullName))"
             } | Sort-Object)
             return Get-TextSha256 ($records -join "`n")
           }
