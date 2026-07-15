@@ -464,7 +464,7 @@ namespace EndpointAgentInstaller
             string serviceName,
             uint desiredAccess);
 
-        [DllImport("advapi32.dll", SetLastError = true)]
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool QueryServiceConfig2(
             IntPtr service,
@@ -473,7 +473,7 @@ namespace EndpointAgentInstaller
             int bufferSize,
             out int bytesNeeded);
 
-        [DllImport("advapi32.dll", SetLastError = true)]
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool ChangeServiceConfig2(
             IntPtr service,
