@@ -897,6 +897,28 @@ Describe "Transactional service replacement helpers" {
         Wait-ForServiceAbsent -Name "EndpointAgent" -TimeoutSeconds 0 | Should Be $false
     }
 
+    It "restores install-tree ACLs parent-first so inherited child ACEs stay exact" {
+        $installPath = Join-Path $TestDrive "acl-order"
+        $childPath = Join-Path $installPath "endpoint-agent.exe"
+        New-Item -ItemType Directory -Force -Path $installPath | Out-Null
+        Set-Content -LiteralPath $childPath -Value "binary" -Encoding ASCII
+        $script:aclRestoreOrder = @()
+        Mock Set-Acl {
+            $script:aclRestoreOrder += $LiteralPath
+        }
+
+        Restore-InstallTreeAclSnapshot `
+            -Path $installPath `
+            -Snapshot @(
+                [pscustomobject]@{ RelativePath = "endpoint-agent.exe"; Acl = "child-acl" },
+                [pscustomobject]@{ RelativePath = "."; Acl = "root-acl" }
+            )
+
+        $script:aclRestoreOrder.Count | Should Be 2
+        $script:aclRestoreOrder[0] | Should Be $installPath
+        $script:aclRestoreOrder[1] | Should Be $childPath
+    }
+
     It "snapshots manual services when optional registry values are absent" {
         $installPath = Join-Path $TestDrive "existing-install"
         New-Item -ItemType Directory -Force -Path $installPath | Out-Null

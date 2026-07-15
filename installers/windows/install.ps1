@@ -748,7 +748,9 @@ function Restore-InstallTreeAclSnapshot {
         [object[]]$Snapshot
     )
 
-    foreach ($entry in @($Snapshot | Sort-Object { $_.RelativePath.Length } -Descending)) {
+    # Apply parents before children. Restoring the root last would cause
+    # Windows to recompute inherited child ACEs after their exact ACLs were set.
+    foreach ($entry in @($Snapshot | Sort-Object { $_.RelativePath.Length })) {
         $target = if ($entry.RelativePath -eq ".") {
             $Path
         } else {
