@@ -109,6 +109,38 @@ standard base64 olmasini zorunlu tutar; kanit eksik veya bozuksa kurulum
 fail-closed durur. Kanit signing private key icermez ve bootstrap tarafindan
 ekrana yazilmaz.
 
+Mevcut serviste `-Force` bir **declarative replacement** islemidir: bootstrap
+eski remote-bridge veya self-update policy degerlerini sessizce miras almaz.
+`RemoteBridgeOperationsEnabled`, permit public key/KID, device-key session,
+VIEW_ONLY enablement/attended-consent/mask, mTLS selector, TLS server name ve
+self-update parametreleri dahil tam istenen policy acikca verilmelidir.
+Bootstrap bu parametreleri `install.ps1` ile birebir tasir. VIEW_ONLY,
+PTY/command operations'tan bagimsizdir; iki capability yalniz broker permit
+trust anchor'larini ortak kullanir. Device-key session ve pilot auto-consent
+yalniz constrained operations ile; attended-consent veya mask ise yalniz
+VIEW_ONLY ile etkinlestirilebilir. Mask degeri canonical
+`x,y,width,height` basis-point formatinda ve primary monitor sinirlari icinde
+olmalidir.
+Replacement baslamadan once mevcut install tree korumali bir rollback dizinine,
+service-specific Environment ise yalniz installer process bellegine snapshot
+edilir; yeni servis saglikli baslamazsa
+eski binary, install tree root/child ACL'leri, service SDDL/failure-action policy'si,
+service-specific Environment, baslangic modu ve calisma durumu hash/esitlik
+kontroluyle geri yuklenir. Explicit fresh-enrollment sirasinda tasinan eski HMAC
+credential store da kurulum basarisiz olursa geri yuklenir. Rollback de
+basarisiz olursa payload silinmez ve yol operator recovery icin raporlanir.
+Eski service kaydi var ama eski binary zaten silinmisse tam binary rollback
+matematiksel olarak mumkun degildir; `-Force` bu bozuk-durum repair yolunda
+yalniz yeni candidate `--version` readiness kontrolunden gectikten sonra ilerler
+ve bu siniri acik warning ile bildirir. Normal upgrade bunu kabul etmez: mevcut
+binary hash'i snapshot oncesi/sonrasi ve rollback kopyasinda ayni olmadan eski
+servis kaldirilmaz.
+Fresh enrollment servis tarafindan DPAPI persistence + accepted heartbeat ile
+dogrulanirsa eski `.bak-*` credential dosyasi silinir; bu kanit gelmezse
+operator recovery icin korunur. `AgentId`/`AgentSecret` legacy HMAC varyantinda
+secret her cold startta gerektigi icin service Environment icinde kalmasi
+tasarimsaldir; Faz 22.6 TPM/auto-enroll yolu bu varyanti kullanmaz.
+
 HMAC fallback kurulumu, onceki bir `-AutoEnroll` denemesinden kalmis
 `HKLM:\SOFTWARE\EndpointAgent` `Mode` / `ApiUrl` / `EnrollmentJitterSeconds`
 override'larini servis baslamadan once temizler. Boylece servis HMAC env

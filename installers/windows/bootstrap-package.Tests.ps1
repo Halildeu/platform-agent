@@ -4,11 +4,11 @@
 # installs the package, so tests import selected functions from the PowerShell
 # AST instead of dot-sourcing the script.
 
-$bootstrapSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot "bootstrap-package.ps1") -Raw
+$script:bootstrapSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot "bootstrap-package.ps1") -Raw
 $bootstrapTokens = $null
 $bootstrapParseErrors = $null
 $script:bootstrapAst = [System.Management.Automation.Language.Parser]::ParseInput(
-    $bootstrapSource,
+    $script:bootstrapSource,
     [ref]$bootstrapTokens,
     [ref]$bootstrapParseErrors
 )
@@ -145,6 +145,53 @@ Describe "Get-RemoteBridgeAttestationEvidence" {
 
         { Get-RemoteBridgeAttestationEvidence -Directory $testDirectory -MaxBase64Length 16 } |
             Should Throw "signed remote-bridge attestation evidence exceeds 16 characters"
+    }
+}
+
+Describe "Managed policy passthrough contract" {
+    It "exposes every remote-bridge and self-update installer policy parameter" {
+        $parameterNames = @($script:bootstrapAst.ParamBlock.Parameters | ForEach-Object {
+            $_.Name.VariablePath.UserPath
+        })
+        $required = @(
+            "RemoteBridgeMTLSCertSubjectSuffix",
+            "RemoteBridgeMTLSCertSANURIPrefix",
+            "RemoteBridgeOperationsEnabled",
+            "RemoteBridgePermitBrokerPublicKeyB64",
+            "RemoteBridgePermitKeyID",
+            "RemoteBridgePilotAutoConsent",
+            "RemoteBridgeDeviceKeySessionEnabled",
+            "RemoteBridgeViewOnlyEnabled",
+            "RemoteBridgeViewOnlyAttendedConsent",
+            "RemoteBridgeViewOnlyMaskRectBPS",
+            "RemoteBridgeTLSServerName",
+            "SelfUpdateEnabled",
+            "SelfUpdateAllowedHosts",
+            "SelfUpdateSignerThumbprints",
+            "SelfUpdateHardMaxBytes",
+            "SelfUpdateMaxRedirects",
+            "SelfUpdateAutoActivate",
+            "SelfUpdateActivationTimeout",
+            "SelfUpdateServiceName",
+            "SelfUpdateCommandTimeout"
+        )
+
+        foreach ($name in $required) {
+            $parameterNames -contains $name | Should Be $true
+            $needle = '$installArgs["' + $name + '"]'
+            $script:bootstrapSource.Contains($needle) | Should Be $true
+        }
+    }
+
+    It "forwards managed view-only policy into the install argument map" {
+        $script:bootstrapSource.Contains('$installArgs["RemoteBridgeDeviceKeySessionEnabled"] = $true') |
+            Should Be $true
+        $script:bootstrapSource.Contains('$installArgs["RemoteBridgeViewOnlyEnabled"] = $true') |
+            Should Be $true
+        $script:bootstrapSource.Contains('$installArgs["RemoteBridgeViewOnlyAttendedConsent"] = $true') |
+            Should Be $true
+        $script:bootstrapSource.Contains('$installArgs["RemoteBridgeViewOnlyMaskRectBPS"] = $RemoteBridgeViewOnlyMaskRectBPS') |
+            Should Be $true
     }
 }
 

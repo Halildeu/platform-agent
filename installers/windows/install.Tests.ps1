@@ -18,11 +18,11 @@
 # We only need the helper function definitions; read the source and
 # extract them from the PowerShell AST.
 
-$installSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot "install.ps1") -Raw
+$script:installSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot "install.ps1") -Raw
 $installTokens = $null
 $installParseErrors = $null
 $script:installAst = [System.Management.Automation.Language.Parser]::ParseInput(
-    $installSource,
+    $script:installSource,
     [ref]$installTokens,
     [ref]$installParseErrors
 )
@@ -159,6 +159,29 @@ Describe "Get-AgentLogTailForError" {
 Import-InstallHelper -Name "Set-ServiceEnvironmentRegkey"
 Import-InstallHelper -Name "Remove-ServiceEnvironmentEntry"
 Import-InstallHelper -Name "Add-ServiceEnvironmentBaseVariables"
+Import-InstallHelper -Name "Test-ServiceExists"
+Import-InstallHelper -Name "Wait-ForServiceAbsent"
+Import-InstallHelper -Name "Get-ServiceEnvironmentSnapshot"
+Import-InstallHelper -Name "Restore-ServiceEnvironmentSnapshot"
+Import-InstallHelper -Name "Assert-ServiceEnvironmentSnapshot"
+Import-InstallHelper -Name "Get-ServiceSddlFromOutput"
+Import-InstallHelper -Name "Get-ServiceSddl"
+Import-InstallHelper -Name "Initialize-ServiceFailurePolicyNative"
+Initialize-ServiceFailurePolicyNative
+Import-InstallHelper -Name "Get-ServiceFailurePolicy"
+Import-InstallHelper -Name "Restore-ServiceFailurePolicy"
+Import-InstallHelper -Name "Assert-ServiceFailurePolicy"
+Import-InstallHelper -Name "Get-ServiceStartMode"
+Import-InstallHelper -Name "Get-InstallTreeAclSnapshot"
+Import-InstallHelper -Name "Restore-InstallTreeAclSnapshot"
+Import-InstallHelper -Name "Assert-InstallTreeAclSnapshot"
+Import-InstallHelper -Name "New-ServiceReplacementSnapshot"
+Import-InstallHelper -Name "Remove-ServiceReplacementSnapshot"
+Import-InstallHelper -Name "Restore-ServiceReplacementSnapshot"
+Import-InstallHelper -Name "Protect-DirectoryAcl"
+Import-InstallHelper -Name "Remove-ServiceBestEffort"
+Import-InstallHelper -Name "Invoke-AgentServiceCommand"
+Import-InstallHelper -Name "Invoke-NativeCommand"
 Import-InstallHelper -Name "Get-AgentRegistrySnapshot"
 Import-InstallHelper -Name "Restore-AgentRegistrySnapshot"
 Import-InstallHelper -Name "Set-AgentAutoEnrollRegistry"
@@ -166,7 +189,10 @@ Import-InstallHelper -Name "Clear-AgentAutoEnrollRegistry"
 Import-InstallHelper -Name "Get-HmacCredentialStorePath"
 Import-InstallHelper -Name "Assert-HmacEnrollmentTokenStorePolicy"
 Import-InstallHelper -Name "Backup-HmacCredentialStoreForFreshEnroll"
+Import-InstallHelper -Name "Restore-HmacCredentialStoreBackup"
+Import-InstallHelper -Name "Assert-HmacCredentialResetConfirmed"
 Import-InstallHelper -Name "Assert-EnrollmentTokenLength"
+Import-InstallHelper -Name "Assert-ViewOnlyMaskRectBPS"
 Import-InstallHelper -Name "Assert-RemoteBridgeInstallConfig"
 Import-InstallHelper -Name "Add-RemoteBridgeServiceEnvironment"
 Import-InstallHelper -Name "Resolve-SelfUpdateSignerThumbprints"
@@ -284,10 +310,10 @@ Describe "Remote bridge installer env gating" {
 
     It "rejects constrained operations without broker permit trust anchors" {
         { Assert-RemoteBridgeInstallConfig -Enabled $true -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" -InsecurePlaintext $false -OperationsEnabled $true -PermitBrokerPublicKeyB64 "" -PermitKeyID "kid-1" } |
-            Should Throw "-RemoteBridgeOperationsEnabled requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID"
+            Should Throw "remote-bridge operation-capable policy requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID"
 
         { Assert-RemoteBridgeInstallConfig -Enabled $true -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" -InsecurePlaintext $false -OperationsEnabled $true -PermitBrokerPublicKeyB64 "pub" -PermitKeyID "" } |
-            Should Throw "-RemoteBridgeOperationsEnabled requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID"
+            Should Throw "remote-bridge operation-capable policy requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID"
     }
 
     It "rejects pilot auto-consent without constrained operation mode" {
@@ -298,6 +324,62 @@ Describe "Remote bridge installer env gating" {
     It "rejects view-only attended consent when the bridge is disabled" {
         { Assert-RemoteBridgeInstallConfig -Enabled $false -BrokerAddr "" -InsecurePlaintext $false -ViewOnlyAttendedConsent $true } |
             Should Throw "-RemoteBridgeViewOnlyAttendedConsent requires -RemoteBridgeEnabled"
+    }
+
+    It "keeps view-only independent from PTY while requiring shared permit trust" {
+        { Assert-RemoteBridgeInstallConfig `
+            -Enabled $true `
+            -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" `
+            -InsecurePlaintext $false `
+            -ViewOnlyEnabled $true `
+            -PermitBrokerPublicKeyB64 "pub" `
+            -PermitKeyID "kid-1" } |
+            Should Not Throw
+
+        { Assert-RemoteBridgeInstallConfig `
+            -Enabled $true `
+            -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" `
+            -InsecurePlaintext $false `
+            -ViewOnlyEnabled $true } |
+            Should Throw "remote-bridge operation-capable policy requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID"
+    }
+
+    It "requires constrained operations before enabling device-key session" {
+        { Assert-RemoteBridgeInstallConfig `
+            -Enabled $true `
+            -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" `
+            -InsecurePlaintext $false `
+            -DeviceKeySessionEnabled $true } |
+            Should Throw "-RemoteBridgeDeviceKeySessionEnabled requires -RemoteBridgeOperationsEnabled"
+    }
+
+    It "requires view-only before attended consent or mask policy" {
+        { Assert-RemoteBridgeInstallConfig `
+            -Enabled $true `
+            -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" `
+            -InsecurePlaintext $false `
+            -OperationsEnabled $true `
+            -PermitBrokerPublicKeyB64 "pub" `
+            -PermitKeyID "kid-1" `
+            -ViewOnlyAttendedConsent $true } |
+            Should Throw "-RemoteBridgeViewOnlyAttendedConsent requires -RemoteBridgeViewOnlyEnabled"
+
+        { Assert-RemoteBridgeInstallConfig `
+            -Enabled $true `
+            -BrokerAddr "remote-bridge-mtls.testai.acik.com:443" `
+            -InsecurePlaintext $false `
+            -OperationsEnabled $true `
+            -PermitBrokerPublicKeyB64 "pub" `
+            -PermitKeyID "kid-1" `
+            -ViewOnlyMaskRectBPS "0,0,1000,1000" } |
+            Should Throw "-RemoteBridgeViewOnlyMaskRectBPS requires -RemoteBridgeViewOnlyEnabled"
+    }
+
+    It "accepts only canonical in-bounds view-only mask rectangles" {
+        { Assert-ViewOnlyMaskRectBPS -Value "7500,7500,2500,2500" } | Should Not Throw
+        { Assert-ViewOnlyMaskRectBPS -Value "7500,7500,2501,2500" } | Should Throw
+        { Assert-ViewOnlyMaskRectBPS -Value "0,0,0,1000" } | Should Throw
+        { Assert-ViewOnlyMaskRectBPS -Value "0, 0,1000,1000" } | Should Throw
     }
 
     It "writes only explicit remote bridge service environment values" {
@@ -317,7 +399,10 @@ Describe "Remote bridge installer env gating" {
             -PermitBrokerPublicKeyB64 "pub-key-b64" `
             -PermitKeyID "kid-1" `
             -PilotAutoConsent $true `
+            -DeviceKeySessionEnabled $true `
+            -ViewOnlyEnabled $true `
             -ViewOnlyAttendedConsent $true `
+            -ViewOnlyMaskRectBPS "7500,7500,2500,2500" `
             -TLSServerName "remote-bridge-mtls.testai.acik.com"
 
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED"] | Should Be "true"
@@ -330,7 +415,10 @@ Describe "Remote bridge installer env gating" {
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64"] | Should Be "pub-key-b64"
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID"] | Should Be "kid-1"
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT"] | Should Be "true"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SESSION_ENABLED"] | Should Be "true"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ENABLED"] | Should Be "true"
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ATTENDED_CONSENT_ENABLED"] | Should Be "true"
+        $values["ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_MASK_RECT_BPS"] | Should Be "7500,7500,2500,2500"
         $values["ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME"] | Should Be "remote-bridge-mtls.testai.acik.com"
     }
 
@@ -547,6 +635,30 @@ Describe "HMAC enrollment-token reinstall guard" {
         Backup-HmacCredentialStoreForFreshEnroll -CredentialStorePath $script:storePath -Timestamp "20260608T150000Z" |
             Should Be ""
     }
+
+    It "restores the previous credential store after a failed fresh enrollment" {
+        Set-Content -LiteralPath $script:storePath -Value "stored-old" -Encoding ASCII
+        $backup = Backup-HmacCredentialStoreForFreshEnroll `
+            -CredentialStorePath $script:storePath `
+            -Timestamp "20260608T150000Z"
+        Set-Content -LiteralPath $script:storePath -Value "failed-new" -Encoding ASCII
+
+        Restore-HmacCredentialStoreBackup `
+            -CredentialStorePath $script:storePath `
+            -BackupPath $backup
+
+        (Get-Content -LiteralPath $script:storePath -Raw).TrimEnd() | Should Be "stored-old"
+        Test-Path -LiteralPath $backup | Should Be $false
+    }
+
+    It "refuses to commit a reset until the replacement credential is confirmed" {
+        { Assert-HmacCredentialResetConfirmed -BackupPath "C:\protected\old.dpapi.bak" -Confirmed $false } |
+            Should Throw "fresh HMAC enrollment was not confirmed"
+        { Assert-HmacCredentialResetConfirmed -BackupPath "C:\protected\old.dpapi.bak" -Confirmed $true } |
+            Should Not Throw
+        { Assert-HmacCredentialResetConfirmed -BackupPath "" -Confirmed $false } |
+            Should Not Throw
+    }
 }
 
 Describe "Set-ServiceEnvironmentRegkey + Remove-ServiceEnvironmentEntry" {
@@ -652,6 +764,258 @@ Describe "Set-ServiceEnvironmentRegkey + Remove-ServiceEnvironmentEntry" {
         Remove-RegEnvKeyAt -Path $script:fakeService -Key "ENDPOINT_AGENT_ENROLLMENT_TOKEN"
         $got = Get-ItemProperty -Path $script:fakeService -Name 'Environment' -ErrorAction SilentlyContinue
         $got | Should BeNullOrEmpty
+    }
+}
+
+Describe "Transactional service environment rollback" {
+    BeforeAll {
+        $script:transactionServicePath = "HKCU:\Software\Halildeu\EndpointAgentTransactionTest"
+    }
+
+    BeforeEach {
+        if (Test-Path -LiteralPath $script:transactionServicePath) {
+            Remove-Item -LiteralPath $script:transactionServicePath -Recurse -Force
+        }
+        New-Item -Path $script:transactionServicePath -Force | Out-Null
+    }
+
+    AfterAll {
+        if (Test-Path -LiteralPath $script:transactionServicePath) {
+            Remove-Item -LiteralPath $script:transactionServicePath -Recurse -Force
+        }
+    }
+
+    It "restores the exact pre-upgrade multi-string environment" {
+        $expectedEntries = @(
+            "ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED=true",
+            "ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ATTENDED_CONSENT_ENABLED=true",
+            "ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID=test-key"
+        )
+        New-ItemProperty `
+            -Path $script:transactionServicePath `
+            -Name "Environment" `
+            -Value $expectedEntries `
+            -PropertyType MultiString `
+            -Force | Out-Null
+
+        $snapshot = Get-ServiceEnvironmentSnapshot `
+            -Name "EndpointAgent" `
+            -ServicePath $script:transactionServicePath
+        New-ItemProperty `
+            -Path $script:transactionServicePath `
+            -Name "Environment" `
+            -Value @("ENDPOINT_AGENT_REMOTE_BRIDGE_ENABLED=false") `
+            -PropertyType MultiString `
+            -Force | Out-Null
+
+        Restore-ServiceEnvironmentSnapshot `
+            -Name "EndpointAgent" `
+            -Snapshot $snapshot `
+            -ServicePath $script:transactionServicePath
+
+        { Assert-ServiceEnvironmentSnapshot `
+            -Name "EndpointAgent" `
+            -Expected $snapshot `
+            -ServicePath $script:transactionServicePath } | Should Not Throw
+    }
+
+    It "restores an originally absent Environment value" {
+        $snapshot = Get-ServiceEnvironmentSnapshot `
+            -Name "EndpointAgent" `
+            -ServicePath $script:transactionServicePath
+        $snapshot.Exists | Should Be $false
+
+        New-ItemProperty `
+            -Path $script:transactionServicePath `
+            -Name "Environment" `
+            -Value @("TEMP=C:\Windows\Temp") `
+            -PropertyType MultiString `
+            -Force | Out-Null
+        Restore-ServiceEnvironmentSnapshot `
+            -Name "EndpointAgent" `
+            -Snapshot $snapshot `
+            -ServicePath $script:transactionServicePath
+
+        (Get-Item -LiteralPath $script:transactionServicePath).GetValueNames() -contains "Environment" |
+            Should Be $false
+    }
+
+    It "captures before destructive replacement and invokes verified restore on failure" {
+        $hmacPolicyIndex = $script:installSource.LastIndexOf('Assert-HmacEnrollmentTokenStorePolicy')
+        $snapshotIndex = $script:installSource.IndexOf('$replacementSnapshot = New-ServiceReplacementSnapshot')
+        $clearIndex = $script:installSource.IndexOf('clearing stale service env regkey')
+        $hmacPolicyIndex -ge 0 | Should Be $true
+        $snapshotIndex -ge 0 | Should Be $true
+        $snapshotIndex -gt $hmacPolicyIndex | Should Be $true
+        $clearIndex -gt $snapshotIndex | Should Be $true
+        $script:installSource.Contains('Restore-ServiceReplacementSnapshot') | Should Be $true
+        $script:installSource.Contains('Assert-ServiceEnvironmentSnapshot') | Should Be $true
+        $script:installSource.Contains('Restore-HmacCredentialStoreBackup') | Should Be $true
+        $script:installSource.Contains('restored service start mode mismatch') | Should Be $true
+    }
+}
+
+Describe "Transactional service replacement helpers" {
+    BeforeEach {
+        $script:oldProgramData = $env:ProgramData
+        $env:ProgramData = Join-Path $TestDrive "ProgramData"
+        New-Item -ItemType Directory -Force -Path $env:ProgramData | Out-Null
+    }
+
+    AfterEach {
+        $env:ProgramData = $script:oldProgramData
+    }
+
+    It "maps auto, delayed-auto, manual, and disabled start modes" {
+        Get-ServiceStartMode -StartValue 2 -DelayedAutoStart $false | Should Be "auto"
+        Get-ServiceStartMode -StartValue 2 -DelayedAutoStart $true | Should Be "delayed-auto"
+        Get-ServiceStartMode -StartValue 3 -DelayedAutoStart $false | Should Be "demand"
+        Get-ServiceStartMode -StartValue 4 -DelayedAutoStart $false | Should Be "disabled"
+        { Get-ServiceStartMode -StartValue 1 -DelayedAutoStart $false } | Should Throw
+    }
+
+    It "parses the exact SDDL line from multiline sc.exe output" {
+        Get-ServiceSddlFromOutput `
+            -Name "EndpointAgent" `
+            -Output @(
+                "[SC] QueryServiceObjectSecurity SUCCESS",
+                "",
+                "  D:(A;;CCLCSWLOCRRC;;;SY)(A;;CCLCSWLOCRRC;;;BA)  "
+            ) |
+            Should Be "D:(A;;CCLCSWLOCRRC;;;SY)(A;;CCLCSWLOCRRC;;;BA)"
+
+        { Get-ServiceSddlFromOutput -Name "EndpointAgent" -Output @("no descriptor") } |
+            Should Throw
+    }
+
+    It "waits for SCM deletion and fails closed on timeout" {
+        Mock Test-ServiceExists { $false }
+        Mock Start-Sleep {}
+        Wait-ForServiceAbsent -Name "EndpointAgent" -TimeoutSeconds 1 | Should Be $true
+
+        Mock Test-ServiceExists { $true }
+        Wait-ForServiceAbsent -Name "EndpointAgent" -TimeoutSeconds 0 | Should Be $false
+    }
+
+    It "snapshots manual services when optional registry values are absent" {
+        $installPath = Join-Path $TestDrive "existing-install"
+        New-Item -ItemType Directory -Force -Path $installPath | Out-Null
+        Set-Content -LiteralPath (Join-Path $installPath "endpoint-agent.exe") -Value "old-binary" -Encoding ASCII
+
+        Mock Test-ServiceExists { $true }
+        Mock Get-Service { [pscustomobject]@{ DisplayName = "Endpoint Agent"; Status = "Stopped" } }
+        Mock Get-ItemProperty { [pscustomobject]@{ Start = 3 } }
+        Mock Get-ServiceFailurePolicy { [pscustomobject]@{ Canonical = "failure-policy" } }
+        Mock Get-ServiceSddl { "D:(A;;CC;;;SY)" }
+        Mock Get-InstallTreeAclSnapshot { @([pscustomobject]@{ RelativePath = "."; Acl = "acl"; Sddl = "D:root" }) }
+        Mock Protect-DirectoryAcl {}
+        Mock Get-ServiceEnvironmentSnapshot { [pscustomobject]@{ Exists = $false; Entries = @() } }
+
+        $snapshot = New-ServiceReplacementSnapshot -Name "EndpointAgent" -InstallPath $installPath
+
+        $snapshot | Should Not BeNullOrEmpty
+        $snapshot.StartValue | Should Be 3
+        $snapshot.StartMode | Should Be "demand"
+        $snapshot.DelayedAutoStart | Should Be $false
+        $snapshot.Description | Should Be ""
+        $snapshot.ServiceSddl | Should Be "D:(A;;CC;;;SY)"
+        Test-Path -LiteralPath (Join-Path $snapshot.RollbackInstallPath "endpoint-agent.exe") | Should Be $true
+    }
+
+    It "keeps Force repair available when the old binary is already missing" {
+        $installPath = Join-Path $TestDrive "broken-install"
+        New-Item -ItemType Directory -Force -Path $installPath | Out-Null
+        Mock Test-ServiceExists { $true }
+
+        New-ServiceReplacementSnapshot -Name "EndpointAgent" -InstallPath $installPath |
+            Should BeNullOrEmpty
+    }
+
+    It "restores a manual running service with exact metadata hooks" {
+        $rollbackPath = Join-Path $TestDrive "rollback-install"
+        $installPath = Join-Path $TestDrive "restored-install"
+        New-Item -ItemType Directory -Force -Path $rollbackPath | Out-Null
+        Set-Content -LiteralPath (Join-Path $rollbackPath "endpoint-agent.exe") -Value "old-binary" -Encoding ASCII
+        $binarySha = (Get-FileHash -LiteralPath (Join-Path $rollbackPath "endpoint-agent.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+        $snapshot = [pscustomobject]@{
+            Name = "EndpointAgent"
+            InstallPath = $installPath
+            RollbackInstallPath = $rollbackPath
+            BinarySha256 = $binarySha
+            Environment = [pscustomobject]@{ Exists = $false; Entries = @() }
+            DisplayName = "Endpoint Agent"
+            Description = ""
+            StartValue = 3
+            StartMode = "demand"
+            DelayedAutoStart = $false
+            WasRunning = $true
+            FailurePolicy = [pscustomobject]@{ Canonical = "failure-policy" }
+            ServiceSddl = "D:(A;;CC;;;SY)"
+            InstallTreeAcl = @([pscustomobject]@{ RelativePath = "."; Acl = "acl"; Sddl = "D:root" })
+        }
+
+        Mock Test-ServiceExists { $true }
+        Mock Remove-ServiceBestEffort {}
+        Mock Wait-ForServiceAbsent { $true }
+        Mock Invoke-AgentServiceCommand {}
+        Mock Restore-ServiceEnvironmentSnapshot {}
+        Mock Restore-ServiceFailurePolicy {}
+        Mock Assert-ServiceFailurePolicy {}
+        Mock Restore-InstallTreeAclSnapshot {}
+        Mock Assert-InstallTreeAclSnapshot {}
+        Mock Invoke-NativeCommand {}
+        Mock Assert-ServiceEnvironmentSnapshot {}
+        Mock Get-ItemProperty { [pscustomobject]@{ Start = 3; DelayedAutoStart = 0 } }
+        Mock Get-ServiceSddl { "D:(A;;CC;;;SY)" }
+        Mock Get-Service { [pscustomobject]@{ DisplayName = "Endpoint Agent"; Status = "Stopped" } }
+        Mock Wait-ForServiceRunning { $true }
+
+        Restore-ServiceReplacementSnapshot `
+            -Snapshot $snapshot `
+            -StartTimeoutSeconds 1 `
+            -MaintenanceToken "maintenance-token" `
+            -MaintenanceTokenHash "maintenance-token-hash"
+
+        Assert-MockCalled Invoke-NativeCommand -Times 1 -ParameterFilter {
+            $FilePath -eq "sc.exe" -and $Arguments[0] -eq "config" -and $Arguments[3] -eq "demand"
+        }
+        Assert-MockCalled Invoke-AgentServiceCommand -Times 1 -ParameterFilter {
+            $Arguments[0] -eq "service" -and $Arguments[1] -eq "start"
+        }
+        Assert-MockCalled Remove-ServiceBestEffort -Times 1 -ParameterFilter {
+            $Token -eq "maintenance-token" -and $TokenHash -eq "maintenance-token-hash"
+        }
+        Assert-MockCalled Restore-ServiceFailurePolicy -Times 1
+        Assert-MockCalled Assert-ServiceFailurePolicy -Times 1
+        Assert-MockCalled Restore-InstallTreeAclSnapshot -Times 1
+        Assert-MockCalled Assert-InstallTreeAclSnapshot -Times 1
+    }
+
+    It "does not couple rollback start timeout to the new-service timeout" {
+        $script:installSource.Contains('-StartTimeoutSeconds $ServiceStartTimeoutSeconds') |
+            Should Be $false
+    }
+
+    It "retains the protected payload when restore hash verification fails" {
+        $rollbackPath = Join-Path $TestDrive "rollback-hash-failure"
+        $installPath = Join-Path $TestDrive "restore-hash-failure"
+        New-Item -ItemType Directory -Force -Path $rollbackPath | Out-Null
+        Set-Content -LiteralPath (Join-Path $rollbackPath "endpoint-agent.exe") -Value "old-binary" -Encoding ASCII
+        $snapshot = [pscustomobject]@{
+            Name = "EndpointAgent"
+            InstallPath = $installPath
+            RollbackRoot = (Split-Path -Parent $rollbackPath)
+            RollbackInstallPath = $rollbackPath
+            BinarySha256 = ("0" * 64)
+            InstallTreeAcl = @([pscustomobject]@{ RelativePath = "."; Acl = "acl"; Sddl = "D:root" })
+        }
+
+        Mock Test-ServiceExists { $false }
+        Mock Restore-InstallTreeAclSnapshot {}
+
+        { Restore-ServiceReplacementSnapshot -Snapshot $snapshot -StartTimeoutSeconds 1 } |
+            Should Throw "transaction rollback binary hash mismatch"
+        Test-Path -LiteralPath $rollbackPath | Should Be $true
     }
 }
 

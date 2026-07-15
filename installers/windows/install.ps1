@@ -50,7 +50,10 @@ param(
     [string]$RemoteBridgePermitBrokerPublicKeyB64 = "",
     [string]$RemoteBridgePermitKeyID = "",
     [switch]$RemoteBridgePilotAutoConsent,
+    [switch]$RemoteBridgeDeviceKeySessionEnabled,
+    [switch]$RemoteBridgeViewOnlyEnabled,
     [switch]$RemoteBridgeViewOnlyAttendedConsent,
+    [string]$RemoteBridgeViewOnlyMaskRectBPS = "",
     [string]$RemoteBridgeTLSServerName = "",
     [switch]$SelfUpdateEnabled,
     [string]$SelfUpdateAllowedHosts = "",
@@ -174,7 +177,10 @@ $configKeys = @(
     "ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_BROKER_PUBLIC_KEY_B64",
     "ENDPOINT_AGENT_REMOTE_BRIDGE_PERMIT_KEY_ID",
     "ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SESSION_ENABLED",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ENABLED",
     "ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ATTENDED_CONSENT_ENABLED",
+    "ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_MASK_RECT_BPS",
     "ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME"
 )
 
@@ -275,6 +281,665 @@ function Test-ServiceExists {
     return $null -ne $service
 }
 
+function Wait-ForServiceAbsent {
+    param(
+        [string]$Name,
+        [int]$TimeoutSeconds = 30
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Test-ServiceExists -Name $Name)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return (-not (Test-ServiceExists -Name $Name))
+}
+
+function Get-ServiceEnvironmentSnapshot {
+    param(
+        [string]$Name,
+        [string]$ServicePath = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ServicePath)) {
+        $ServicePath = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    }
+    $exists = $false
+    $entries = @()
+    if (Test-Path -LiteralPath $ServicePath) {
+        $key = $null
+        try {
+            $key = Get-Item -LiteralPath $ServicePath -ErrorAction Stop
+            $exists = @($key.GetValueNames()) -contains "Environment"
+            if ($exists) {
+                $raw = $key.GetValue("Environment", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                if ($null -ne $raw) {
+                    $entries = @($raw)
+                }
+            }
+        } finally {
+            if ($key) { $key.Dispose() }
+        }
+    }
+    return [pscustomobject]@{
+        Exists = $exists
+        Entries = $entries
+    }
+}
+
+function Restore-ServiceEnvironmentSnapshot {
+    param(
+        [string]$Name,
+        [Parameter(Mandatory)] $Snapshot,
+        [string]$ServicePath = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ServicePath)) {
+        $ServicePath = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    }
+    if (-not (Test-Path -LiteralPath $ServicePath)) {
+        throw "Service registry key not found while restoring environment: $ServicePath"
+    }
+    if ($Snapshot.Exists) {
+        New-ItemProperty -Path $ServicePath -Name "Environment" -Value @($Snapshot.Entries) -PropertyType MultiString -Force | Out-Null
+    } else {
+        Remove-ItemProperty -Path $ServicePath -Name "Environment" -ErrorAction SilentlyContinue
+    }
+}
+
+function Assert-ServiceEnvironmentSnapshot {
+    param(
+        [string]$Name,
+        [Parameter(Mandatory)] $Expected,
+        [string]$ServicePath = ""
+    )
+
+    $actual = Get-ServiceEnvironmentSnapshot -Name $Name -ServicePath $ServicePath
+    if ([bool]$actual.Exists -ne [bool]$Expected.Exists) {
+        throw "restored service environment presence mismatch for $Name"
+    }
+    $actualEntries = @($actual.Entries | Sort-Object)
+    $expectedEntries = @($Expected.Entries | Sort-Object)
+    if (($actualEntries -join "`0") -cne ($expectedEntries -join "`0")) {
+        throw "restored service environment content mismatch for $Name"
+    }
+}
+
+function Get-ServiceSddlFromOutput {
+    param(
+        [object[]]$Output,
+        [string]$Name
+    )
+    $sddl = @($output | ForEach-Object { ([string]$_).Trim() } | Where-Object {
+        $_ -match '^[DOGS]:'
+    } | Select-Object -First 1)
+    if ($sddl.Count -ne 1 -or [string]::IsNullOrWhiteSpace($sddl[0])) {
+        throw "service SDDL could not be captured for $Name"
+    }
+    return [string]$sddl[0]
+}
+
+function Get-ServiceSddl {
+    param([string]$Name)
+
+    $output = @(& sc.exe sdshow $Name 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "sc.exe sdshow $Name failed with exit code $LASTEXITCODE"
+    }
+    return Get-ServiceSddlFromOutput -Output $output -Name $Name
+}
+
+function Initialize-ServiceFailurePolicyNative {
+    if ($null -ne ("EndpointAgentInstaller.ServiceFailurePolicyNative" -as [type])) {
+        return
+    }
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace EndpointAgentInstaller
+{
+    public sealed class ServiceFailureAction
+    {
+        public int Type;
+        public uint Delay;
+    }
+
+    public sealed class ServiceFailurePolicy
+    {
+        public uint ResetPeriod;
+        public string RebootMessage;
+        public string Command;
+        public ServiceFailureAction[] Actions;
+        public bool NonCrashFailures;
+    }
+
+    public static class ServiceFailurePolicyNative
+    {
+        private const uint SC_MANAGER_CONNECT = 0x0001;
+        private const uint SERVICE_QUERY_CONFIG = 0x0001;
+        private const uint SERVICE_CHANGE_CONFIG = 0x0002;
+        private const int SERVICE_CONFIG_FAILURE_ACTIONS = 2;
+        private const int SERVICE_CONFIG_FAILURE_ACTIONS_FLAG = 4;
+        private const int ERROR_INSUFFICIENT_BUFFER = 122;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct SERVICE_FAILURE_ACTIONS
+        {
+            public uint dwResetPeriod;
+            public IntPtr lpRebootMsg;
+            public IntPtr lpCommand;
+            public uint cActions;
+            public IntPtr lpsaActions;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SC_ACTION
+        {
+            public int Type;
+            public uint Delay;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SERVICE_FAILURE_ACTIONS_FLAG
+        {
+            public int Enabled;
+        }
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenSCManager(
+            string machineName,
+            string databaseName,
+            uint desiredAccess);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenService(
+            IntPtr scm,
+            string serviceName,
+            uint desiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceConfig2(
+            IntPtr service,
+            int infoLevel,
+            IntPtr buffer,
+            int bufferSize,
+            out int bytesNeeded);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ChangeServiceConfig2(
+            IntPtr service,
+            int infoLevel,
+            IntPtr info);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseServiceHandle(IntPtr handle);
+
+        private static IntPtr OpenScm()
+        {
+            IntPtr scm = OpenSCManager(null, null, SC_MANAGER_CONNECT);
+            if (scm == IntPtr.Zero)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenSCManager failed");
+            }
+            return scm;
+        }
+
+        private static IntPtr OpenServiceHandle(IntPtr scm, string name, uint access)
+        {
+            IntPtr service = OpenService(scm, name, access);
+            if (service == IntPtr.Zero)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenService failed for " + name);
+            }
+            return service;
+        }
+
+        private static IntPtr QueryBuffer(IntPtr service, int level)
+        {
+            int needed;
+            QueryServiceConfig2(service, level, IntPtr.Zero, 0, out needed);
+            int error = Marshal.GetLastWin32Error();
+            if (needed <= 0 || error != ERROR_INSUFFICIENT_BUFFER)
+            {
+                throw new Win32Exception(error, "QueryServiceConfig2 size query failed at level " + level);
+            }
+            IntPtr buffer = Marshal.AllocHGlobal(needed);
+            if (!QueryServiceConfig2(service, level, buffer, needed, out needed))
+            {
+                error = Marshal.GetLastWin32Error();
+                Marshal.FreeHGlobal(buffer);
+                throw new Win32Exception(error, "QueryServiceConfig2 failed at level " + level);
+            }
+            return buffer;
+        }
+
+        public static ServiceFailurePolicy Capture(string serviceName)
+        {
+            IntPtr scm = IntPtr.Zero;
+            IntPtr service = IntPtr.Zero;
+            IntPtr actionsBuffer = IntPtr.Zero;
+            IntPtr flagBuffer = IntPtr.Zero;
+            try
+            {
+                scm = OpenScm();
+                service = OpenServiceHandle(scm, serviceName, SERVICE_QUERY_CONFIG);
+                actionsBuffer = QueryBuffer(service, SERVICE_CONFIG_FAILURE_ACTIONS);
+                SERVICE_FAILURE_ACTIONS native = (SERVICE_FAILURE_ACTIONS)Marshal.PtrToStructure(
+                    actionsBuffer,
+                    typeof(SERVICE_FAILURE_ACTIONS));
+
+                ServiceFailureAction[] actions = new ServiceFailureAction[native.cActions];
+                int actionSize = Marshal.SizeOf(typeof(SC_ACTION));
+                for (int i = 0; i < actions.Length; i++)
+                {
+                    IntPtr actionPtr = IntPtr.Add(native.lpsaActions, i * actionSize);
+                    SC_ACTION action = (SC_ACTION)Marshal.PtrToStructure(actionPtr, typeof(SC_ACTION));
+                    actions[i] = new ServiceFailureAction { Type = action.Type, Delay = action.Delay };
+                }
+
+                flagBuffer = QueryBuffer(service, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG);
+                SERVICE_FAILURE_ACTIONS_FLAG flag = (SERVICE_FAILURE_ACTIONS_FLAG)Marshal.PtrToStructure(
+                    flagBuffer,
+                    typeof(SERVICE_FAILURE_ACTIONS_FLAG));
+
+                return new ServiceFailurePolicy
+                {
+                    ResetPeriod = native.dwResetPeriod,
+                    RebootMessage = native.lpRebootMsg == IntPtr.Zero ? "" : Marshal.PtrToStringUni(native.lpRebootMsg),
+                    Command = native.lpCommand == IntPtr.Zero ? "" : Marshal.PtrToStringUni(native.lpCommand),
+                    Actions = actions,
+                    NonCrashFailures = flag.Enabled != 0
+                };
+            }
+            finally
+            {
+                if (flagBuffer != IntPtr.Zero) Marshal.FreeHGlobal(flagBuffer);
+                if (actionsBuffer != IntPtr.Zero) Marshal.FreeHGlobal(actionsBuffer);
+                if (service != IntPtr.Zero) CloseServiceHandle(service);
+                if (scm != IntPtr.Zero) CloseServiceHandle(scm);
+            }
+        }
+
+        public static void Restore(string serviceName, ServiceFailurePolicy policy)
+        {
+            if (policy == null) throw new ArgumentNullException("policy");
+            IntPtr scm = IntPtr.Zero;
+            IntPtr service = IntPtr.Zero;
+            IntPtr rebootMessage = IntPtr.Zero;
+            IntPtr command = IntPtr.Zero;
+            IntPtr actions = IntPtr.Zero;
+            IntPtr policyBuffer = IntPtr.Zero;
+            IntPtr flagBuffer = IntPtr.Zero;
+            try
+            {
+                scm = OpenScm();
+                service = OpenServiceHandle(scm, serviceName, SERVICE_CHANGE_CONFIG);
+                rebootMessage = Marshal.StringToHGlobalUni(policy.RebootMessage ?? "");
+                command = Marshal.StringToHGlobalUni(policy.Command ?? "");
+
+                ServiceFailureAction[] managedActions = policy.Actions ?? new ServiceFailureAction[0];
+                int actionSize = Marshal.SizeOf(typeof(SC_ACTION));
+                if (managedActions.Length > 0)
+                {
+                    actions = Marshal.AllocHGlobal(actionSize * managedActions.Length);
+                    for (int i = 0; i < managedActions.Length; i++)
+                    {
+                        SC_ACTION action = new SC_ACTION
+                        {
+                            Type = managedActions[i].Type,
+                            Delay = managedActions[i].Delay
+                        };
+                        Marshal.StructureToPtr(action, IntPtr.Add(actions, i * actionSize), false);
+                    }
+                }
+
+                SERVICE_FAILURE_ACTIONS native = new SERVICE_FAILURE_ACTIONS
+                {
+                    dwResetPeriod = policy.ResetPeriod,
+                    lpRebootMsg = rebootMessage,
+                    lpCommand = command,
+                    cActions = (uint)managedActions.Length,
+                    lpsaActions = actions
+                };
+                policyBuffer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SERVICE_FAILURE_ACTIONS)));
+                Marshal.StructureToPtr(native, policyBuffer, false);
+                if (!ChangeServiceConfig2(service, SERVICE_CONFIG_FAILURE_ACTIONS, policyBuffer))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "ChangeServiceConfig2 failure actions failed");
+                }
+
+                SERVICE_FAILURE_ACTIONS_FLAG flag = new SERVICE_FAILURE_ACTIONS_FLAG
+                {
+                    Enabled = policy.NonCrashFailures ? 1 : 0
+                };
+                flagBuffer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SERVICE_FAILURE_ACTIONS_FLAG)));
+                Marshal.StructureToPtr(flag, flagBuffer, false);
+                if (!ChangeServiceConfig2(service, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, flagBuffer))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "ChangeServiceConfig2 failure-actions flag failed");
+                }
+            }
+            finally
+            {
+                if (flagBuffer != IntPtr.Zero) Marshal.FreeHGlobal(flagBuffer);
+                if (policyBuffer != IntPtr.Zero) Marshal.FreeHGlobal(policyBuffer);
+                if (actions != IntPtr.Zero) Marshal.FreeHGlobal(actions);
+                if (command != IntPtr.Zero) Marshal.FreeHGlobal(command);
+                if (rebootMessage != IntPtr.Zero) Marshal.FreeHGlobal(rebootMessage);
+                if (service != IntPtr.Zero) CloseServiceHandle(service);
+                if (scm != IntPtr.Zero) CloseServiceHandle(scm);
+            }
+        }
+
+        public static string Canonical(ServiceFailurePolicy policy)
+        {
+            StringBuilder value = new StringBuilder();
+            value.Append(policy.ResetPeriod).Append('|');
+            value.Append((policy.RebootMessage ?? "").Length).Append(':').Append(policy.RebootMessage ?? "").Append('|');
+            value.Append((policy.Command ?? "").Length).Append(':').Append(policy.Command ?? "").Append('|');
+            value.Append(policy.NonCrashFailures ? "1" : "0");
+            ServiceFailureAction[] actions = policy.Actions ?? new ServiceFailureAction[0];
+            for (int i = 0; i < actions.Length; i++)
+            {
+                value.Append('|').Append(actions[i].Type).Append(':').Append(actions[i].Delay);
+            }
+            return value.ToString();
+        }
+    }
+}
+'@
+}
+
+function Get-ServiceFailurePolicy {
+    param([string]$Name)
+    Initialize-ServiceFailurePolicyNative
+    return [EndpointAgentInstaller.ServiceFailurePolicyNative]::Capture($Name)
+}
+
+function Restore-ServiceFailurePolicy {
+    param(
+        [string]$Name,
+        [Parameter(Mandatory)] $Policy
+    )
+    Initialize-ServiceFailurePolicyNative
+    [EndpointAgentInstaller.ServiceFailurePolicyNative]::Restore($Name, $Policy)
+}
+
+function Assert-ServiceFailurePolicy {
+    param(
+        [string]$Name,
+        [Parameter(Mandatory)] $Expected
+    )
+    Initialize-ServiceFailurePolicyNative
+    $actual = [EndpointAgentInstaller.ServiceFailurePolicyNative]::Capture($Name)
+    $actualCanonical = [EndpointAgentInstaller.ServiceFailurePolicyNative]::Canonical($actual)
+    $expectedCanonical = [EndpointAgentInstaller.ServiceFailurePolicyNative]::Canonical($Expected)
+    if ($actualCanonical -cne $expectedCanonical) {
+        throw "restored SCM failure-action policy mismatch for $Name"
+    }
+}
+
+function Get-ServiceStartMode {
+    param(
+        [int]$StartValue,
+        [bool]$DelayedAutoStart
+    )
+    switch ($StartValue) {
+        2 { return $(if ($DelayedAutoStart) { "delayed-auto" } else { "auto" }) }
+        3 { return "demand" }
+        4 { return "disabled" }
+        default { throw "unsupported service start value in transaction snapshot: $StartValue" }
+    }
+}
+
+function Get-InstallTreeAclSnapshot {
+    param([string]$Path)
+
+    $root = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath.TrimEnd('\')
+    $items = @((Get-Item -LiteralPath $root -Force -ErrorAction Stop))
+    $items += @(Get-ChildItem -LiteralPath $root -Force -Recurse -ErrorAction Stop)
+    return @($items | ForEach-Object {
+        $relativePath = if ($_.FullName -eq $root) {
+            "."
+        } else {
+            $_.FullName.Substring($root.Length).TrimStart('\')
+        }
+        $acl = Get-Acl -LiteralPath $_.FullName -ErrorAction Stop
+        [pscustomobject]@{
+            RelativePath = $relativePath
+            Acl = $acl
+            Sddl = [string]$acl.Sddl
+        }
+    })
+}
+
+function Restore-InstallTreeAclSnapshot {
+    param(
+        [string]$Path,
+        [object[]]$Snapshot
+    )
+
+    foreach ($entry in @($Snapshot | Sort-Object { $_.RelativePath.Length } -Descending)) {
+        $target = if ($entry.RelativePath -eq ".") {
+            $Path
+        } else {
+            Join-Path $Path $entry.RelativePath
+        }
+        if (-not (Test-Path -LiteralPath $target)) {
+            throw "install-tree ACL restore target missing: $($entry.RelativePath)"
+        }
+        Set-Acl -LiteralPath $target -AclObject $entry.Acl -ErrorAction Stop
+    }
+}
+
+function Assert-InstallTreeAclSnapshot {
+    param(
+        [string]$Path,
+        [object[]]$Expected
+    )
+
+    foreach ($entry in $Expected) {
+        $target = if ($entry.RelativePath -eq ".") {
+            $Path
+        } else {
+            Join-Path $Path $entry.RelativePath
+        }
+        if (-not (Test-Path -LiteralPath $target)) {
+            throw "restored install-tree ACL target missing: $($entry.RelativePath)"
+        }
+        $actual = Get-Acl -LiteralPath $target -ErrorAction Stop
+        if ([string]$actual.Sddl -cne [string]$entry.Sddl) {
+            throw "restored install-tree ACL mismatch: $($entry.RelativePath)"
+        }
+    }
+}
+
+function New-ServiceReplacementSnapshot {
+    param(
+        [string]$Name,
+        [string]$InstallPath
+    )
+
+    if (-not (Test-ServiceExists -Name $Name)) {
+        return $null
+    }
+    $binaryPath = Join-Path $InstallPath "endpoint-agent.exe"
+    if (-not (Test-Path -LiteralPath $binaryPath)) {
+        Write-Warning "existing service binary is missing; continuing Force repair without transactional binary rollback: $binaryPath"
+        return $null
+    }
+
+    $service = Get-Service -Name $Name -ErrorAction Stop
+    $servicePath = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    $serviceProps = Get-ItemProperty -LiteralPath $servicePath -ErrorAction Stop
+    $description = ""
+    if ($null -ne $serviceProps.PSObject.Properties["Description"]) {
+        $description = [string]$serviceProps.Description
+    }
+    $delayedAutoStart = $false
+    if ($null -ne $serviceProps.PSObject.Properties["DelayedAutoStart"]) {
+        $delayedAutoStart = [bool]$serviceProps.DelayedAutoStart
+    }
+    $startValue = [int]$serviceProps.Start
+    $startMode = Get-ServiceStartMode `
+        -StartValue $startValue `
+        -DelayedAutoStart $delayedAutoStart
+    $failurePolicy = Get-ServiceFailurePolicy -Name $Name
+    $serviceSddl = Get-ServiceSddl -Name $Name
+    $installTreeAcl = Get-InstallTreeAclSnapshot -Path $InstallPath
+    $rollbackRoot = Join-Path $env:ProgramData "EndpointAgent\rollback\$Name-$([guid]::NewGuid().ToString('N'))"
+    $rollbackInstallPath = Join-Path $rollbackRoot "install"
+    try {
+        New-Item -ItemType Directory -Force -Path $rollbackRoot | Out-Null
+        Protect-DirectoryAcl -Path $rollbackRoot
+        New-Item -ItemType Directory -Force -Path $rollbackInstallPath | Out-Null
+        $binarySha256BeforeCopy = (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Get-ChildItem -LiteralPath $InstallPath -Force -ErrorAction Stop |
+            Copy-Item -Destination $rollbackInstallPath -Recurse -Force
+        $binarySha256AfterCopy = (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $rollbackBinarySha256 = (Get-FileHash -LiteralPath (Join-Path $rollbackInstallPath "endpoint-agent.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($binarySha256BeforeCopy -ne $binarySha256AfterCopy -or
+            $binarySha256BeforeCopy -ne $rollbackBinarySha256) {
+            throw "existing service binary changed while the transaction snapshot was being captured"
+        }
+        $binarySha256 = $binarySha256BeforeCopy
+        $environment = Get-ServiceEnvironmentSnapshot -Name $Name
+    } catch {
+        if (Test-Path -LiteralPath $rollbackRoot) {
+            Remove-Item -LiteralPath $rollbackRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+
+    return [pscustomobject]@{
+        Name = $Name
+        InstallPath = $InstallPath
+        RollbackRoot = $rollbackRoot
+        RollbackInstallPath = $rollbackInstallPath
+        BinarySha256 = $binarySha256
+        Environment = $environment
+        DisplayName = $service.DisplayName
+        Description = $description
+        StartValue = $startValue
+        StartMode = $startMode
+        DelayedAutoStart = $delayedAutoStart
+        WasRunning = ($service.Status -eq "Running")
+        FailurePolicy = $failurePolicy
+        ServiceSddl = $serviceSddl
+        InstallTreeAcl = $installTreeAcl
+    }
+}
+
+function Remove-ServiceReplacementSnapshot {
+    param($Snapshot)
+    if ($null -ne $Snapshot -and (Test-Path -LiteralPath $Snapshot.RollbackRoot)) {
+        Remove-Item -LiteralPath $Snapshot.RollbackRoot -Recurse -Force
+    }
+}
+
+function Restore-ServiceReplacementSnapshot {
+    param(
+        [Parameter(Mandatory)] $Snapshot,
+        [int]$StartTimeoutSeconds = 30,
+        [string]$MaintenanceToken = "",
+        [string]$MaintenanceTokenHash = ""
+    )
+
+    if (-not (Test-Path -LiteralPath $Snapshot.RollbackInstallPath)) {
+        throw "transaction rollback payload missing: $($Snapshot.RollbackInstallPath)"
+    }
+    if (Test-ServiceExists -Name $Snapshot.Name) {
+        $currentBinary = Join-Path $Snapshot.InstallPath "endpoint-agent.exe"
+        Remove-ServiceBestEffort `
+            -Name $Snapshot.Name `
+            -ExePath $currentBinary `
+            -Token $MaintenanceToken `
+            -TokenHash $MaintenanceTokenHash
+        if (-not (Wait-ForServiceAbsent -Name $Snapshot.Name -TimeoutSeconds 30)) {
+            throw "existing service entry could not be removed before transaction rollback restore: $($Snapshot.Name)"
+        }
+    }
+    if (Test-Path -LiteralPath $Snapshot.InstallPath) {
+        Remove-Item -LiteralPath $Snapshot.InstallPath -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $Snapshot.InstallPath | Out-Null
+    Get-ChildItem -LiteralPath $Snapshot.RollbackInstallPath -Force -ErrorAction Stop |
+        Copy-Item -Destination $Snapshot.InstallPath -Recurse -Force
+    Restore-InstallTreeAclSnapshot `
+        -Path $Snapshot.InstallPath `
+        -Snapshot $Snapshot.InstallTreeAcl
+
+    $restoredBinary = Join-Path $Snapshot.InstallPath "endpoint-agent.exe"
+    $restoredSha = (Get-FileHash -LiteralPath $restoredBinary -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($restoredSha -ne $Snapshot.BinarySha256) {
+        throw "transaction rollback binary hash mismatch for $restoredBinary"
+    }
+
+    Invoke-AgentServiceCommand -ExePath $restoredBinary -Arguments @(
+        "service", "install",
+        "--name", $Snapshot.Name,
+        "--display-name", $Snapshot.DisplayName,
+        "--description", $Snapshot.Description
+    )
+    Restore-ServiceEnvironmentSnapshot -Name $Snapshot.Name -Snapshot $Snapshot.Environment
+    $servicePath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($Snapshot.Name)"
+    Restore-ServiceFailurePolicy `
+        -Name $Snapshot.Name `
+        -Policy $Snapshot.FailurePolicy
+    Invoke-NativeCommand -FilePath "sc.exe" -Arguments @("sdset", $Snapshot.Name, $Snapshot.ServiceSddl)
+    Invoke-NativeCommand -FilePath "sc.exe" -Arguments @("config", $Snapshot.Name, "start=", $Snapshot.StartMode)
+
+    Assert-ServiceEnvironmentSnapshot -Name $Snapshot.Name -Expected $Snapshot.Environment
+    Assert-ServiceFailurePolicy `
+        -Name $Snapshot.Name `
+        -Expected $Snapshot.FailurePolicy
+    $restoredServiceSddl = Get-ServiceSddl -Name $Snapshot.Name
+    if ($restoredServiceSddl -cne [string]$Snapshot.ServiceSddl) {
+        throw "restored service SDDL mismatch for $($Snapshot.Name)"
+    }
+    Assert-InstallTreeAclSnapshot `
+        -Path $Snapshot.InstallPath `
+        -Expected $Snapshot.InstallTreeAcl
+    $restoredServiceProps = Get-ItemProperty `
+        -LiteralPath $servicePath `
+        -ErrorAction Stop
+    if ([int]$restoredServiceProps.Start -ne [int]$Snapshot.StartValue) {
+        throw "restored service start mode mismatch for $($Snapshot.Name)"
+    }
+    $actualDelayedAutoStart = $false
+    if (@($restoredServiceProps.PSObject.Properties.Name) -contains "DelayedAutoStart") {
+        $actualDelayedAutoStart = [bool]$restoredServiceProps.DelayedAutoStart
+    }
+    if ($actualDelayedAutoStart -ne [bool]$Snapshot.DelayedAutoStart) {
+        throw "restored service delayed-auto-start mismatch for $($Snapshot.Name)"
+    }
+    $actualDescription = ""
+    if ($null -ne $restoredServiceProps.PSObject.Properties["Description"]) {
+        $actualDescription = [string]$restoredServiceProps.Description
+    }
+    if ($actualDescription -cne [string]$Snapshot.Description) {
+        throw "restored service description mismatch for $($Snapshot.Name)"
+    }
+    $restoredService = Get-Service -Name $Snapshot.Name -ErrorAction Stop
+    if ([string]$restoredService.DisplayName -cne [string]$Snapshot.DisplayName) {
+        throw "restored service display-name mismatch for $($Snapshot.Name)"
+    }
+    if ($Snapshot.WasRunning) {
+        Invoke-AgentServiceCommand -ExePath $restoredBinary -Arguments @("service", "start", "--name", $Snapshot.Name)
+        if (-not (Wait-ForServiceRunning -Name $Snapshot.Name -TimeoutSeconds $StartTimeoutSeconds)) {
+            throw "restored service '$($Snapshot.Name)' did not reach Running"
+        }
+    }
+}
+
 function Invoke-AgentServiceCommand {
     param(
         [string]$ExePath,
@@ -283,6 +948,18 @@ function Invoke-AgentServiceCommand {
     & $ExePath @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "endpoint-agent.exe $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Assert-AgentBinaryRunnable {
+    param([string]$Path)
+
+    $versionOutput = @(& $Path --version 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "endpoint-agent binary readiness check failed with exit code $LASTEXITCODE"
+    }
+    if ($versionOutput.Count -eq 0 -or [string]::IsNullOrWhiteSpace(([string]$versionOutput[0]))) {
+        throw "endpoint-agent binary readiness check returned no version"
     }
 }
 
@@ -430,6 +1107,27 @@ function Add-ServiceEnvironmentBaseVariables {
     }
 }
 
+function Assert-ViewOnlyMaskRectBPS {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return
+    }
+    if ($Value -notmatch '^[0-9]{1,5},[0-9]{1,5},[0-9]{1,5},[0-9]{1,5}$') {
+        throw "-RemoteBridgeViewOnlyMaskRectBPS must be canonical x,y,width,height basis points."
+    }
+    $parts = @($Value.Split(',') | ForEach-Object { [int]$_ })
+    if (@($parts | Where-Object { $_ -lt 0 -or $_ -gt 10000 }).Count -gt 0) {
+        throw "-RemoteBridgeViewOnlyMaskRectBPS fields must be between 0 and 10000."
+    }
+    if ($parts[2] -le 0 -or $parts[3] -le 0) {
+        throw "-RemoteBridgeViewOnlyMaskRectBPS width and height must be positive."
+    }
+    if (($parts[0] + $parts[2]) -gt 10000 -or ($parts[1] + $parts[3]) -gt 10000) {
+        throw "-RemoteBridgeViewOnlyMaskRectBPS must fit inside the primary monitor."
+    }
+}
+
 function Assert-RemoteBridgeInstallConfig {
     param(
         [bool]$Enabled,
@@ -442,20 +1140,35 @@ function Assert-RemoteBridgeInstallConfig {
         [string]$PermitBrokerPublicKeyB64 = "",
         [string]$PermitKeyID = "",
         [bool]$PilotAutoConsent = $false,
+        [bool]$DeviceKeySessionEnabled = $false,
+        [bool]$ViewOnlyEnabled = $false,
         [bool]$ViewOnlyAttendedConsent = $false,
+        [string]$ViewOnlyMaskRectBPS = "",
         [string]$TLSServerName = ""
     )
     if ($Enabled) {
         if ([string]::IsNullOrWhiteSpace($BrokerAddr)) {
             throw "-RemoteBridgeEnabled requires -RemoteBridgeBrokerAddr."
         }
-        if ($OperationsEnabled) {
+        $operationCapable = $OperationsEnabled -or $ViewOnlyEnabled
+        if ($operationCapable) {
             if ([string]::IsNullOrWhiteSpace($PermitBrokerPublicKeyB64) -or [string]::IsNullOrWhiteSpace($PermitKeyID)) {
-                throw "-RemoteBridgeOperationsEnabled requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID."
+                throw "remote-bridge operation-capable policy requires -RemoteBridgePermitBrokerPublicKeyB64 and -RemoteBridgePermitKeyID."
             }
-        } elseif ($PilotAutoConsent) {
+        }
+        if ($PilotAutoConsent -and -not $OperationsEnabled) {
             throw "-RemoteBridgePilotAutoConsent requires -RemoteBridgeOperationsEnabled."
         }
+        if ($DeviceKeySessionEnabled -and -not $OperationsEnabled) {
+            throw "-RemoteBridgeDeviceKeySessionEnabled requires -RemoteBridgeOperationsEnabled."
+        }
+        if ($ViewOnlyAttendedConsent -and -not $ViewOnlyEnabled) {
+            throw "-RemoteBridgeViewOnlyAttendedConsent requires -RemoteBridgeViewOnlyEnabled."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ViewOnlyMaskRectBPS) -and -not $ViewOnlyEnabled) {
+            throw "-RemoteBridgeViewOnlyMaskRectBPS requires -RemoteBridgeViewOnlyEnabled."
+        }
+        Assert-ViewOnlyMaskRectBPS -Value $ViewOnlyMaskRectBPS
         return
     }
 
@@ -486,8 +1199,17 @@ function Assert-RemoteBridgeInstallConfig {
     if ($PilotAutoConsent) {
         throw "-RemoteBridgePilotAutoConsent requires -RemoteBridgeEnabled."
     }
+    if ($DeviceKeySessionEnabled) {
+        throw "-RemoteBridgeDeviceKeySessionEnabled requires -RemoteBridgeEnabled."
+    }
+    if ($ViewOnlyEnabled) {
+        throw "-RemoteBridgeViewOnlyEnabled requires -RemoteBridgeEnabled."
+    }
     if ($ViewOnlyAttendedConsent) {
         throw "-RemoteBridgeViewOnlyAttendedConsent requires -RemoteBridgeEnabled."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ViewOnlyMaskRectBPS)) {
+        throw "-RemoteBridgeViewOnlyMaskRectBPS requires -RemoteBridgeEnabled."
     }
     if (-not [string]::IsNullOrWhiteSpace($TLSServerName)) {
         throw "-RemoteBridgeTLSServerName requires -RemoteBridgeEnabled."
@@ -507,7 +1229,10 @@ function Add-RemoteBridgeServiceEnvironment {
         [string]$PermitBrokerPublicKeyB64 = "",
         [string]$PermitKeyID = "",
         [bool]$PilotAutoConsent = $false,
+        [bool]$DeviceKeySessionEnabled = $false,
+        [bool]$ViewOnlyEnabled = $false,
         [bool]$ViewOnlyAttendedConsent = $false,
+        [string]$ViewOnlyMaskRectBPS = "",
         [string]$TLSServerName = ""
     )
     if (-not $Enabled) {
@@ -540,8 +1265,17 @@ function Add-RemoteBridgeServiceEnvironment {
     if ($PilotAutoConsent) {
         $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_PILOT_AUTO_CONSENT"] = "true"
     }
+    if ($DeviceKeySessionEnabled) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SESSION_ENABLED"] = "true"
+    }
+    if ($ViewOnlyEnabled) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ENABLED"] = "true"
+    }
     if ($ViewOnlyAttendedConsent) {
         $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_ATTENDED_CONSENT_ENABLED"] = "true"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ViewOnlyMaskRectBPS)) {
+        $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_VIEW_ONLY_MASK_RECT_BPS"] = $ViewOnlyMaskRectBPS
     }
     if (-not [string]::IsNullOrWhiteSpace($TLSServerName)) {
         $Values["ENDPOINT_AGENT_REMOTE_BRIDGE_TLS_SERVER_NAME"] = $TLSServerName
@@ -1027,6 +1761,34 @@ function Backup-HmacCredentialStoreForFreshEnroll {
     return $backupPath
 }
 
+function Restore-HmacCredentialStoreBackup {
+    param(
+        [string]$CredentialStorePath,
+        [string]$BackupPath
+    )
+    if ([string]::IsNullOrWhiteSpace($BackupPath)) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $BackupPath)) {
+        throw "HMAC credential-store rollback backup not found: $BackupPath"
+    }
+    if (Test-Path -LiteralPath $CredentialStorePath) {
+        Remove-Item -LiteralPath $CredentialStorePath -Force
+    }
+    Move-Item -LiteralPath $BackupPath -Destination $CredentialStorePath -Force
+    Write-Step "restored previous HMAC credential store after failed fresh enrollment"
+}
+
+function Assert-HmacCredentialResetConfirmed {
+    param(
+        [string]$BackupPath,
+        [bool]$Confirmed
+    )
+    if (-not [string]::IsNullOrWhiteSpace($BackupPath) -and -not $Confirmed) {
+        throw "fresh HMAC enrollment was not confirmed; refusing to commit over the previous credential store"
+    }
+}
+
 # #120: fail-loud on a truncated-paste enrollment token. A blank/absent token is
 # a no-op (the AgentId/AgentSecret HMAC variant + the -AutoEnroll path carry no
 # token). Throws BEFORE any service/config mutation so a 1-char paste never
@@ -1090,6 +1852,10 @@ Assert-RemoteBridgeInstallConfig `
     -PermitBrokerPublicKeyB64 $RemoteBridgePermitBrokerPublicKeyB64 `
     -PermitKeyID $RemoteBridgePermitKeyID `
     -PilotAutoConsent ([bool]$RemoteBridgePilotAutoConsent) `
+    -DeviceKeySessionEnabled ([bool]$RemoteBridgeDeviceKeySessionEnabled) `
+    -ViewOnlyEnabled ([bool]$RemoteBridgeViewOnlyEnabled) `
+    -ViewOnlyAttendedConsent ([bool]$RemoteBridgeViewOnlyAttendedConsent) `
+    -ViewOnlyMaskRectBPS $RemoteBridgeViewOnlyMaskRectBPS `
     -TLSServerName $RemoteBridgeTLSServerName
 
 $resolvedSelfUpdateSignerThumbprints = Resolve-SelfUpdateSignerThumbprints `
@@ -1259,6 +2025,7 @@ if ($useUrlDownload) {
 }
 
 $sourceBinary = Resolve-Path -LiteralPath $BinaryPath -ErrorAction Stop
+Assert-AgentBinaryRunnable -Path $sourceBinary.ProviderPath
 if ($SelfUpdateEnabled -and [string]::IsNullOrWhiteSpace($resolvedSelfUpdateSignerThumbprints)) {
     $verifiedSelfUpdateSignerThumbprint = Get-SelfUpdateSignerSha256ThumbprintFromBinary `
         -Path $sourceBinary.ProviderPath `
@@ -1286,6 +2053,8 @@ $installedService = $false
 $resolvedMaintenanceTokenHash = Resolve-MaintenanceTokenHash -Token $MaintenanceToken -Hash $MaintenanceTokenHash
 $hmacCredentialStorePath = Get-HmacCredentialStorePath
 $hmacCredentialStoreBackup = ""
+$freshHmacCredentialConfirmed = $false
+$replacementSnapshot = $null
 
 try {
     # Codex 019e7314 iter-2 P1: non-destructive existence check FIRST.
@@ -1293,10 +2062,10 @@ try {
     # MUST NOT touch the service-specific Environment regkey, because
     # the running service is consuming that config and any silent
     # cleanup would leave it credential-less on the next restart.
-    if ((Test-ServiceExists -Name $ServiceName) -and -not $Force) {
+    $serviceExists = Test-ServiceExists -Name $ServiceName
+    if ($serviceExists -and -not $Force) {
         throw "Service '$ServiceName' already exists. Use -Force to replace it."
     }
-
     # AG-026C / #109: a stored HMAC credential wins over
     # ENDPOINT_AGENT_ENROLLMENT_TOKEN on cold start. That is the
     # correct upgrade-preserve default, but it makes "fresh enroll"
@@ -1309,9 +2078,19 @@ try {
             -ResetRequested ([bool]$ResetCredentialStore) `
             -CredentialStorePath $hmacCredentialStorePath
         if (-not [string]::IsNullOrWhiteSpace($EnrollmentToken) -and $ResetCredentialStore) {
+            if ((Test-Path -LiteralPath $hmacCredentialStorePath) -and -not $Start) {
+                throw "-ResetCredentialStore over an existing credential requires -Start so fresh enrollment can be confirmed or rolled back."
+            }
             $hmacCredentialStoreBackup = Backup-HmacCredentialStoreForFreshEnroll `
                 -CredentialStorePath $hmacCredentialStorePath
         }
+    }
+
+    if ($serviceExists -and $Force) {
+        Write-Step "snapshotting existing service for transactional replacement"
+        $replacementSnapshot = New-ServiceReplacementSnapshot `
+            -Name $ServiceName `
+            -InstallPath $InstallDir
     }
 
     # AG-026C: defuse the regkey override mechanism BEFORE the
@@ -1323,7 +2102,7 @@ try {
     # agent config for the new install. Only runs in the -Force
     # path now - fresh installs do not need it (no prior service)
     # and the no-Force-on-existing path already threw above.
-    if ((Test-ServiceExists -Name $ServiceName) -and $Force) {
+    if ($serviceExists -and $Force) {
         Write-Step "clearing stale service env regkey: $ServiceName\\Environment"
         Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" -Name 'Environment' -ErrorAction SilentlyContinue
         Write-Step "existing service found; uninstalling $ServiceName"
@@ -1347,6 +2126,9 @@ try {
             & $uninstallScript @uninstallArgs
         } else {
             Remove-ServiceBestEffort -Name $ServiceName -ExePath $targetBinary -Token $MaintenanceToken -TokenHash $resolvedMaintenanceTokenHash
+        }
+        if (-not (Wait-ForServiceAbsent -Name $ServiceName -TimeoutSeconds 30)) {
+            throw "existing service entry remained marked for deletion after Force uninstall: $ServiceName"
         }
     }
 
@@ -1443,7 +2225,10 @@ try {
         -PermitBrokerPublicKeyB64 $RemoteBridgePermitBrokerPublicKeyB64 `
         -PermitKeyID $RemoteBridgePermitKeyID `
         -PilotAutoConsent ([bool]$RemoteBridgePilotAutoConsent) `
+        -DeviceKeySessionEnabled ([bool]$RemoteBridgeDeviceKeySessionEnabled) `
+        -ViewOnlyEnabled ([bool]$RemoteBridgeViewOnlyEnabled) `
         -ViewOnlyAttendedConsent ([bool]$RemoteBridgeViewOnlyAttendedConsent) `
+        -ViewOnlyMaskRectBPS $RemoteBridgeViewOnlyMaskRectBPS `
         -TLSServerName $RemoteBridgeTLSServerName
 
     Add-SelfUpdateServiceEnvironment `
@@ -1519,6 +2304,7 @@ try {
     if ($Start -and -not $AutoEnroll -and -not [string]::IsNullOrWhiteSpace($EnrollmentToken)) {
         Write-Step "waiting for AG-026D credential-confirmed sentinel (up to 60s, log baseline=$logBaselineLength bytes)"
         if (Wait-ForCredentialConfirmed -LogPath $agentLog -TimeoutSeconds 60 -BaselineLength $logBaselineLength) {
+            $freshHmacCredentialConfirmed = $true
             Write-Step "AG-026C: enroll confirmed - removing token from service env regkey"
             Remove-ServiceEnvironmentEntry -Name $ServiceName -Key "ENDPOINT_AGENT_ENROLLMENT_TOKEN"
         } else {
@@ -1526,15 +2312,46 @@ try {
         }
     }
 
+    Assert-HmacCredentialResetConfirmed `
+        -BackupPath $hmacCredentialStoreBackup `
+        -Confirmed $freshHmacCredentialConfirmed
+
+    if (-not [string]::IsNullOrWhiteSpace($hmacCredentialStoreBackup)) {
+        if ($freshHmacCredentialConfirmed) {
+            try {
+                Remove-Item -LiteralPath $hmacCredentialStoreBackup -Force -ErrorAction Stop
+                $hmacCredentialStoreBackup = ""
+                Write-Step "removed superseded HMAC credential-store backup after confirmed fresh enrollment"
+            } catch {
+                Write-Warning "fresh enrollment is confirmed, but superseded HMAC credential-store backup cleanup failed: $($_.Exception.Message)"
+            }
+        } else {
+            Write-Warning "fresh enrollment was not confirmed in this install window; previous HMAC credential-store backup retained for recovery"
+        }
+    }
+
+    if ($null -ne $replacementSnapshot) {
+        try {
+            Remove-ServiceReplacementSnapshot -Snapshot $replacementSnapshot
+        } catch {
+            Write-Warning "installed service is healthy, but rollback payload cleanup failed at $($replacementSnapshot.RollbackRoot): $($_.Exception.Message)"
+        }
+        $replacementSnapshot = $null
+    }
     Write-Step "install completed"
 } catch {
-    Write-Error $_
+    $installError = $_
+    $cleanupRollbackFailures = @()
+    $stateRollbackFailures = @()
+    $restoredPreviousService = $false
+    Write-Warning "install failed: $($installError.Exception.Message)"
     Write-Step "rollback started"
     if ($installedService -and (Test-Path -LiteralPath $targetBinary)) {
         try {
             Remove-ServiceBestEffort -Name $ServiceName -ExePath $targetBinary -Token $MaintenanceToken -TokenHash $resolvedMaintenanceTokenHash
         } catch {
             Write-Warning "service rollback failed: $($_.Exception.Message)"
+            $cleanupRollbackFailures += "service cleanup: $($_.Exception.Message)"
         }
     }
     if ($copiedBinary -and (Test-Path -LiteralPath $targetBinary)) {
@@ -1542,6 +2359,7 @@ try {
             Remove-Item -LiteralPath $targetBinary -Force
         } catch {
             Write-Warning "binary rollback failed: $($_.Exception.Message)"
+            $cleanupRollbackFailures += "binary cleanup: $($_.Exception.Message)"
         }
     }
     if ($autoEnrollRegistryTouched -and $null -ne $autoEnrollRegistrySnapshot) {
@@ -1549,8 +2367,55 @@ try {
             Restore-AgentRegistrySnapshot -Snapshot $autoEnrollRegistrySnapshot
         } catch {
             Write-Warning "auto-enroll registry rollback failed: $($_.Exception.Message)"
+            $stateRollbackFailures += "auto-enroll registry: $($_.Exception.Message)"
         }
     }
-    Restore-MachineEnv -OriginalValues $originalValues
-    throw
+    try {
+        Restore-MachineEnv -OriginalValues $originalValues
+    } catch {
+        Write-Warning "machine environment rollback failed: $($_.Exception.Message)"
+        $stateRollbackFailures += "machine environment: $($_.Exception.Message)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($hmacCredentialStoreBackup)) {
+        try {
+            Restore-HmacCredentialStoreBackup `
+                -CredentialStorePath $hmacCredentialStorePath `
+                -BackupPath $hmacCredentialStoreBackup
+            $hmacCredentialStoreBackup = ""
+        } catch {
+            Write-Warning "HMAC credential-store rollback failed: $($_.Exception.Message)"
+            $stateRollbackFailures += "HMAC credential store: $($_.Exception.Message)"
+        }
+    }
+    if ($null -ne $replacementSnapshot) {
+        try {
+            Write-Step "restoring previous service transaction snapshot"
+            Restore-ServiceReplacementSnapshot `
+                -Snapshot $replacementSnapshot `
+                -MaintenanceToken $MaintenanceToken `
+                -MaintenanceTokenHash $resolvedMaintenanceTokenHash
+            Write-Step "previous service transaction snapshot restored"
+        } catch {
+            $rollbackError = $_
+            $failureDetails = @($cleanupRollbackFailures + $stateRollbackFailures + @(
+                "previous service restore: $($rollbackError.Exception.Message)"
+            )) -join "; "
+            throw "EndpointAgent replacement failed: $($installError.Exception.Message). Rollback incomplete: $failureDetails. Protected rollback payload retained at $($replacementSnapshot.RollbackRoot)."
+        }
+        $restoredPreviousService = $true
+        try {
+            Remove-ServiceReplacementSnapshot -Snapshot $replacementSnapshot
+        } catch {
+            Write-Warning "previous service was restored, but rollback payload cleanup failed at $($replacementSnapshot.RollbackRoot): $($_.Exception.Message)"
+        }
+        $replacementSnapshot = $null
+    }
+    $incompleteRollback = @($stateRollbackFailures)
+    if (-not $restoredPreviousService) {
+        $incompleteRollback += $cleanupRollbackFailures
+    }
+    if ($incompleteRollback.Count -gt 0) {
+        throw "EndpointAgent install failed: $($installError.Exception.Message). Rollback incomplete: $($incompleteRollback -join '; ')."
+    }
+    throw $installError
 }

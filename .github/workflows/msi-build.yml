@@ -193,6 +193,127 @@ jobs:
           if ((Get-Content $log2 -Raw) -match [regex]::Escape($canary)) { throw "REDACTION FAIL: upgrade canary leaked to msiexec log" }
           Write-Host "OK upgrade preserved canonical credential + service; token NOT forwarded; canary redacted"
 
+      - name: Smoke — post-mutation failure restores exact service transaction
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $serviceName = "EndpointAgent"
+          $servicePath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+          $installDir = "C:\Program Files\EndpointAgent"
+          $binary = Join-Path $installDir "endpoint-agent.exe"
+
+          function Get-TextSha256([string]$Value) {
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try {
+              $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+              return (($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join "")
+            } finally {
+              $sha.Dispose()
+            }
+          }
+
+          function Get-ServiceValueDigest([string[]]$Names) {
+            $key = Get-Item -LiteralPath $servicePath -ErrorAction Stop
+            try {
+              $records = foreach ($name in ($Names | Sort-Object)) {
+                if (@($key.GetValueNames()) -notcontains $name) {
+                  "$name|absent"
+                  continue
+                }
+                $kind = $key.GetValueKind($name).ToString()
+                $value = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                $encoded = switch ($kind) {
+                  "Binary" { [Convert]::ToBase64String([byte[]]$value); break }
+                  "MultiString" { @($value | Sort-Object) -join "`0"; break }
+                  default { [string]$value }
+                }
+                "$name|$kind|$encoded"
+              }
+              return Get-TextSha256 ($records -join "`n")
+            } finally {
+              $key.Dispose()
+            }
+          }
+
+          function Get-ServiceSddlValue {
+            $lines = @(sc.exe sdshow $serviceName 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "sdshow failed before/after rollback" }
+            $value = @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match '^[DOGS]:' } | Select-Object -First 1)
+            if ($value.Count -ne 1) { throw "service SDDL missing before/after rollback" }
+            return [string]$value[0]
+          }
+
+          function Get-ServiceFailurePolicyScmDigest {
+            $failure = @(sc.exe qfailure $serviceName 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "qfailure failed before/after rollback" }
+            $flag = @(sc.exe qfailureflag $serviceName 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "qfailureflag failed before/after rollback" }
+            return Get-TextSha256 ((@($failure + $flag) | ForEach-Object { ([string]$_).Trim() }) -join "`n")
+          }
+
+          function Get-InstallTreeAclDigest {
+            $root = (Resolve-Path -LiteralPath $installDir).ProviderPath.TrimEnd('\')
+            $items = @((Get-Item -LiteralPath $root -Force))
+            $items += @(Get-ChildItem -LiteralPath $root -Force -Recurse)
+            $records = @($items | ForEach-Object {
+              $relative = if ($_.FullName -eq $root) { "." } else { $_.FullName.Substring($root.Length).TrimStart('\') }
+              "$relative|$([string](Get-Acl -LiteralPath $_.FullName).Sddl)"
+            } | Sort-Object)
+            return Get-TextSha256 ($records -join "`n")
+          }
+
+          $beforeService = Get-Service -Name $serviceName -ErrorAction Stop
+          $beforeProps = Get-ItemProperty -LiteralPath $servicePath -ErrorAction Stop
+          $before = [ordered]@{
+            binarySha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            environmentDigest = Get-ServiceValueDigest @("Environment")
+            failurePolicyScmDigest = Get-ServiceFailurePolicyScmDigest
+            serviceSddl = Get-ServiceSddlValue
+            installTreeAclDigest = Get-InstallTreeAclDigest
+            start = [int]$beforeProps.Start
+            delayedAutoStart = if ($null -ne $beforeProps.PSObject.Properties["DelayedAutoStart"]) { [bool]$beforeProps.DelayedAutoStart } else { $false }
+            status = $beforeService.Status.ToString()
+          }
+
+          $expectedFailure = $false
+          try {
+            & .\installers\windows\install.ps1 `
+              -BinaryPath (Resolve-Path .\out\endpoint-agent.exe) `
+              -InstallDir $installDir `
+              -ServiceName $serviceName `
+              -ApiUrl "https://testai.acik.com/api/v1/endpoint-agent" `
+              -ServiceSddl "INTENTIONAL_INVALID_SDDL" `
+              -Force `
+              -Start `
+              -ServiceStartTimeoutSeconds 2
+          } catch {
+            $expectedFailure = $true
+            Write-Host "expected post-mutation SDDL failure observed; validating rollback"
+          }
+          if (-not $expectedFailure) { throw "intentional invalid SDDL unexpectedly succeeded" }
+
+          $afterService = Get-Service -Name $serviceName -ErrorAction Stop
+          $afterProps = Get-ItemProperty -LiteralPath $servicePath -ErrorAction Stop
+          $after = [ordered]@{
+            binarySha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            environmentDigest = Get-ServiceValueDigest @("Environment")
+            failurePolicyScmDigest = Get-ServiceFailurePolicyScmDigest
+            serviceSddl = Get-ServiceSddlValue
+            installTreeAclDigest = Get-InstallTreeAclDigest
+            start = [int]$afterProps.Start
+            delayedAutoStart = if ($null -ne $afterProps.PSObject.Properties["DelayedAutoStart"]) { [bool]$afterProps.DelayedAutoStart } else { $false }
+            status = $afterService.Status.ToString()
+          }
+
+          foreach ($name in $before.Keys) {
+            if ([string]$after[$name] -cne [string]$before[$name]) {
+              throw "transaction rollback mismatch: $name"
+            }
+          }
+          $orphanRollback = Get-ChildItem "C:\ProgramData\EndpointAgent\rollback" -Directory -ErrorAction SilentlyContinue
+          if ($orphanRollback) { throw "successful rollback left protected payload behind" }
+          Write-Host "OK post-mutation rollback restored exact binary/policy/ACL/start/running/env state"
+
       - name: Smoke — uninstall preserves config by default (Codex cond.6)
         shell: pwsh
         run: |
@@ -244,8 +365,8 @@ jobs:
           # 3) INVARIANT (pre-mutation failure class): the short-token failure occurs in
           #    install.ps1's preflight (Assert-EnrollmentTokenLength), BEFORE -Force touches
           #    the existing service, and the old MSI's RemoveExistingProducts is deferred
-          #    (afterInstallExecute) => OLD v0.1.3 must remain. (A failure AFTER install.ps1
-          #    -Force's own old-service removal is a residual limitation, recovered by re-run.)
+          #    (afterInstallExecute) => OLD v0.1.3 must remain. Post-mutation rollback is
+          #    covered independently by the exact-service-transaction smoke above.
           if (-not (Get-Service EndpointAgentFU -ErrorAction SilentlyContinue)) { throw "DEGRADED: old service gone after failed upgrade" }
           if (-not (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.3\payload\endpoint-agent.exe")) { throw "DEGRADED: old v0.1.3 payload gone" }
           if (Test-Path "C:\Program Files\EndpointAgentInstaller\0.1.4\payload\endpoint-agent.exe") { throw "rollback incomplete: v0.1.4 payload remains" }
