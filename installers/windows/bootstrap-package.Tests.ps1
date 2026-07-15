@@ -110,36 +110,41 @@ Describe "Get-RemoteBridgeAttestationEvidence" {
     }
 
     It "rejects a missing evidence file" {
-        { Get-RemoteBridgeAttestationEvidence -Directory $testDirectory } |
-            Should Throw "*signed remote-bridge attestation evidence missing from package*"
+        $thrownMessage = ""
+        try {
+            Get-RemoteBridgeAttestationEvidence -Directory $testDirectory
+        } catch {
+            $thrownMessage = $_.Exception.Message
+        }
+        $thrownMessage | Should Match "^signed remote-bridge attestation evidence missing from package:"
     }
 
     It "rejects blank evidence" {
         Set-Content -LiteralPath $evidencePath -Value "   " -Encoding ascii
 
         { Get-RemoteBridgeAttestationEvidence -Directory $testDirectory } |
-            Should Throw "*signed remote-bridge attestation evidence is blank*"
+            Should Throw "signed remote-bridge attestation evidence is blank"
     }
 
     It "rejects malformed standard base64" {
         Set-Content -LiteralPath $evidencePath -Value "not/base64?" -Encoding ascii
 
         { Get-RemoteBridgeAttestationEvidence -Directory $testDirectory } |
-            Should Throw "*signed remote-bridge attestation evidence must be valid standard base64*"
+            Should Throw "signed remote-bridge attestation evidence must be valid standard base64"
     }
 
     It "rejects embedded whitespace" {
         Set-Content -LiteralPath $evidencePath -Value "c2ln bmVk" -Encoding ascii
 
         { Get-RemoteBridgeAttestationEvidence -Directory $testDirectory } |
-            Should Throw "*signed remote-bridge attestation evidence must be single-line standard base64*"
+            Should Throw "signed remote-bridge attestation evidence must be single-line standard base64"
     }
 
     It "rejects evidence above the configured agent limit" {
         Set-Content -LiteralPath $evidencePath -Value ("A" * 17) -Encoding ascii
 
         { Get-RemoteBridgeAttestationEvidence -Directory $testDirectory -MaxBase64Length 16 } |
-            Should Throw "*signed remote-bridge attestation evidence exceeds 16 characters*"
+            Should Throw "signed remote-bridge attestation evidence exceeds 16 characters"
     }
 }
 
@@ -165,7 +170,7 @@ Describe "Assert-PackageSha256Sums required-file contract" {
         Set-Content -LiteralPath $sumPath -Value "$payloadHash  payload.bin" -Encoding ascii
 
         { Assert-PackageSha256Sums -Directory $testDirectory -RequiredFiles @("attestation.b64") } |
-            Should Throw "*required package file is not covered by SHA256SUMS: attestation.b64*"
+            Should Throw "required package file is not covered by SHA256SUMS: attestation.b64"
     }
 
     It "rejects duplicate SHA256SUMS entries" {
@@ -175,6 +180,6 @@ Describe "Assert-PackageSha256Sums required-file contract" {
         ) | Set-Content -LiteralPath $sumPath -Encoding ascii
 
         { Assert-PackageSha256Sums -Directory $testDirectory } |
-            Should Throw "*duplicate SHA256SUMS entry: payload.bin*"
+            Should Throw "duplicate SHA256SUMS entry: payload.bin"
     }
 }
