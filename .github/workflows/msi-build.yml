@@ -243,14 +243,6 @@ jobs:
             return [string]$value[0]
           }
 
-          function Get-ServiceFailurePolicyScmDigest {
-            $failure = @(sc.exe qfailure $serviceName 2>&1)
-            if ($LASTEXITCODE -ne 0) { throw "qfailure failed before/after rollback" }
-            $flag = @(sc.exe qfailureflag $serviceName 2>&1)
-            if ($LASTEXITCODE -ne 0) { throw "qfailureflag failed before/after rollback" }
-            return Get-TextSha256 ((@($failure + $flag) | ForEach-Object { ([string]$_).Trim() }) -join "`n")
-          }
-
           function Get-InstallTreeAclDigest {
             $root = (Resolve-Path -LiteralPath $installDir).ProviderPath.TrimEnd('\')
             $items = @((Get-Item -LiteralPath $root -Force))
@@ -267,7 +259,6 @@ jobs:
           $before = [ordered]@{
             binarySha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
             environmentDigest = Get-ServiceValueDigest @("Environment")
-            failurePolicyScmDigest = Get-ServiceFailurePolicyScmDigest
             serviceSddl = Get-ServiceSddlValue
             installTreeAclDigest = Get-InstallTreeAclDigest
             start = [int]$beforeProps.Start
@@ -287,8 +278,15 @@ jobs:
               -Start `
               -ServiceStartTimeoutSeconds 2
           } catch {
+            $failureMessage = $_.Exception.Message
+            if ($failureMessage -match "Rollback incomplete") {
+              throw "post-mutation failure left an incomplete rollback: $failureMessage"
+            }
+            if ($failureMessage -notmatch "INTENTIONAL_INVALID_SDDL") {
+              throw "unexpected install failure instead of the injected SDDL fault: $failureMessage"
+            }
             $expectedFailure = $true
-            Write-Host "expected post-mutation SDDL failure observed; validating rollback"
+            Write-Host "expected post-mutation SDDL failure observed after verified internal SCM-policy restore; validating external state"
           }
           if (-not $expectedFailure) { throw "intentional invalid SDDL unexpectedly succeeded" }
 
@@ -297,7 +295,6 @@ jobs:
           $after = [ordered]@{
             binarySha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
             environmentDigest = Get-ServiceValueDigest @("Environment")
-            failurePolicyScmDigest = Get-ServiceFailurePolicyScmDigest
             serviceSddl = Get-ServiceSddlValue
             installTreeAclDigest = Get-InstallTreeAclDigest
             start = [int]$afterProps.Start
