@@ -920,6 +920,13 @@ function Restore-ServiceReplacementSnapshot {
     Invoke-NativeCommand -FilePath "sc.exe" -Arguments @("sdset", $Snapshot.Name, $Snapshot.ServiceSddl)
     Invoke-NativeCommand -FilePath "sc.exe" -Arguments @("config", $Snapshot.Name, "start=", $Snapshot.StartMode)
 
+    # Service recreation can cause Windows to normalize the executable ACL.
+    # Re-apply the captured tree after all service metadata mutations so the
+    # final rollback state is exact; the earlier restore protects execution.
+    Restore-InstallTreeAclSnapshot `
+        -Path $Snapshot.InstallPath `
+        -Snapshot $Snapshot.InstallTreeAcl
+
     Assert-ServiceEnvironmentSnapshot -Name $Snapshot.Name -Expected $Snapshot.Environment
     Assert-ServiceFailurePolicy `
         -Name $Snapshot.Name `

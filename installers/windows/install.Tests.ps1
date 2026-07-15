@@ -1009,7 +1009,7 @@ Describe "Transactional service replacement helpers" {
         }
         Assert-MockCalled Restore-ServiceFailurePolicy -Times 1
         Assert-MockCalled Assert-ServiceFailurePolicy -Times 1
-        Assert-MockCalled Restore-InstallTreeAclSnapshot -Times 1
+        Assert-MockCalled Restore-InstallTreeAclSnapshot -Times 2
         Assert-MockCalled Assert-InstallTreeAclSnapshot -Times 1
     }
 
