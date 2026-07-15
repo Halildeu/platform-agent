@@ -69,6 +69,8 @@ required_assets=(
   release-manifest.json
   EndpointAgent.zip
   EndpointAgent.zip.sha256
+  remote-bridge-attestation-evidence.b64
+  remote-bridge-attestation-evidence-summary.json
 )
 for asset in "${required_assets[@]}"; do
   [ -f "$tmp/$asset" ] || fail "published release missing asset: $asset"
@@ -91,6 +93,10 @@ zip_sha="$(shasum -a 256 "$tmp/EndpointAgent.zip" | awk '{print tolower($1)}')"
 zip_sha_file="$(awk 'NF {print tolower($1); exit}' "$tmp/EndpointAgent.zip.sha256")"
 [ "$zip_sha" = "$zip_sha_file" ] \
   || fail "EndpointAgent.zip.sha256 ($zip_sha_file) does not match EndpointAgent.zip ($zip_sha)"
+
+scripts/release/verify-endpoint-agent-zip.sh \
+  --zip "$tmp/EndpointAgent.zip" \
+  --release-dir "$tmp"
 
 manifest_tag="$(jq -er '.release_tag' "$tmp/release-manifest.json")"
 [ "$manifest_tag" = "$tag" ] || fail "release-manifest release_tag $manifest_tag != $tag"

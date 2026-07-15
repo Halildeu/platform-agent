@@ -32,6 +32,11 @@ dist/windows/EndpointAgent/README.md
 dist/windows/EndpointAgent/SHA256SUMS
 ```
 
+Trusted remote-bridge release paketinde bunlara ek olarak
+`remote-bridge-attestation-evidence.b64` ve
+`remote-bridge-attestation-evidence-summary.json` bulunur. Yerel gelistirme
+paketi release signing kaniti uretmedigi icin bu iki dosyayi tasimaz.
+
 ### Artifact host + versiyon (Faz 22.5 M1)
 
 Tek-komut bootstrap artifact'leri `https://testai.acik.com/artifacts/endpoint-agent/current/`
@@ -96,6 +101,13 @@ powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\endpoint-agent-bootstrap
 `bootstrap-package.ps1` token'i gizli prompt ile alir; token komut satirina
 yazilmaz. Script ZIP hash'ini ve ZIP icindeki `SHA256SUMS` dosyasini dogrular,
 sonra `install.ps1` akisini calistirir.
+
+Imzali release paketleri remote-bridge SLSA provenance kanitini ZIP icinde
+tasir. `-RemoteBridgeEnabled` kullanildiginda bootstrap bu dosyalarin
+`SHA256SUMS` kapsaminda olmasini ve kanitin agent limitlerine uygun, tek satir
+standard base64 olmasini zorunlu tutar; kanit eksik veya bozuksa kurulum
+fail-closed durur. Kanit signing private key icermez ve bootstrap tarafindan
+ekrana yazilmaz.
 
 HMAC fallback kurulumu, onceki bir `-AutoEnroll` denemesinden kalmis
 `HKLM:\SOFTWARE\EndpointAgent` `Mode` / `ApiUrl` / `EnrollmentJitterSeconds`
