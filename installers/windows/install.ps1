@@ -423,6 +423,8 @@ namespace EndpointAgentInstaller
         private const uint SC_MANAGER_CONNECT = 0x0001;
         private const uint SERVICE_QUERY_CONFIG = 0x0001;
         private const uint SERVICE_CHANGE_CONFIG = 0x0002;
+        private const uint SERVICE_START = 0x0010;
+        private const int SC_ACTION_RESTART = 1;
         private const int SERVICE_CONFIG_FAILURE_ACTIONS = 2;
         private const int SERVICE_CONFIG_FAILURE_ACTIONS_FLAG = 4;
         private const int ERROR_INSUFFICIENT_BUFFER = 122;
@@ -580,12 +582,23 @@ namespace EndpointAgentInstaller
             IntPtr flagBuffer = IntPtr.Zero;
             try
             {
+                ServiceFailureAction[] managedActions = policy.Actions ?? new ServiceFailureAction[0];
+                uint serviceAccess = SERVICE_CHANGE_CONFIG;
+                // ChangeServiceConfig2 requires SERVICE_START when any restored
+                // failure action asks SCM to restart the service.
+                for (int i = 0; i < managedActions.Length; i++)
+                {
+                    if (managedActions[i].Type == SC_ACTION_RESTART)
+                    {
+                        serviceAccess |= SERVICE_START;
+                        break;
+                    }
+                }
                 scm = OpenScm();
-                service = OpenServiceHandle(scm, serviceName, SERVICE_CHANGE_CONFIG);
+                service = OpenServiceHandle(scm, serviceName, serviceAccess);
                 rebootMessage = Marshal.StringToHGlobalUni(policy.RebootMessage ?? "");
                 command = Marshal.StringToHGlobalUni(policy.Command ?? "");
 
-                ServiceFailureAction[] managedActions = policy.Actions ?? new ServiceFailureAction[0];
                 int actionSize = Marshal.SizeOf(typeof(SC_ACTION));
                 if (managedActions.Length > 0)
                 {
