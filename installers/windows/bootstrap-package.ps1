@@ -104,12 +104,16 @@ function Resolve-BootstrapApiUrls {
 }
 
 function Assert-PackageSha256Sums {
-    param([Parameter(Mandatory)] [string]$Directory)
+    param(
+        [Parameter(Mandatory)] [string]$Directory,
+        [string[]]$RequiredFiles = @()
+    )
     $sumPath = Join-Path $Directory "SHA256SUMS"
     if (-not (Test-Path -LiteralPath $sumPath)) {
         throw "SHA256SUMS missing from package: $sumPath"
     }
 
+    $listedFiles = @{}
     foreach ($line in Get-Content -LiteralPath $sumPath) {
         $trimmed = $line.Trim()
         if ([string]::IsNullOrWhiteSpace($trimmed)) {
@@ -127,8 +131,52 @@ function Assert-PackageSha256Sums {
         if ($name.Contains("..") -or [System.IO.Path]::IsPathRooted($name)) {
             throw "unsafe SHA256SUMS path: $name"
         }
+        if ($listedFiles.ContainsKey($name)) {
+            throw "duplicate SHA256SUMS entry: $name"
+        }
+        $listedFiles[$name] = $true
         Assert-Sha256 -Path (Join-Path $Directory $name) -Expected $expected
     }
+
+    foreach ($requiredFile in $RequiredFiles) {
+        if (-not $listedFiles.ContainsKey($requiredFile)) {
+            throw "required package file is not covered by SHA256SUMS: $requiredFile"
+        }
+    }
+}
+
+function Get-RemoteBridgeAttestationEvidence {
+    param(
+        [Parameter(Mandatory)] [string]$Directory,
+        [int]$MaxBase64Length = (16 * 1024)
+    )
+
+    $evidencePath = Join-Path $Directory "remote-bridge-attestation-evidence.b64"
+    if (-not (Test-Path -LiteralPath $evidencePath)) {
+        throw "signed remote-bridge attestation evidence missing from package: $evidencePath"
+    }
+
+    $evidence = (Get-Content -LiteralPath $evidencePath -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($evidence)) {
+        throw "signed remote-bridge attestation evidence is blank"
+    }
+    if ($evidence.Length -gt $MaxBase64Length) {
+        throw "signed remote-bridge attestation evidence exceeds $MaxBase64Length characters"
+    }
+    if ([regex]::IsMatch($evidence, "\s")) {
+        throw "signed remote-bridge attestation evidence must be single-line standard base64"
+    }
+
+    try {
+        $decoded = [Convert]::FromBase64String($evidence)
+    } catch {
+        throw "signed remote-bridge attestation evidence must be valid standard base64"
+    }
+    if ($decoded.Length -eq 0) {
+        throw "signed remote-bridge attestation evidence decodes to an empty payload"
+    }
+
+    return $evidence
 }
 
 function Get-EnrollmentToken {
@@ -171,7 +219,18 @@ Write-Step "extracting package"
 Expand-Archive -LiteralPath $ZipPath -DestinationPath $WorkDir -Force
 
 Write-Step "verifying package file hashes"
-Assert-PackageSha256Sums -Directory $WorkDir
+$requiredPackageFiles = @(
+    "endpoint-agent.exe",
+    "bootstrap-package.ps1",
+    "install.ps1",
+    "uninstall.ps1",
+    "README.md"
+)
+if ($RemoteBridgeEnabled) {
+    $requiredPackageFiles += "remote-bridge-attestation-evidence.b64"
+    $requiredPackageFiles += "remote-bridge-attestation-evidence-summary.json"
+}
+Assert-PackageSha256Sums -Directory $WorkDir -RequiredFiles $requiredPackageFiles
 
 $installScript = Join-Path $WorkDir "install.ps1"
 if (-not (Test-Path -LiteralPath $installScript)) {
@@ -188,6 +247,7 @@ if ($RemoteBridgeEnabled) {
     if ([string]::IsNullOrWhiteSpace($RemoteBridgeBrokerAddr)) {
         throw "-RemoteBridgeEnabled requires -RemoteBridgeBrokerAddr."
     }
+    $remoteBridgeAttestationEvidence = Get-RemoteBridgeAttestationEvidence -Directory $WorkDir
 } else {
     if (-not [string]::IsNullOrWhiteSpace($RemoteBridgeBrokerAddr)) {
         throw "-RemoteBridgeBrokerAddr requires -RemoteBridgeEnabled."
@@ -224,6 +284,7 @@ if ($ResetCredentialStore) {
 if ($RemoteBridgeEnabled) {
     $installArgs["RemoteBridgeEnabled"] = $true
     $installArgs["RemoteBridgeBrokerAddr"] = $RemoteBridgeBrokerAddr
+    $installArgs["RemoteBridgeAttestationEvidenceB64"] = $remoteBridgeAttestationEvidence
     if ($RemoteBridgeInsecurePlaintext) {
         $installArgs["RemoteBridgeInsecurePlaintext"] = $true
     }
@@ -237,6 +298,8 @@ try {
         Remove-Variable token -ErrorAction SilentlyContinue
     }
     Remove-Variable EnrollmentToken -ErrorAction SilentlyContinue
+    Remove-Variable remoteBridgeAttestationEvidence -ErrorAction SilentlyContinue
+    Remove-Variable installArgs -ErrorAction SilentlyContinue
 }
 
 Write-Step "service state"

@@ -425,6 +425,7 @@ jobs:
         shell: bash
         env:
           PREBUILT_EXE: dist/endpoint-agent.exe
+          PACKAGE_REQUIRE_REMOTE_BRIDGE_ATTESTATION: "true"
           OWNER_RAW: ${{ github.repository_owner }}
         run: |
           set -euo pipefail

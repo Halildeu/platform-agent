@@ -33,6 +33,9 @@ function Import-BootstrapHelper {
 
 Import-BootstrapHelper -Name "Get-PackageUrlHost"
 Import-BootstrapHelper -Name "Resolve-BootstrapApiUrls"
+Import-BootstrapHelper -Name "Assert-Sha256"
+Import-BootstrapHelper -Name "Assert-PackageSha256Sums"
+Import-BootstrapHelper -Name "Get-RemoteBridgeAttestationEvidence"
 
 Describe "Resolve-BootstrapApiUrls" {
     It "derives test API and mTLS API from a testai package URL" {
@@ -88,5 +91,95 @@ Describe "Resolve-BootstrapApiUrls" {
     It "rejects package URLs without an absolute host" {
         { Get-PackageUrlHost -Url "EndpointAgent.zip" } |
             Should Throw "-PackageUrl must be an absolute URL with a host."
+    }
+}
+
+Describe "Get-RemoteBridgeAttestationEvidence" {
+    BeforeEach {
+        $testDirectory = Join-Path $TestDrive "package"
+        Remove-Item -LiteralPath $testDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $testDirectory | Out-Null
+        $evidencePath = Join-Path $testDirectory "remote-bridge-attestation-evidence.b64"
+    }
+
+    It "returns trimmed valid standard base64 without logging the payload" {
+        Set-Content -LiteralPath $evidencePath -Value "c2lnbmVkLXByb3ZlbmFuY2U=" -Encoding ascii
+
+        Get-RemoteBridgeAttestationEvidence -Directory $testDirectory |
+            Should Be "c2lnbmVkLXByb3ZlbmFuY2U="
+    }
+
+    It "rejects a missing evidence file" {
+        $thrownMessage = ""
+        try {
+            Get-RemoteBridgeAttestationEvidence -Directory $testDirectory
+        } catch {
+            $thrownMessage = $_.Exception.Message
+        }
+        $thrownMessage | Should Match "^signed remote-bridge attestation evidence missing from package:"
+    }
+
+    It "rejects blank evidence" {
+        Set-Content -LiteralPath $evidencePath -Value "   " -Encoding ascii
+
+        { Get-RemoteBridgeAttestationEvidence -Directory $testDirectory } |
+            Should Throw "signed remote-bridge attestation evidence is blank"
+    }
+
+    It "rejects malformed standard base64" {
+        Set-Content -LiteralPath $evidencePath -Value "not/base64?" -Encoding ascii
+
+        { Get-RemoteBridgeAttestationEvidence -Directory $testDirectory } |
+            Should Throw "signed remote-bridge attestation evidence must be valid standard base64"
+    }
+
+    It "rejects embedded whitespace" {
+        Set-Content -LiteralPath $evidencePath -Value "c2ln bmVk" -Encoding ascii
+
+        { Get-RemoteBridgeAttestationEvidence -Directory $testDirectory } |
+            Should Throw "signed remote-bridge attestation evidence must be single-line standard base64"
+    }
+
+    It "rejects evidence above the configured agent limit" {
+        Set-Content -LiteralPath $evidencePath -Value ("A" * 17) -Encoding ascii
+
+        { Get-RemoteBridgeAttestationEvidence -Directory $testDirectory -MaxBase64Length 16 } |
+            Should Throw "signed remote-bridge attestation evidence exceeds 16 characters"
+    }
+}
+
+Describe "Assert-PackageSha256Sums required-file contract" {
+    BeforeEach {
+        $testDirectory = Join-Path $TestDrive "hash-package"
+        Remove-Item -LiteralPath $testDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $testDirectory | Out-Null
+        $payloadPath = Join-Path $testDirectory "payload.bin"
+        Set-Content -LiteralPath $payloadPath -Value "payload" -Encoding ascii
+        $payloadHash = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $sumPath = Join-Path $testDirectory "SHA256SUMS"
+    }
+
+    It "accepts a required file covered by a valid hash" {
+        Set-Content -LiteralPath $sumPath -Value "$payloadHash  payload.bin" -Encoding ascii
+
+        { Assert-PackageSha256Sums -Directory $testDirectory -RequiredFiles @("payload.bin") } |
+            Should Not Throw
+    }
+
+    It "rejects a required file omitted from SHA256SUMS" {
+        Set-Content -LiteralPath $sumPath -Value "$payloadHash  payload.bin" -Encoding ascii
+
+        { Assert-PackageSha256Sums -Directory $testDirectory -RequiredFiles @("attestation.b64") } |
+            Should Throw "required package file is not covered by SHA256SUMS: attestation.b64"
+    }
+
+    It "rejects duplicate SHA256SUMS entries" {
+        @(
+            "$payloadHash  payload.bin",
+            "$payloadHash  payload.bin"
+        ) | Set-Content -LiteralPath $sumPath -Encoding ascii
+
+        { Assert-PackageSha256Sums -Directory $testDirectory } |
+            Should Throw "duplicate SHA256SUMS entry: payload.bin"
     }
 }
