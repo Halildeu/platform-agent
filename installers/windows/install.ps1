@@ -2203,7 +2203,12 @@ try {
 
     Write-Step "copying endpoint-agent.exe"
     Copy-Item -LiteralPath $sourceBinary -Destination $targetBinary -Force
-    Unblock-File -LiteralPath $targetBinary -ErrorAction SilentlyContinue
+    # Preserve Mark-of-the-Web when present. URL releases already pass SHA256
+    # and Authenticode verification; local/MSI payloads retain their existing
+    # trust boundary. MOTW is provenance metadata, not integrity validation,
+    # and SCM execution does not require its removal. Avoiding the ADS mutation
+    # also prevents endpoint-security filesystem filters from blocking install
+    # indefinitely (live Denetim PC evidence, 2026-07-15).
     $copiedBinary = $true
 
     # AG-026C / ADR-0029: install agent config to the SERVICE-SPECIFIC env regkey

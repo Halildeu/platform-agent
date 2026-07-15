@@ -16,6 +16,7 @@ $parseTargets = @(
     "installers\windows\bootstrap-package.Tests.ps1",
     "installers\windows\install.Tests.ps1"
 )
+$parsedAsts = @{}
 
 foreach ($relativePath in $parseTargets) {
     $path = Join-Path $repoRoot $relativePath
@@ -25,11 +26,11 @@ foreach ($relativePath in $parseTargets) {
 
     $tokens = $null
     $errors = $null
-    [System.Management.Automation.Language.Parser]::ParseFile(
+    $parsedAsts[$relativePath] = [System.Management.Automation.Language.Parser]::ParseFile(
         $path,
         [ref]$tokens,
         [ref]$errors
-    ) | Out-Null
+    )
 
     if ($errors -and $errors.Count -gt 0) {
         Write-Host "Parser errors in ${relativePath}:"
@@ -41,6 +42,21 @@ foreach ($relativePath in $parseTargets) {
 
     Write-Host "Parse OK: $relativePath"
 }
+
+$installAst = $parsedAsts["installers\windows\install.ps1"]
+# This static guard covers literal command and string forms. Dynamic command
+# construction is not an accepted installer pattern and remains review-gated.
+$unblockReferences = @($installAst.FindAll({
+    param($node)
+    ($node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq "Unblock-File") -or
+    ($node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        $node.Value -eq "Unblock-File")
+}, $true))
+if ($unblockReferences.Count -ne 0) {
+    throw "install.ps1 must preserve Mark-of-the-Web; found $($unblockReferences.Count) Unblock-File reference(s)."
+}
+Write-Host "Installer Mark-of-the-Web preservation guard PASS"
 
 $pester = Get-Module -ListAvailable Pester |
     Where-Object { $_.Version.Major -eq 3 -or $_.Version.Major -eq 4 } |
