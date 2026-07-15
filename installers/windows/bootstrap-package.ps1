@@ -22,6 +22,27 @@ param(
     [switch]$RemoteBridgeEnabled,
     [string]$RemoteBridgeBrokerAddr = "",
     [switch]$RemoteBridgeInsecurePlaintext,
+    [string]$RemoteBridgeMTLSCertSubjectSuffix = "",
+    [string]$RemoteBridgeMTLSCertSANURIPrefix = "",
+    [switch]$RemoteBridgeOperationsEnabled,
+    [string]$RemoteBridgePermitBrokerPublicKeyB64 = "",
+    [string]$RemoteBridgePermitKeyID = "",
+    [switch]$RemoteBridgePilotAutoConsent,
+    [switch]$RemoteBridgeDeviceKeySessionEnabled,
+    [switch]$RemoteBridgeViewOnlyEnabled,
+    [switch]$RemoteBridgeViewOnlyAttendedConsent,
+    [string]$RemoteBridgeViewOnlyMaskRectBPS = "",
+    [string]$RemoteBridgeTLSServerName = "",
+    [switch]$SelfUpdateEnabled,
+    [string]$SelfUpdateAllowedHosts = "",
+    [string]$SelfUpdateSignerThumbprints = "",
+    [string]$SelfUpdateHardMaxBytes = "52428800",
+    [ValidateRange(0, 100)]
+    [int]$SelfUpdateMaxRedirects = 5,
+    [switch]$SelfUpdateAutoActivate,
+    [string]$SelfUpdateActivationTimeout = "2m",
+    [string]$SelfUpdateServiceName = "",
+    [string]$SelfUpdateCommandTimeout = "30m",
     [string]$WorkDir = (Join-Path $env:TEMP "EndpointEnes"),
     [string]$ZipPath = (Join-Path $env:TEMP "EndpointAgent.zip"),
     [string]$EnrollmentToken = "",
@@ -255,6 +276,19 @@ if ($RemoteBridgeEnabled) {
     if ($RemoteBridgeInsecurePlaintext) {
         throw "-RemoteBridgeInsecurePlaintext requires -RemoteBridgeEnabled."
     }
+    if (-not [string]::IsNullOrWhiteSpace($RemoteBridgeMTLSCertSubjectSuffix) -or
+        -not [string]::IsNullOrWhiteSpace($RemoteBridgeMTLSCertSANURIPrefix) -or
+        $RemoteBridgeOperationsEnabled -or
+        -not [string]::IsNullOrWhiteSpace($RemoteBridgePermitBrokerPublicKeyB64) -or
+        -not [string]::IsNullOrWhiteSpace($RemoteBridgePermitKeyID) -or
+        $RemoteBridgePilotAutoConsent -or
+        $RemoteBridgeDeviceKeySessionEnabled -or
+        $RemoteBridgeViewOnlyEnabled -or
+        $RemoteBridgeViewOnlyAttendedConsent -or
+        -not [string]::IsNullOrWhiteSpace($RemoteBridgeViewOnlyMaskRectBPS) -or
+        -not [string]::IsNullOrWhiteSpace($RemoteBridgeTLSServerName)) {
+        throw "remote-bridge policy parameters require -RemoteBridgeEnabled."
+    }
 }
 
 $installArgs = @{}
@@ -285,9 +319,43 @@ if ($RemoteBridgeEnabled) {
     $installArgs["RemoteBridgeEnabled"] = $true
     $installArgs["RemoteBridgeBrokerAddr"] = $RemoteBridgeBrokerAddr
     $installArgs["RemoteBridgeAttestationEvidenceB64"] = $remoteBridgeAttestationEvidence
+    $installArgs["RemoteBridgeMTLSCertSubjectSuffix"] = $RemoteBridgeMTLSCertSubjectSuffix
+    $installArgs["RemoteBridgeMTLSCertSANURIPrefix"] = $RemoteBridgeMTLSCertSANURIPrefix
+    $installArgs["RemoteBridgePermitBrokerPublicKeyB64"] = $RemoteBridgePermitBrokerPublicKeyB64
+    $installArgs["RemoteBridgePermitKeyID"] = $RemoteBridgePermitKeyID
+    $installArgs["RemoteBridgeTLSServerName"] = $RemoteBridgeTLSServerName
     if ($RemoteBridgeInsecurePlaintext) {
         $installArgs["RemoteBridgeInsecurePlaintext"] = $true
     }
+    if ($RemoteBridgeOperationsEnabled) {
+        $installArgs["RemoteBridgeOperationsEnabled"] = $true
+    }
+    if ($RemoteBridgePilotAutoConsent) {
+        $installArgs["RemoteBridgePilotAutoConsent"] = $true
+    }
+    if ($RemoteBridgeDeviceKeySessionEnabled) {
+        $installArgs["RemoteBridgeDeviceKeySessionEnabled"] = $true
+    }
+    if ($RemoteBridgeViewOnlyEnabled) {
+        $installArgs["RemoteBridgeViewOnlyEnabled"] = $true
+    }
+    if ($RemoteBridgeViewOnlyAttendedConsent) {
+        $installArgs["RemoteBridgeViewOnlyAttendedConsent"] = $true
+    }
+    $installArgs["RemoteBridgeViewOnlyMaskRectBPS"] = $RemoteBridgeViewOnlyMaskRectBPS
+}
+if ($SelfUpdateEnabled) {
+    $installArgs["SelfUpdateEnabled"] = $true
+}
+$installArgs["SelfUpdateAllowedHosts"] = $SelfUpdateAllowedHosts
+$installArgs["SelfUpdateSignerThumbprints"] = $SelfUpdateSignerThumbprints
+$installArgs["SelfUpdateHardMaxBytes"] = $SelfUpdateHardMaxBytes
+$installArgs["SelfUpdateMaxRedirects"] = $SelfUpdateMaxRedirects
+$installArgs["SelfUpdateActivationTimeout"] = $SelfUpdateActivationTimeout
+$installArgs["SelfUpdateServiceName"] = $SelfUpdateServiceName
+$installArgs["SelfUpdateCommandTimeout"] = $SelfUpdateCommandTimeout
+if ($SelfUpdateAutoActivate) {
+    $installArgs["SelfUpdateAutoActivate"] = $true
 }
 
 try {
