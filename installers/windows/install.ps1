@@ -613,7 +613,12 @@ namespace EndpointAgentInstaller
                 Marshal.StructureToPtr(native, policyBuffer, false);
                 if (!ChangeServiceConfig2(service, SERVICE_CONFIG_FAILURE_ACTIONS, policyBuffer))
                 {
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "ChangeServiceConfig2 failure actions failed");
+                    int error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(
+                        error,
+                        "ChangeServiceConfig2 failure actions failed (Win32 " + error +
+                        ", resetPeriod=" + policy.ResetPeriod +
+                        ", actionCount=" + managedActions.Length + ")");
                 }
 
                 SERVICE_FAILURE_ACTIONS_FLAG flag = new SERVICE_FAILURE_ACTIONS_FLAG
@@ -624,7 +629,10 @@ namespace EndpointAgentInstaller
                 Marshal.StructureToPtr(flag, flagBuffer, false);
                 if (!ChangeServiceConfig2(service, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, flagBuffer))
                 {
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "ChangeServiceConfig2 failure-actions flag failed");
+                    int error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(
+                        error,
+                        "ChangeServiceConfig2 failure-actions flag failed (Win32 " + error + ")");
                 }
             }
             finally
