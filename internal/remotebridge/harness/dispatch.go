@@ -64,7 +64,11 @@ func screenViewFailureCode(err error) string {
 		"screen-view-helper-exited-before-frame",
 		"screen-view-helper-exited",
 		"screen-view-first-frame-timeout",
-		"screen-view-first-frame-protocol-failed":
+		"screen-view-first-frame-protocol-failed",
+		"screen-view-authorize-failed",
+		"screen-view-data-send-failed",
+		"screen-view-frame-too-large",
+		"screen-view-data-rejected":
 		return code
 	default:
 		return "screen-view-failed"
@@ -313,12 +317,20 @@ func (h *Harness) dispatchScreenView(ctx context.Context, conn *grpc.ClientConn,
 	// (same rationale as dispatchOperation); bound the drain against a broker that never closes.
 	_ = dataStream.CloseSend()
 	drainTimer := time.AfterFunc(dataStreamDrainGrace, cancel)
+	var brokerDataError string
 	for {
-		if _, rerr := dataStream.Recv(); rerr != nil {
+		env, rerr := dataStream.Recv()
+		if rerr != nil {
 			break
+		}
+		if env != nil {
+			if frame := env.GetError(); frame != nil && brokerDataError == "" {
+				brokerDataError = frame.GetCode()
+			}
 		}
 	}
 	drainTimer.Stop()
+	herr = mergeScreenViewDataError(herr, brokerDataError)
 	if herr != nil {
 		// bounded, non-revealing CONTROL code. NOTE: on an authorize/capture-start failure the dispatcher
 		// returns WITHOUT a terminal EndStream (no gate opened, no frame); the DATA stream is closed (CloseSend
@@ -337,4 +349,31 @@ func (h *Harness) dispatchScreenView(ctx context.Context, conn *grpc.ClientConn,
 			_ = sender.sendSessionError(permit.SessionID, code, false)
 		}
 	}
+}
+
+type boundedScreenViewDataError string
+
+func (e boundedScreenViewDataError) Error() string                 { return string(e) }
+func (e boundedScreenViewDataError) ScreenViewFailureCode() string { return string(e) }
+
+func brokerScreenViewDataError(code string) error {
+	if code == "data-frame-too-large" {
+		return boundedScreenViewDataError("screen-view-frame-too-large")
+	}
+	return boundedScreenViewDataError("screen-view-data-rejected")
+}
+
+// mergeScreenViewDataError preserves security-critical local termination (for
+// example LOCAL_ABORT / indicator loss) and permit/auth failures. A broker error
+// only becomes authoritative when the dispatcher otherwise succeeded or when
+// its sole failure was the DATA send closing underneath it. Broker DATA defects
+// are intentionally reported non-retryable by the CONTROL path.
+func mergeScreenViewDataError(handlerErr error, brokerCode string) error {
+	if brokerCode == "" {
+		return handlerErr
+	}
+	if handlerErr == nil || screenViewFailureCode(handlerErr) == "screen-view-data-send-failed" {
+		return brokerScreenViewDataError(brokerCode)
+	}
+	return handlerErr
 }

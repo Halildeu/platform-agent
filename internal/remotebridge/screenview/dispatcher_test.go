@@ -78,8 +78,11 @@ func TestDispatchDeniedAuthorizationFailsClosed(t *testing.T) {
 	}
 	sink := &frameSink{}
 	herr := d.Handle(context.Background(), viewOnlyPermit(), "op-1", sink.send, 1)
-	if herr == nil || !strings.Contains(herr.Error(), "view-only-authorize-denied:seq-replay") {
-		t.Fatalf("denied authorize must return view-only-authorize-denied:seq-replay, got %v", herr)
+	if herr == nil || herr.Error() != failureAuthorize {
+		t.Fatalf("denied authorize must return bounded %q, got %v", failureAuthorize, herr)
+	}
+	if strings.Contains(herr.Error(), "seq-replay") {
+		t.Fatal("authorization reason leaked through the bounded error")
 	}
 	if factoryCalled {
 		t.Error("a denied authorization must NOT start capture (no gate, no producer)")
@@ -202,8 +205,8 @@ func TestDispatchSendErrorAbortsAndReturnsError(t *testing.T) {
 	d, _ := New(&fakeAuthorizer{allow: true}, mockFactory(5, []byte("PNG")), Options{DrainInterval: time.Millisecond})
 	sink := &frameSink{err: errors.New("broker stream broken")}
 	herr := d.Handle(context.Background(), viewOnlyPermit(), "op-1", sink.send, 1)
-	if herr == nil || !strings.Contains(herr.Error(), "broker stream broken") {
-		t.Fatalf("a broken DATA send must surface the error, got %v", herr)
+	if herr == nil || herr.Error() != failureDataSend {
+		t.Fatalf("a broken DATA send must return bounded %q, got %v", failureDataSend, herr)
 	}
 }
 

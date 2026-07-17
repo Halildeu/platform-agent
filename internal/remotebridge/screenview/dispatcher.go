@@ -103,7 +103,8 @@ func New(authorizer ViewOnlyAuthorizer, newProducer ProducerFactory, opts Option
 func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermit, streamID string,
 	send func(*pb.DataFrame) error, nowEpochMillis int64) error {
 	if decision := d.authorizer.AuthorizeViewOnly(permit, nowEpochMillis); !decision.Allowed {
-		return fmt.Errorf("view-only-authorize-denied:%s", decision.Reason)
+		return newFailureError(failureAuthorize,
+			fmt.Errorf("view-only authorize denied: %s", decision.Reason))
 	}
 	remainingMillis := permit.ExpiresAtEpochMillis - d.clock()
 	if remainingMillis <= 0 {
@@ -147,7 +148,7 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 				ContentType: d.contentType,
 				Payload:     payload,
 			}); serr != nil {
-				return serr
+				return newFailureError(failureDataSend, serr)
 			}
 			seq++
 		}

@@ -57,6 +57,7 @@ func (d *fakeDispatcher) snapshot() (bool, string, string, string) {
 type dispatchBroker struct {
 	pb.UnimplementedRemoteBridgeServer
 	connect  func(stream pb.RemoteBridge_ConnectServer) error
+	data     func(stream pb.RemoteBridge_DataServer) error
 	mu       sync.Mutex
 	dataEnvs []*pb.Envelope
 }
@@ -66,6 +67,9 @@ func (b *dispatchBroker) Connect(stream pb.RemoteBridge_ConnectServer) error {
 }
 
 func (b *dispatchBroker) Data(stream pb.RemoteBridge_DataServer) error {
+	if b.data != nil {
+		return b.data(stream)
+	}
 	for {
 		env, err := stream.Recv()
 		if err != nil {

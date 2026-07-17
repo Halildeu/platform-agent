@@ -149,8 +149,13 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding string,
 		processors = append(processors, maskPolicy.apply)
 	}
 	processors = append(processors, indicator)
+	// The broker's DATA stream rejects payloads above 256 KiB. Encode the
+	// largest lossless frame that fits the conservative screen-frame budget;
+	// processors live inside the encoder so DLP + the active indicator are
+	// reapplied at the final resolution after any required downscale.
 	producer := dataplane.NewWindowsPrimaryScreenFrameProducer(
-		dataplane.NewPNGEncoder(), captureInterval, captureMaxErr, processors...)
+		dataplane.NewBoundedPNGEncoder(dataplane.ScreenFramePayloadBudget, processors...),
+		captureInterval, captureMaxErr)
 	defer producer.Close()
 
 	// Banner LIVENESS (fail-closed): the banner is verified once above, but it could be
