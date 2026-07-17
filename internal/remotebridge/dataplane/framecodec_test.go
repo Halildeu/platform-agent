@@ -2,6 +2,8 @@ package dataplane
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"image/png"
 	"testing"
 	"time"
@@ -73,6 +75,101 @@ func TestPNGEncoderFailClosedOnBadInput(t *testing.T) {
 		if _, err := enc.Encode(c); err == nil {
 			t.Errorf("case %d: expected error, got nil", i)
 		}
+	}
+}
+
+func TestBoundedPNGEncoderFitsHighEntropy1080pAndReappliesControls(t *testing.T) {
+	frame := RawFrame{
+		Width:  1920,
+		Height: 1080,
+		Stride: 1920 * 4,
+		Pixels: make([]byte, 1920*1080*4),
+	}
+	// Deterministic high-entropy pixels model the worst case for lossless PNG.
+	var state uint32 = 0x9e3779b9
+	for i := range frame.Pixels {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		frame.Pixels[i] = byte(state)
+	}
+	original := append([]byte(nil), frame.Pixels...)
+
+	maskCenter := func(fr *RawFrame) {
+		MaskRect(fr, fr.Width/4, fr.Height/4, fr.Width/2, fr.Height/2, 0, 0, 0, 0xFF)
+	}
+	indicator := func(fr *RawFrame) {
+		ApplyActiveIndicator(fr, 28, 0, 0, 0xFF, 0xFF)
+	}
+	payload, err := NewBoundedPNGEncoder(ScreenFramePayloadBudget, maskCenter, indicator).Encode(frame)
+	if err != nil {
+		t.Fatalf("bounded encode: %v", err)
+	}
+	if len(payload) > ScreenFramePayloadBudget {
+		t.Fatalf("payload bytes = %d, budget = %d", len(payload), ScreenFramePayloadBudget)
+	}
+	if !bytes.Equal(frame.Pixels, original) {
+		t.Fatal("bounded encoder mutated the captured source frame")
+	}
+	img, err := png.Decode(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("decode bounded PNG: %v", err)
+	}
+	bounds := img.Bounds()
+	if bounds.Dx() >= frame.Width || bounds.Dy() >= frame.Height {
+		t.Fatalf("high-entropy frame was not downscaled: got %dx%d", bounds.Dx(), bounds.Dy())
+	}
+	r, g, b, a := img.At(bounds.Dx()/2, bounds.Dy()/2).RGBA()
+	if r != 0 || g != 0 || b != 0 || a != 0xFFFF {
+		t.Fatalf("DLP center pixel = rgba(%04x,%04x,%04x,%04x), want opaque black", r, g, b, a)
+	}
+	r, g, b, a = img.At(bounds.Dx()/2, 0).RGBA()
+	if r != 0xFFFF || g != 0 || b != 0 || a != 0xFFFF {
+		t.Fatalf("indicator pixel = rgba(%04x,%04x,%04x,%04x), want opaque red", r, g, b, a)
+	}
+}
+
+func TestBoundedPNGEncoderRejectsInvalidBudget(t *testing.T) {
+	_, err := NewBoundedPNGEncoder(0).Encode(bgraFrame(1, 1, 0))
+	if !errors.Is(err, ErrFramePayloadBudget) {
+		t.Fatalf("zero budget err = %v, want ErrFramePayloadBudget", err)
+	}
+}
+
+func TestBoundedPNGEncoderKeepsDimensionsWhenPayloadFits(t *testing.T) {
+	frame := bgraFrame(100, 75, 0)
+	payload, err := NewBoundedPNGEncoder(ScreenFramePayloadBudget).Encode(frame)
+	if err != nil {
+		t.Fatalf("bounded encode: %v", err)
+	}
+	img, err := png.Decode(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := img.Bounds(); got.Dx() != frame.Width || got.Dy() != frame.Height {
+		t.Fatalf("decoded dims = %dx%d, want unchanged %dx%d", got.Dx(), got.Dy(), frame.Width, frame.Height)
+	}
+}
+
+func TestHalfScaleRawFrameOddAndSingleDimensions(t *testing.T) {
+	for _, tc := range []struct {
+		width, height int
+		wantW, wantH  int
+	}{
+		{3, 1, 2, 1},
+		{1, 5, 1, 3},
+		{7, 3, 4, 2},
+		{1, 1, 1, 1},
+	} {
+		t.Run(fmt.Sprintf("%dx%d", tc.width, tc.height), func(t *testing.T) {
+			got := halfScaleRawFrame(bgraFrame(tc.width, tc.height, 4))
+			if got.Width != tc.wantW || got.Height != tc.wantH {
+				t.Fatalf("half-scale dims = %dx%d, want %dx%d", got.Width, got.Height, tc.wantW, tc.wantH)
+			}
+			if _, err := NewPNGEncoder().Encode(got); err != nil {
+				t.Fatalf("half-scaled frame must remain encodable: %v", err)
+			}
+		})
 	}
 }
 

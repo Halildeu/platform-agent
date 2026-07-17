@@ -161,6 +161,10 @@ func TestScreenViewFailureCodeAllowlist(t *testing.T) {
 		"screen-view-helper-handshake-failed",
 		"screen-view-banner-not-visible",
 		"screen-view-capture-start-failed",
+		"screen-view-authorize-failed",
+		"screen-view-data-send-failed",
+		"screen-view-frame-too-large",
+		"screen-view-data-rejected",
 	} {
 		if got := screenViewFailureCode(fakeScreenFailureCode{code: code}); got != code {
 			t.Fatalf("allowlisted code = %q, want %q", got, code)
@@ -171,6 +175,69 @@ func TestScreenViewFailureCodeAllowlist(t *testing.T) {
 	}
 	if got := screenViewFailureCode(errors.New("raw detail")); got != "screen-view-failed" {
 		t.Fatalf("uncoded error = %q, want generic fail-closed code", got)
+	}
+}
+
+func TestScreenViewBrokerFrameTooLargeEmitsTypedControlError(t *testing.T) {
+	received := make(chan *pb.ErrorFrame, 1)
+	disp := &fakeScreenDispatcher{run: func(_ context.Context, send func(*pb.DataFrame) error) error {
+		return send(&pb.DataFrame{
+			StreamId: "op-1", FrameSeq: 0, ContentType: "image/png", Payload: make([]byte, 256*1024+1),
+		})
+	}}
+	broker := &dispatchBroker{
+		data: func(stream pb.RemoteBridge_DataServer) error {
+			if _, err := stream.Recv(); err != nil {
+				return err
+			}
+			return stream.Send(&pb.Envelope{
+				ChannelType: pb.ChannelType_DATA,
+				Payload: &pb.Envelope_Error{Error: &pb.ErrorFrame{
+					Code: "data-frame-too-large",
+				}},
+			})
+		},
+		connect: func(stream pb.RemoteBridge_ConnectServer) error {
+			if _, err := stream.Recv(); err != nil {
+				return err
+			}
+			_ = stream.Send(heartbeatEnv(60_000, 0))
+			_ = stream.Send(operationPermitEnv(viewOnlyPermitProto()))
+			for {
+				env, err := stream.Recv()
+				if err != nil {
+					return nil
+				}
+				if frame := env.GetError(); frame != nil {
+					received <- frame
+					return nil
+				}
+			}
+		},
+	}
+	startDispatchScreenView(t, broker, disp)
+	select {
+	case frame := <-received:
+		if frame.GetCode() != "screen-view-frame-too-large" || frame.GetRetryable() {
+			t.Fatalf("CONTROL error = code %q retryable=%v, want screen-view-frame-too-large/false",
+				frame.GetCode(), frame.GetRetryable())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("broker DATA rejection did not reach CONTROL as a typed bounded error")
+	}
+}
+
+func TestMergeScreenViewDataErrorPrecedence(t *testing.T) {
+	if got := mergeScreenViewDataError(nil, "data-frame-too-large"); screenViewFailureCode(got) != "screen-view-frame-too-large" {
+		t.Fatalf("nil handler + broker rejection = %v", got)
+	}
+	if got := mergeScreenViewDataError(fakeScreenFailureCode{code: "screen-view-data-send-failed"}, "data-frame-too-large"); screenViewFailureCode(got) != "screen-view-frame-too-large" {
+		t.Fatalf("send failure + broker rejection = %v", got)
+	}
+	for _, local := range []error{dataplane.ErrLocalAbort, dataplane.ErrIndicatorLost, dataplane.ErrPermitExpired} {
+		if got := mergeScreenViewDataError(local, "data-frame-too-large"); !errors.Is(got, local) {
+			t.Fatalf("security-critical local error %v was overwritten by broker rejection: %v", local, got)
+		}
 	}
 }
 

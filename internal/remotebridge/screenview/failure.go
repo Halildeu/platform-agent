@@ -33,6 +33,8 @@ const (
 	failureHelperExitedLive   = "screen-view-helper-exited"
 	failureFirstFrameTimeout  = "screen-view-first-frame-timeout"
 	failureFirstFrameProtocol = "screen-view-first-frame-protocol-failed"
+	failureAuthorize          = "screen-view-authorize-failed"
+	failureDataSend           = "screen-view-data-send-failed"
 )
 
 type failureError struct {

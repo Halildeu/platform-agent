@@ -119,9 +119,11 @@ func NewWindowsFrameProducer(enc Encoder, interval time.Duration, maxErr int, pr
 
 // NewWindowsPrimaryScreenFrameProducer is NewWindowsFrameProducer but captures
 // ONLY the primary monitor (capturePrimaryScreen) — used by VIEW_ONLY screen
-// observation so the captured region matches the primary-monitor banner.
-func NewWindowsPrimaryScreenFrameProducer(enc Encoder, interval time.Duration, maxErr int, processors ...func(*RawFrame)) *WindowsFrameProducer {
-	return newWindowsFrameProducer(enc, interval, maxErr, capturePrimaryScreen, processors...)
+// observation so the captured region matches the primary-monitor banner. It
+// intentionally accepts no producer processors: VIEW_ONLY's bounded encoder
+// owns post-scale DLP/indicator processing, preventing accidental double apply.
+func NewWindowsPrimaryScreenFrameProducer(enc Encoder, interval time.Duration, maxErr int) *WindowsFrameProducer {
+	return newWindowsFrameProducer(enc, interval, maxErr, capturePrimaryScreen)
 }
 
 func newWindowsFrameProducer(enc Encoder, interval time.Duration, maxErr int, captureFn func() (RawFrame, error), processors ...func(*RawFrame)) *WindowsFrameProducer {
