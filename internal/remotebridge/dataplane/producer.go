@@ -10,10 +10,13 @@ import (
 // EOF is a normal producer completion, while these events must terminate the
 // session fail-closed and leave an auditable reason.
 var (
-	ErrLocalAbort    = errors.New("dataplane: endpoint user aborted the view-only session")
-	ErrIndicatorLost = errors.New("dataplane: endpoint awareness indicator was lost")
-	ErrPermitExpired = errors.New("dataplane: view-only permit expired")
-	ErrCaptureFailed = errors.New("dataplane: screen capture failed closed")
+	ErrLocalAbort           = errors.New("dataplane: endpoint user aborted the view-only session")
+	ErrIndicatorLost        = errors.New("dataplane: endpoint awareness indicator was lost")
+	ErrPermitExpired        = errors.New("dataplane: view-only permit expired")
+	ErrCaptureFailed        = errors.New("dataplane: screen capture failed closed")
+	ErrBannerCreateFailed   = errors.New("dataplane: endpoint awareness banner creation failed")
+	ErrBannerNotVisible     = errors.New("dataplane: endpoint awareness banner was not visible")
+	ErrCaptureStartupFailed = errors.New("dataplane: first screen capture failed closed")
 )
 
 // Frame is one captured VIEW_ONLY frame as a domain value. Payload is opaque

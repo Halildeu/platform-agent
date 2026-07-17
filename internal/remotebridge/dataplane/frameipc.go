@@ -28,6 +28,9 @@ import (
 //   EOF — graceful end-of-stream.
 //   LOCAL_ABORT — the endpoint user explicitly ended the attended session.
 //   INDICATOR_LOST — the mandatory endpoint-awareness UI disappeared.
+//   BANNER_CREATE_FAILED / BANNER_NOT_VISIBLE / CAPTURE_START_FAILED / CAPTURE_LOST — fixed,
+//     payload-free helper startup diagnostics. They reveal no Win32 details,
+//     desktop content, user identity, pipe name or launch nonce.
 //
 // Disabled-by-default + LIVE owner-gated (ADR-0034 §13/D10): plumbing, not an
 // activation. The named-pipe ACL + client-PID verification + read/write
@@ -45,11 +48,15 @@ const (
 type ipcMsgType byte
 
 const (
-	msgHandshake     ipcMsgType = 1
-	msgFrame         ipcMsgType = 2
-	msgEOF           ipcMsgType = 3
-	msgLocalAbort    ipcMsgType = 4
-	msgIndicatorLost ipcMsgType = 5
+	msgHandshake          ipcMsgType = 1
+	msgFrame              ipcMsgType = 2
+	msgEOF                ipcMsgType = 3
+	msgLocalAbort         ipcMsgType = 4
+	msgIndicatorLost      ipcMsgType = 5
+	msgBannerCreateFailed ipcMsgType = 6
+	msgBannerNotVisible   ipcMsgType = 7
+	msgCaptureStartFailed ipcMsgType = 8
+	msgCaptureLost        ipcMsgType = 9
 )
 
 var (
@@ -163,6 +170,22 @@ func WriteLocalAbort(w io.Writer) error { return writeMsg(w, msgLocalAbort, nil)
 // closed or otherwise lost while the stream was active.
 func WriteIndicatorLost(w io.Writer) error { return writeMsg(w, msgIndicatorLost, nil) }
 
+// WriteBannerCreateFailed reports that the helper could not create the
+// mandatory awareness UI. It intentionally carries no raw Win32 error.
+func WriteBannerCreateFailed(w io.Writer) error { return writeMsg(w, msgBannerCreateFailed, nil) }
+
+// WriteBannerNotVisible reports that the helper created no self-verifiable
+// visible awareness window. It intentionally carries no window metadata.
+func WriteBannerNotVisible(w io.Writer) error { return writeMsg(w, msgBannerNotVisible, nil) }
+
+// WriteCaptureStartFailed reports that no first frame could be captured. It
+// intentionally carries no frame bytes, dimensions or encoder/GDI details.
+func WriteCaptureStartFailed(w io.Writer) error { return writeMsg(w, msgCaptureStartFailed, nil) }
+
+// WriteCaptureLost reports that capture failed closed after one or more frames
+// were produced. It intentionally carries no frame or OS failure detail.
+func WriteCaptureLost(w io.Writer) error { return writeMsg(w, msgCaptureLost, nil) }
+
 // ReadFrame reads the next FRAME payload. A graceful EOF message surfaces as
 // io.EOF; any other (unexpected) type is a fail-closed protocol violation.
 func ReadFrame(r io.Reader) ([]byte, error) {
@@ -185,6 +208,26 @@ func ReadFrame(r io.Reader) ([]byte, error) {
 			return nil, fmt.Errorf("%w: indicator-lost payload must be empty", ErrIPCProtocol)
 		}
 		return nil, ErrIndicatorLost
+	case msgBannerCreateFailed:
+		if len(payload) != 0 {
+			return nil, fmt.Errorf("%w: banner-create-failed payload must be empty", ErrIPCProtocol)
+		}
+		return nil, ErrBannerCreateFailed
+	case msgBannerNotVisible:
+		if len(payload) != 0 {
+			return nil, fmt.Errorf("%w: banner-not-visible payload must be empty", ErrIPCProtocol)
+		}
+		return nil, ErrBannerNotVisible
+	case msgCaptureStartFailed:
+		if len(payload) != 0 {
+			return nil, fmt.Errorf("%w: capture-start-failed payload must be empty", ErrIPCProtocol)
+		}
+		return nil, ErrCaptureStartupFailed
+	case msgCaptureLost:
+		if len(payload) != 0 {
+			return nil, fmt.Errorf("%w: capture-lost payload must be empty", ErrIPCProtocol)
+		}
+		return nil, ErrCaptureFailed
 	default:
 		return nil, fmt.Errorf("%w: expected frame, got type %d", ErrIPCProtocol, t)
 	}

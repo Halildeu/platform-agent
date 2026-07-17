@@ -126,13 +126,14 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding string,
 		if err == nil {
 			err = fmt.Errorf("banner exited before showing")
 		}
-		if signalErr := writeBannerTermination(conn, err); signalErr == nil {
+		if signalErr := writeBannerStartupSignal(conn, err); signalErr == nil {
 			return nil
 		}
 		return fmt.Errorf("screenview helper: endpoint banner failed (fail-closed): %w", err)
 	case <-time.After(bannerSettle):
 	}
 	if err := dataplane.BannerSelfVerifyBound(sessionBinding); err != nil {
+		_ = dataplane.WriteBannerNotVisible(conn)
 		return fmt.Errorf("screenview helper: endpoint banner not visible (fail-closed): %w", err)
 	}
 
@@ -170,13 +171,14 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding string,
 			return nil
 		}
 	}
+	var framesWritten int64
 	for {
 		if err := checkBannerAlive(); err != nil {
 			return writeBannerTermination(conn, err)
 		}
 		f, ok := producer.Next()
 		if !ok {
-			break // capture tripped fail-closed (consecutive errors) => end the stream
+			return writeCaptureFailureSignal(conn, framesWritten)
 		}
 		if err := checkBannerAlive(); err != nil {
 			return writeBannerTermination(conn, err) // do NOT egress this frame
@@ -187,8 +189,8 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding string,
 			// stop, not a helper failure. The deferred banner cancel + producer close fire.
 			return nil
 		}
+		framesWritten++
 	}
-	return dataplane.WriteEOF(conn)
 }
 
 // ipcFrameProducer is the service-side dataplane.FrameProducer that reads encoded
@@ -214,17 +216,23 @@ func (p *ipcFrameProducer) Next() (dataplane.Frame, bool) {
 	}
 	payload, err := dataplane.ReadFrame(p.conn)
 	if err != nil {
-		if !errors.Is(err, io.EOF) {
-			p.terminalErr = err
-		}
+		p.terminalErr = err
 		return dataplane.Frame{}, false // EOF (helper done) or read error => exhausted
 	}
 	return dataplane.Frame{Payload: payload}, true
 }
 
-// Err distinguishes a normal helper EOF from a typed fail-closed termination.
-// It is read only after the pumpDone synchronization point.
-func (p *ipcFrameProducer) Err() error { return p.terminalErr }
+// Err maps an unexpected helper EOF or a typed fail-closed termination to a
+// bounded failure. It is read only after the pumpDone synchronization point.
+func (p *ipcFrameProducer) Err() error {
+	if errors.Is(p.terminalErr, dataplane.ErrCaptureFailed) {
+		return newFailureError(failureCaptureLost, p.terminalErr)
+	}
+	if errors.Is(p.terminalErr, io.EOF) {
+		return newFailureError(failureHelperExitedLive, p.terminalErr)
+	}
+	return p.terminalErr
+}
 
 func (p *ipcFrameProducer) Close() error {
 	p.closeOnce.Do(func() {
@@ -277,23 +285,23 @@ func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
 	return func(ctx context.Context, sessionID, _ string) (dataplane.FrameProducer, error) {
 		sessionBinding, err := AcceptanceWindowBinding(sessionID)
 		if err != nil {
-			return nil, fmt.Errorf("screenview: acceptance session binding: %w", err)
+			return nil, newStartupError(failureSessionBinding, err)
 		}
 		self, err := os.Executable()
 		if err != nil {
-			return nil, fmt.Errorf("screenview: resolve helper executable: %w", err)
+			return nil, newStartupError(failureHelperResolution, err)
 		}
 		sid, err := dataplane.ActiveSessionUserSID()
 		if err != nil {
-			return nil, fmt.Errorf("screenview: active session: %w", err) // no interactive session => fail-closed
+			return nil, newStartupError(failureActiveSession, err)
 		}
 		name, err := dataplane.RandomPipeName()
 		if err != nil {
-			return nil, err
+			return nil, newStartupError(failureSecurePipe, err)
 		}
 		listener, err := dataplane.ListenSecurePipe(name, sid)
 		if err != nil {
-			return nil, err
+			return nil, newStartupError(failureSecurePipe, err)
 		}
 		listenerHandedOff := false
 		defer func() {
@@ -303,7 +311,7 @@ func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
 		}()
 		nonce, err := dataplane.NewLaunchNonce()
 		if err != nil {
-			return nil, err
+			return nil, newStartupError(failureLaunchNonce, err)
 		}
 		helperArgs := []string{
 			helperPipeFlag + name,
@@ -315,7 +323,7 @@ func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
 		}
 		helper, err := dataplane.LaunchInActiveSession(self, helperArgs...)
 		if err != nil {
-			return nil, fmt.Errorf("screenview: launch helper in active session: %w", err)
+			return nil, newStartupError(failureHelperLaunch, err)
 		}
 		helperHandedOff := false
 		defer func() {
@@ -328,7 +336,7 @@ func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
 		// aborts immediately) AND the timeout (a helper that never dials does not hang).
 		conn, err := dataplane.AcceptAndVerifyContext(ctx, listener, nonce, acceptTimeout)
 		if err != nil {
-			return nil, fmt.Errorf("screenview: accept helper: %w", err)
+			return nil, newStartupError(failureHelperHandshake, err)
 		}
 		connHandedOff := false
 		defer func() {
@@ -344,7 +352,7 @@ func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
 		// nonce-in-argv spoof so VIEW_ONLY frames can only originate from our own helper.
 		clientPID, perr := dataplane.PipeClientProcessID(conn)
 		if perr != nil || clientPID != helper.Pid {
-			return nil, fmt.Errorf("screenview: pipe client PID %d != launched helper PID %d (anti-spoof, fail-closed): %v", clientPID, helper.Pid, perr)
+			return nil, newStartupError(failureHelperPeer, perr)
 		}
 
 		// Factory-level fail-closed (READY proof), ctx-aware: the helper emits its FIRST
@@ -355,7 +363,10 @@ func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
 		// later clean EndStream that would look like a normal end).
 		firstPayload, err := readFirstFrame(ctx, conn, firstFrameDeadline)
 		if err != nil {
-			return nil, fmt.Errorf("screenview: helper produced no first frame (banner/capture failed or cancelled, fail-closed): %w", err)
+			return nil, newStartupError(firstFrameFailureCode(err), err)
+		}
+		if err := validateFirstFramePayload(firstPayload); err != nil {
+			return nil, err
 		}
 
 		// Success: hand conn + helper + listener to the producer (cancel the cleanup defers).

@@ -4,6 +4,7 @@ package screenview
 
 import (
 	"errors"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -112,6 +113,9 @@ func TestIPCFrameProducerReplayReadEOFClose(t *testing.T) {
 	}
 	if _, ok := p.Next(); ok {
 		t.Fatal("Next must return ok=false at EOF (helper done)")
+	}
+	if err := p.Err(); !errors.Is(err, io.EOF) {
+		t.Fatalf("unexpected helper EOF must remain a typed failure, got %v", err)
 	}
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

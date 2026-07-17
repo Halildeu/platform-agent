@@ -37,6 +37,40 @@ type ScreenViewDispatcher interface {
 		send func(*pb.DataFrame) error, nowEpochMillis int64) error
 }
 
+type screenViewFailureCoder interface {
+	ScreenViewFailureCode() string
+}
+
+func screenViewFailureCode(err error) string {
+	var coded screenViewFailureCoder
+	if !errors.As(err, &coded) {
+		return "screen-view-failed"
+	}
+	code := coded.ScreenViewFailureCode()
+	switch code {
+	case "screen-view-platform-unsupported",
+		"screen-view-session-binding-failed",
+		"screen-view-helper-resolution-failed",
+		"screen-view-active-session-failed",
+		"screen-view-secure-pipe-failed",
+		"screen-view-launch-nonce-failed",
+		"screen-view-helper-launch-failed",
+		"screen-view-helper-handshake-failed",
+		"screen-view-helper-peer-failed",
+		"screen-view-banner-create-failed",
+		"screen-view-banner-not-visible",
+		"screen-view-capture-start-failed",
+		"screen-view-capture-lost",
+		"screen-view-helper-exited-before-frame",
+		"screen-view-helper-exited",
+		"screen-view-first-frame-timeout",
+		"screen-view-first-frame-protocol-failed":
+		return code
+	default:
+		return "screen-view-failed"
+	}
+}
+
 // errPermitDecode marks a broker OperationPermit that cannot be mapped to a domain permit — a protocol defect
 // (the CONTROL stream is closed), never a silent drop.
 var errPermitDecode = errors.New("operation-permit-decode-failed")
@@ -297,7 +331,10 @@ func (h *Harness) dispatchScreenView(ctx context.Context, conn *grpc.ClientConn,
 		case errors.Is(herr, dataplane.ErrPermitExpired):
 			_ = sender.sendSessionError(permit.SessionID, "screen-view-permit-expired", false)
 		default:
-			_ = sender.sendSessionError(permit.SessionID, "screen-view-failed", false)
+			code := screenViewFailureCode(herr)
+			h.logger.Printf("remote-bridge: view-only failed session_id_sha256_12=%s code=%q",
+				deviceIDFingerprint(permit.SessionID), code)
+			_ = sender.sendSessionError(permit.SessionID, code, false)
 		}
 	}
 }

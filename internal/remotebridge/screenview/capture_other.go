@@ -23,6 +23,6 @@ func MaybeRunActiveSessionScreenViewHelper(_ []string) (bool, int) { return fals
 // implementation).
 func NewWindowsProducerFactory(_ MaskPolicy) ProducerFactory {
 	return func(context.Context, string, string) (dataplane.FrameProducer, error) {
-		return nil, errCaptureUnavailable
+		return nil, newStartupError(failureUnsupported, errCaptureUnavailable)
 	}
 }
