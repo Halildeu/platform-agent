@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -30,6 +31,11 @@ type fakeScreenDispatcher struct {
 	invoked      chan struct{}
 	run          func(ctx context.Context, send func(*pb.DataFrame) error) error
 }
+
+type fakeScreenFailureCode struct{ code string }
+
+func (e fakeScreenFailureCode) Error() string                 { return "untrusted raw detail" }
+func (e fakeScreenFailureCode) ScreenViewFailureCode() string { return e.code }
 
 func (d *fakeScreenDispatcher) Handle(ctx context.Context, permit operation.OperationPermit, streamID string,
 	send func(*pb.DataFrame) error, _ int64) error {
@@ -147,6 +153,24 @@ func TestAdvertisedCapabilitiesViewOnly(t *testing.T) {
 	caps := advertisedCapabilities(Config{ScreenViewDispatcher: &fakeScreenDispatcher{}})
 	if len(caps) != 1 || caps[0] != pb.Capability_VIEW_ONLY {
 		t.Fatalf("only ScreenViewDispatcher wired → [VIEW_ONLY], got %v", caps)
+	}
+}
+
+func TestScreenViewFailureCodeAllowlist(t *testing.T) {
+	for _, code := range []string{
+		"screen-view-helper-handshake-failed",
+		"screen-view-banner-not-visible",
+		"screen-view-capture-start-failed",
+	} {
+		if got := screenViewFailureCode(fakeScreenFailureCode{code: code}); got != code {
+			t.Fatalf("allowlisted code = %q, want %q", got, code)
+		}
+	}
+	if got := screenViewFailureCode(fakeScreenFailureCode{code: "attacker-controlled-detail"}); got != "screen-view-failed" {
+		t.Fatalf("unknown code = %q, want generic fail-closed code", got)
+	}
+	if got := screenViewFailureCode(errors.New("raw detail")); got != "screen-view-failed" {
+		t.Fatalf("uncoded error = %q, want generic fail-closed code", got)
 	}
 }
 
@@ -346,6 +370,60 @@ func TestScreenViewTypedTerminationEmitsAllowlistedAuditEvent(t *testing.T) {
 				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("typed termination did not reach CONTROL as an audit event")
+			}
+		})
+	}
+}
+
+func TestScreenViewStartupFailureEmitsOnlyAllowlistedCode(t *testing.T) {
+	tests := []struct {
+		name     string
+		dispatch error
+		wantCode string
+	}{
+		{
+			name:     "typed allowlisted stage",
+			dispatch: fakeScreenFailureCode{code: "screen-view-banner-not-visible"},
+			wantCode: "screen-view-banner-not-visible",
+		},
+		{
+			name:     "unknown stage collapses",
+			dispatch: fakeScreenFailureCode{code: "raw-windows-detail"},
+			wantCode: "screen-view-failed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			received := make(chan *pb.ErrorFrame, 1)
+			disp := &fakeScreenDispatcher{run: func(context.Context, func(*pb.DataFrame) error) error {
+				return tc.dispatch
+			}}
+			broker := &dispatchBroker{connect: func(s pb.RemoteBridge_ConnectServer) error {
+				if _, err := s.Recv(); err != nil {
+					return err
+				}
+				_ = s.Send(heartbeatEnv(60_000, 0))
+				_ = s.Send(operationPermitEnv(viewOnlyPermitProto()))
+				for {
+					env, err := s.Recv()
+					if err != nil {
+						return nil
+					}
+					if frame := env.GetError(); frame != nil {
+						received <- frame
+						return nil
+					}
+				}
+			}}
+			startDispatchScreenView(t, broker, disp)
+			select {
+			case frame := <-received:
+				if frame.GetCode() != tc.wantCode || frame.GetRetryable() {
+					t.Fatalf("error frame = code %q retryable=%v, want %q/false",
+						frame.GetCode(), frame.GetRetryable(), tc.wantCode)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("startup failure did not reach CONTROL")
 			}
 		})
 	}

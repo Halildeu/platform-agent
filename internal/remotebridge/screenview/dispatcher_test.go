@@ -104,6 +104,43 @@ func TestDispatchCaptureStartFailureFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDispatchCancelDuringCaptureStartupReturnsCleanly(t *testing.T) {
+	factoryStarted := make(chan struct{})
+	factory := func(ctx context.Context, _, _ string) (dataplane.FrameProducer, error) {
+		close(factoryStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	d, _ := New(&fakeAuthorizer{allow: true}, factory, Options{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Handle(ctx, viewOnlyPermit(), "op-1", (&frameSink{}).send, 1) }()
+	<-factoryStarted
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("startup cancellation must be a clean teardown, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup cancellation did not stop promptly")
+	}
+}
+
+func TestDispatchPermitExpiryDuringCaptureStartupPreservesCause(t *testing.T) {
+	permit := viewOnlyPermit()
+	permit.ExpiresAtEpochMillis = time.Now().Add(30 * time.Millisecond).UnixMilli()
+	factory := func(ctx context.Context, _, _ string) (dataplane.FrameProducer, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	d, _ := New(&fakeAuthorizer{allow: true}, factory, Options{})
+	err := d.Handle(context.Background(), permit, "op-1", (&frameSink{}).send, time.Now().UnixMilli())
+	if !errors.Is(err, dataplane.ErrPermitExpired) {
+		t.Fatalf("startup expiry err = %v, want ErrPermitExpired", err)
+	}
+}
+
 func TestDispatchHappyStreamsImageFramesThenEndStream(t *testing.T) {
 	d, _ := New(&fakeAuthorizer{allow: true}, mockFactory(3, []byte("PNG")), Options{})
 	sink := &frameSink{}

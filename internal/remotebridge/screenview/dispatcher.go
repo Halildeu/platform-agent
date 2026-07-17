@@ -122,6 +122,12 @@ func (d *Dispatcher) Handle(ctx context.Context, permit operation.OperationPermi
 	producer, err := d.newProducer(streamCtx, permit.SessionID, streamID)
 	if err != nil {
 		session.Abort()
+		if streamCtx.Err() != nil {
+			if errors.Is(context.Cause(streamCtx), dataplane.ErrPermitExpired) {
+				return dataplane.ErrPermitExpired
+			}
+			return nil
+		}
 		return fmt.Errorf("view-only-capture-start-failed: %w", err)
 	}
 

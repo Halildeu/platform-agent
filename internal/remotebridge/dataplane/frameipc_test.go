@@ -153,6 +153,10 @@ func TestTypedTerminationMessagesRemainDistinctFromEOF(t *testing.T) {
 	}{
 		{"local-abort", WriteLocalAbort, ErrLocalAbort},
 		{"indicator-lost", WriteIndicatorLost, ErrIndicatorLost},
+		{"banner-create-failed", WriteBannerCreateFailed, ErrBannerCreateFailed},
+		{"banner-not-visible", WriteBannerNotVisible, ErrBannerNotVisible},
+		{"capture-start-failed", WriteCaptureStartFailed, ErrCaptureStartupFailed},
+		{"capture-lost", WriteCaptureLost, ErrCaptureFailed},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -168,7 +172,14 @@ func TestTypedTerminationMessagesRemainDistinctFromEOF(t *testing.T) {
 }
 
 func TestTypedTerminationMessagesRejectPayloads(t *testing.T) {
-	for _, typ := range []ipcMsgType{msgLocalAbort, msgIndicatorLost} {
+	for _, typ := range []ipcMsgType{
+		msgLocalAbort,
+		msgIndicatorLost,
+		msgBannerCreateFailed,
+		msgBannerNotVisible,
+		msgCaptureStartFailed,
+		msgCaptureLost,
+	} {
 		var buf bytes.Buffer
 		if err := writeMsg(&buf, typ, []byte("untrusted-detail")); err != nil {
 			t.Fatalf("write raw test message: %v", err)
