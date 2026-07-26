@@ -36,6 +36,7 @@ Import-BootstrapHelper -Name "Resolve-BootstrapApiUrls"
 Import-BootstrapHelper -Name "Assert-Sha256"
 Import-BootstrapHelper -Name "Assert-PackageSha256Sums"
 Import-BootstrapHelper -Name "Get-RemoteBridgeAttestationEvidence"
+Import-BootstrapHelper -Name "Invoke-VerifiedPackageInstaller"
 
 Describe "Resolve-BootstrapApiUrls" {
     It "derives test API and mTLS API from a testai package URL" {
@@ -228,5 +229,42 @@ Describe "Assert-PackageSha256Sums required-file contract" {
 
         { Assert-PackageSha256Sums -Directory $testDirectory } |
             Should Throw "duplicate SHA256SUMS entry: payload.bin"
+    }
+}
+
+Describe "Verified package installer execution-policy boundary" {
+    It "uses only a temporary Process-scope bypass and restores the prior policy" {
+        $functionAst = $script:bootstrapAst.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq "Invoke-VerifiedPackageInstaller"
+        }, $true)
+        $source = $functionAst.Extent.Text
+
+        $source.Contains("Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force") |
+            Should Be $true
+        $source.Contains("-ExecutionPolicy `$previousProcessPolicy") |
+            Should Be $true
+        $source.Contains("-Scope CurrentUser") | Should Be $false
+        $source.Contains("-Scope LocalMachine") | Should Be $false
+    }
+
+    It "refuses to run when a higher-precedence policy prevents Bypass" {
+        $source = $script:bootstrapSource
+
+        $source.Contains("if (`$effectivePolicy -ne `"Bypass`")") | Should Be $true
+        $source.Contains("Use the signed MSI/GPO deployment path.") | Should Be $true
+    }
+
+    It "invokes the policy boundary only after package file hashes are verified" {
+        $hashVerificationIndex = $script:bootstrapSource.IndexOf(
+            "Assert-PackageSha256Sums -Directory `$WorkDir"
+        )
+        $installerInvocationIndex = $script:bootstrapSource.LastIndexOf(
+            "Invoke-VerifiedPackageInstaller"
+        )
+
+        ($hashVerificationIndex -ge 0) | Should Be $true
+        ($installerInvocationIndex -gt $hashVerificationIndex) | Should Be $true
     }
 }

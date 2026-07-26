@@ -215,6 +215,36 @@ function Get-EnrollmentToken {
     }
 }
 
+function Invoke-VerifiedPackageInstaller {
+    param(
+        [Parameter(Mandatory)] [string]$ScriptPath,
+        [Parameter(Mandatory)] [hashtable]$Arguments
+    )
+
+    # This function is called only after the ZIP pin and every packaged file in
+    # SHA256SUMS have been verified. Some managed Windows images keep the local
+    # execution policy at Restricted, which otherwise blocks this verified
+    # install.ps1. Limit the exception to this PowerShell process and restore
+    # the previous process policy even when installation fails. MachinePolicy
+    # and UserPolicy remain authoritative and are never modified.
+    $previousProcessPolicy = Get-ExecutionPolicy -Scope Process
+    try {
+        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+        $effectivePolicy = Get-ExecutionPolicy
+        if ($effectivePolicy -ne "Bypass") {
+            throw ("Verified package installer cannot run because an enforced PowerShell policy " +
+                "kept the effective policy at '$effectivePolicy'. Use the signed MSI/GPO deployment path.")
+        }
+
+        & $ScriptPath @Arguments
+    } finally {
+        Set-ExecutionPolicy `
+            -Scope Process `
+            -ExecutionPolicy $previousProcessPolicy `
+            -Force
+    }
+}
+
 Assert-Administrator
 
 $resolvedUrls = Resolve-BootstrapApiUrls `
@@ -360,7 +390,9 @@ if ($SelfUpdateAutoActivate) {
 
 try {
     Write-Step "running installer"
-    & $installScript @installArgs
+    Invoke-VerifiedPackageInstaller `
+        -ScriptPath $installScript `
+        -Arguments $installArgs
 } finally {
     if (Get-Variable token -ErrorAction SilentlyContinue) {
         Remove-Variable token -ErrorAction SilentlyContinue
