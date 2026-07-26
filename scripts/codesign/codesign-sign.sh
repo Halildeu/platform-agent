@@ -63,21 +63,17 @@ esac
 [ ! -e "$OUT_R" ] || die "output already exists (refusing overwrite): $OUT_R"
 
 # --- refuse double-sign ------------------------------------------------------
-# Detect signature PRESENCE, not chain validity: a signed-but-untrusted input
-# fails `verify` (non-zero) for the SAME reason an unsigned file does, so the
-# verify exit code can't distinguish them. `extract-signature` can: it exits 0
-# only when a signature is actually present (unsigned => non-zero). Sign-last
-# means our input must be unsigned.
-# extract-signature needs a NON-EXISTENT real output path: it refuses /dev/null
-# AND it refuses to overwrite an existing file (so plain `mktemp`, which creates
-# the file, makes it always fail and mask a present signature). Use a temp DIR
-# and a fresh name inside it.
-_SIGDIR="$(mktemp -d)"
-if "$OSSLSIGNCODE" extract-signature -in "$IN_R" -out "$_SIGDIR/sig.p7" >/dev/null 2>&1; then
-  rm -rf "$_SIGDIR"
+# Detect signature PRESENCE, not chain validity. osslsigncode 2.8 can segfault
+# while extract-signature probes an unsigned PE, so classify the bounded verify
+# output instead: a signature index proves the input is signed; the exact
+# unsigned marker permits signing; every other result fails closed.
+SIGCHECK="$("$OSSLSIGNCODE" verify -in "$IN_R" 2>&1 || true)"
+if printf '%s\n' "$SIGCHECK" | grep -qE '^Signature Index:'; then
   die "input already carries a signature (sign-last violated upstream)"
 fi
-rm -rf "$_SIGDIR"
+printf '%s\n' "$SIGCHECK" | grep -qF "No signature found" \
+  || die "could not prove that input is unsigned (sign-last check indeterminate)"
+unset SIGCHECK
 
 # --- toolchain + key sanity --------------------------------------------------
 [ -x "$OSSLSIGNCODE" ]   || die "osslsigncode missing at $OSSLSIGNCODE"
@@ -109,7 +105,15 @@ VOUT="$("$OSSLSIGNCODE" verify -CAfile "$ROOT_CRT" -in "$OUT_R" 2>&1)" \
   || { rm -f "$OUT_R"; die "post-sign chain verify failed — output removed"; }
 echo "$VOUT" | grep -q "Signature verification: ok" \
   || { rm -f "$OUT_R"; die "signature not OK against internal root — output removed"; }
-echo "$VOUT" | grep -qi "is timestamped" \
-  || { rm -f "$OUT_R"; die "signature NOT timestamped (fail-closed) — output removed"; }
+if echo "$VOUT" | grep -qi "is timestamped"; then
+  :
+elif echo "$VOUT" | grep -qE '^[[:space:]]*Timestamp time:' &&
+     echo "$VOUT" | grep -q "Timestamp Server Signature verification: ok" &&
+     echo "$VOUT" | grep -qE '^[[:space:]]*Countersignatures:'; then
+  :
+else
+  rm -f "$OUT_R"
+  die "signature NOT timestamped (fail-closed) — output removed"
+fi
 
 echo "codesign-sign: OK  in=$IN_R  out=$OUT_R  tsa=$TSA_URL"
