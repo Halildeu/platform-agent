@@ -14,6 +14,8 @@ for marker in \
   'SIGCHECK="$("$OSSLSIGNCODE" verify -in "$IN_R" 2>&1 || true)"' \
   "grep -qE '^Signature Index:'" \
   'grep -qF "No signature found"' \
+  'grep -qF "MSI file has no signature"' \
+  '[ "$EXT" = "msi" ]' \
   "could not prove that input is unsigned" \
   "grep -qi \"is timestamped\"" \
   "grep -qE '^[[:space:]]*Timestamp time:'" \
