@@ -71,8 +71,14 @@ SIGCHECK="$("$OSSLSIGNCODE" verify -in "$IN_R" 2>&1 || true)"
 if printf '%s\n' "$SIGCHECK" | grep -qE '^Signature Index:'; then
   die "input already carries a signature (sign-last violated upstream)"
 fi
-printf '%s\n' "$SIGCHECK" | grep -qF "No signature found" \
-  || die "could not prove that input is unsigned (sign-last check indeterminate)"
+if printf '%s\n' "$SIGCHECK" | grep -qF "No signature found"; then
+  :
+elif [ "$EXT" = "msi" ] &&
+     printf '%s\n' "$SIGCHECK" | grep -qF "MSI file has no signature"; then
+  :
+else
+  die "could not prove that input is unsigned (sign-last check indeterminate)"
+fi
 unset SIGCHECK
 
 # --- toolchain + key sanity --------------------------------------------------
