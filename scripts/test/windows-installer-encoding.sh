@@ -55,6 +55,11 @@ required_bootstrap_markers = [
     '$installArgs["AutoEnrollApiUrl"] = $AutoEnrollApiUrl',
     '$installArgs["AutoEnrollCertSANURIPrefix"] = $AutoEnrollCertSANURIPrefix',
     '$installArgs["ResetCredentialStore"] = $true',
+    "function Invoke-VerifiedPackageInstaller",
+    "Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force",
+    "-ExecutionPolicy $previousProcessPolicy",
+    "Use the signed MSI/GPO deployment path.",
+    "Invoke-VerifiedPackageInstaller",
 ]
 for marker in required_install_markers:
     if marker not in install_text:
@@ -68,6 +73,23 @@ if stale_autoenroll_base in install_text:
     failures.append(f"{install_source}: stale AutoEnroll endpoint-admin base URL present")
 if stale_autoenroll_base in bootstrap_text:
     failures.append(f"{bootstrap_source}: stale AutoEnroll endpoint-admin base URL present")
+
+for forbidden_scope in ("-Scope CurrentUser", "-Scope LocalMachine"):
+    if forbidden_scope in bootstrap_text:
+        failures.append(
+            f"{bootstrap_source}: verified-package execution exception must not use {forbidden_scope}"
+        )
+
+hash_verification_index = bootstrap_text.find(
+    'Assert-PackageSha256Sums -Directory $WorkDir'
+)
+installer_invocation_index = bootstrap_text.rfind(
+    "Invoke-VerifiedPackageInstaller"
+)
+if hash_verification_index < 0 or installer_invocation_index <= hash_verification_index:
+    failures.append(
+        f"{bootstrap_source}: verified installer invocation must follow package file hash verification"
+    )
 
 package_dir = Path("dist/windows/EndpointAgent")
 if package_dir.exists():
