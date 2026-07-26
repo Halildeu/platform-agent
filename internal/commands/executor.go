@@ -140,6 +140,22 @@ type LocalExecutor struct {
 	AgentVersion      string
 	Now               func() time.Time
 	UpdateAgentStager *selfupdate.Stager
+	TPMRenewal        *TPMRenewalOptions
+}
+
+func (e *LocalExecutor) ConfigureTPMRenewal(opts TPMRenewalOptions) {
+	normalized, err := normalizeTPMRenewalOptions(opts)
+	if err != nil || !platformSupportsTPMRenewal() {
+		e.TPMRenewal = nil
+		return
+	}
+	e.TPMRenewal = &normalized
+	for _, capability := range e.Capabilities {
+		if capability == protocol.CommandRenewTPMCertificate {
+			return
+		}
+	}
+	e.Capabilities = append(e.Capabilities, protocol.CommandRenewTPMCertificate)
 }
 
 func NewLocalExecutor(capabilities []protocol.CommandType, agentVersion string) *LocalExecutor {
@@ -403,6 +419,31 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 		result.Status = mapUpdateStageStatusToCommandStatus(stageResult.StageStatus)
 		result.Summary = fmt.Sprintf("UPDATE_AGENT %s", stageResult.StageStatus)
 		result.Details = map[string]interface{}{"update": stageResult}
+	case protocol.CommandRenewTPMCertificate:
+		req, payloadErr := unmarshalTPMRenewalPayload(command.Payload)
+		if payloadErr != nil {
+			result.Status = protocol.CommandStatusFailed
+			result.Summary = "RENEW_TPM_CERTIFICATE rejected"
+			result.ErrorCode = "TPM_RENEWAL_INVALID_PAYLOAD"
+			result.ErrorMessage = payloadErr.Error()
+			break
+		}
+		if e.TPMRenewal == nil {
+			result.Status = protocol.CommandStatusUnsupported
+			result.Summary = "RENEW_TPM_CERTIFICATE unsupported"
+			result.ErrorCode = "TPM_RENEWAL_POLICY_NOT_READY"
+			break
+		}
+		renewal, renewErr := renewTPMCertificateFn(ctx, *e.TPMRenewal, req)
+		if renewErr != nil {
+			result.Status = protocol.CommandStatusFailed
+			result.Summary = "RENEW_TPM_CERTIFICATE failed"
+			result.ErrorCode = boundedTPMRenewalErrorCode(renewErr)
+			break
+		}
+		result.Status = protocol.CommandStatusSucceeded
+		result.Summary = "RENEW_TPM_CERTIFICATE succeeded"
+		result.Details = map[string]interface{}{"tpmRenewal": renewal}
 	case protocol.CommandCollectBackupDryRun:
 		// Faz 22.8A (#117) — metadata-only backup dry-run manifest. The
 		// payload + result carry NO raw filesystem path (the manifest is
@@ -455,6 +496,17 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 	}
 	result.FinishedAt = e.now()
 	return result
+}
+
+func boundedTPMRenewalErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	code := strings.TrimSpace(err.Error())
+	if !strings.HasPrefix(code, "TPM_RENEWAL_") || len(code) > 96 {
+		return "TPM_RENEWAL_FAILED"
+	}
+	return code
 }
 
 func (e *LocalExecutor) now() time.Time {

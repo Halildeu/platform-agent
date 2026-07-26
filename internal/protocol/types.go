@@ -56,6 +56,10 @@ const (
 	// stages a verified binary and returns a bounded StageResult. It does
 	// not stop/replace the running service in this PR2 command wire.
 	CommandUpdateAgent CommandType = "UPDATE_AGENT"
+	// Faz 22.6 #2913: browser-dispatched, device-bound TPM/client-cert
+	// renewal. The enrollment token is delivered once in the claimed command
+	// payload and must never be logged or returned in command results.
+	CommandRenewTPMCertificate CommandType = "RENEW_TPM_CERTIFICATE"
 	// #508 (Faz 22.5): managed screensaver + desktop wallpaper Group-Policy.
 	// Always maker-checker on the backend; advertised as a capability only on
 	// Windows (RuntimeCapabilitiesWithOptions). The agent applies the policy to
@@ -226,7 +230,7 @@ func (r CommandResult) ToWire() CommandResultWire {
 
 func (t CommandType) RequiresReason() bool {
 	switch t {
-	case CommandLockUserLogin, CommandUnlockUserLogin, CommandChangeLocalPassword, CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent, CommandCollectBackupDryRun:
+	case CommandLockUserLogin, CommandUnlockUserLogin, CommandChangeLocalPassword, CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent, CommandRenewTPMCertificate, CommandCollectBackupDryRun:
 		return true
 	default:
 		return false
@@ -235,7 +239,7 @@ func (t CommandType) RequiresReason() bool {
 
 func (t CommandType) IsSensitive() bool {
 	switch t {
-	case CommandLockUserLogin, CommandUnlockUserLogin, CommandChangeLocalPassword, CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent, CommandCollectBackupDryRun:
+	case CommandLockUserLogin, CommandUnlockUserLogin, CommandChangeLocalPassword, CommandDisableLocalUser, CommandEnableLocalUser, CommandResetLocalUserPassword, CommandDownloadAllowedFile, CommandUploadAllowedFile, CommandUpdateAgent, CommandRenewTPMCertificate, CommandCollectBackupDryRun:
 		return true
 	default:
 		return false

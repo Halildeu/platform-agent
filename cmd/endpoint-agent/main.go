@@ -539,7 +539,7 @@ func newRunner(cfg config.Config, logger *log.Logger) (*app.Runner, error) {
 }
 
 func newCommandExecutor(cfg config.Config) *commands.LocalExecutor {
-	return commands.NewPolicyAwareExecutor(
+	executor := commands.NewPolicyAwareExecutor(
 		cfg.AgentVersion,
 		cfg.SelfUpdateCapabilityEnabled(),
 		commands.UpdateAgentStagerOptions{
@@ -550,6 +550,12 @@ func newCommandExecutor(cfg config.Config) *commands.LocalExecutor {
 			HardMaxBytes:        cfg.SelfUpdateHardMaxBytes,
 		},
 	)
+	executor.ConfigureTPMRenewal(commands.TPMRenewalOptions{
+		APIURL:            cfg.AutoEnrollAPIURL,
+		CertSubjectSuffix: cfg.AutoEnrollCertSubjectSuffix,
+		CertSANURIPrefix:  cfg.AutoEnrollCertSANURIPrefix,
+	})
+	return executor
 }
 
 func handleServiceCommand(args []string) {

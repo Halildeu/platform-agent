@@ -245,7 +245,7 @@ func boundedSubmitError(err *protocol.HTTPError) string {
 }
 
 func newExecutor(cfg config.Config) *commands.LocalExecutor {
-	return commands.NewPolicyAwareExecutor(
+	executor := commands.NewPolicyAwareExecutor(
 		cfg.AgentVersion,
 		cfg.SelfUpdateCapabilityEnabled(),
 		commands.UpdateAgentStagerOptions{
@@ -256,6 +256,12 @@ func newExecutor(cfg config.Config) *commands.LocalExecutor {
 			HardMaxBytes:        cfg.SelfUpdateHardMaxBytes,
 		},
 	)
+	executor.ConfigureTPMRenewal(commands.TPMRenewalOptions{
+		APIURL:            cfg.AutoEnrollAPIURL,
+		CertSubjectSuffix: cfg.AutoEnrollCertSubjectSuffix,
+		CertSANURIPrefix:  cfg.AutoEnrollCertSANURIPrefix,
+	})
+	return executor
 }
 
 func (r *Runner) RunLoop(ctx context.Context) error {
