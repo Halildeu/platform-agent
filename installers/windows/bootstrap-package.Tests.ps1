@@ -34,6 +34,7 @@ function Import-BootstrapHelper {
 Import-BootstrapHelper -Name "Get-PackageUrlHost"
 Import-BootstrapHelper -Name "Resolve-BootstrapApiUrls"
 Import-BootstrapHelper -Name "Assert-Sha256"
+Import-BootstrapHelper -Name "Remove-FileIfExists"
 Import-BootstrapHelper -Name "Assert-PackageSha256Sums"
 Import-BootstrapHelper -Name "Get-RemoteBridgeAttestationEvidence"
 Import-BootstrapHelper -Name "Invoke-VerifiedPackageInstaller"
@@ -92,6 +93,45 @@ Describe "Resolve-BootstrapApiUrls" {
     It "rejects package URLs without an absolute host" {
         { Get-PackageUrlHost -Url "EndpointAgent.zip" } |
             Should Throw "-PackageUrl must be an absolute URL with a host."
+    }
+}
+
+Describe "Bootstrap staging path contract" {
+    It "uses machine-wide ProgramData defaults instead of the interactive user's TEMP path" {
+        $parameterDefaults = @{}
+        foreach ($parameter in $script:bootstrapAst.ParamBlock.Parameters) {
+            if ($null -ne $parameter.DefaultValue) {
+                $parameterDefaults[$parameter.Name.VariablePath.UserPath] = $parameter.DefaultValue.Extent.Text
+            }
+        }
+
+        $parameterDefaults["WorkDir"] | Should Match '\$env:ProgramData'
+        $parameterDefaults["WorkDir"] | Should Not Match '\$env:TEMP'
+        $parameterDefaults["ZipPath"] | Should Match '\$env:ProgramData'
+        $parameterDefaults["ZipPath"] | Should Not Match '\$env:TEMP'
+    }
+
+    It "treats a missing ZIP below a missing 8.3-like parent as an idempotent no-op" {
+        $missingZip = Join-Path (Join-Path $TestDrive "CA35DB~1.SET") "EndpointAgent.zip"
+
+        { Remove-FileIfExists -Path $missingZip } | Should Not Throw
+        [System.IO.File]::Exists($missingZip) | Should Be $false
+    }
+
+    It "removes an existing stale ZIP before download" {
+        $zipDirectory = Join-Path $TestDrive "bootstrap"
+        New-Item -ItemType Directory -Force -Path $zipDirectory | Out-Null
+        $zipPath = Join-Path $zipDirectory "EndpointAgent.zip"
+        Set-Content -LiteralPath $zipPath -Value "stale" -Encoding ascii
+
+        Remove-FileIfExists -Path $zipPath
+
+        [System.IO.File]::Exists($zipPath) | Should Be $false
+    }
+
+    It "rejects a blank cleanup path" {
+        { Remove-FileIfExists -Path " " } |
+            Should Throw "cleanup path must not be blank"
     }
 }
 
