@@ -43,8 +43,8 @@ param(
     [string]$SelfUpdateActivationTimeout = "2m",
     [string]$SelfUpdateServiceName = "",
     [string]$SelfUpdateCommandTimeout = "30m",
-    [string]$WorkDir = (Join-Path $env:TEMP "EndpointEnes"),
-    [string]$ZipPath = (Join-Path $env:TEMP "EndpointAgent.zip"),
+    [string]$WorkDir = (Join-Path $env:ProgramData "EndpointAgent\Bootstrap\Work"),
+    [string]$ZipPath = (Join-Path $env:ProgramData "EndpointAgent\Bootstrap\EndpointAgent.zip"),
     [string]$EnrollmentToken = "",
     [switch]$Start,
     [switch]$Force,
@@ -78,6 +78,26 @@ function Assert-Sha256 {
     $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $Expected.ToLowerInvariant()) {
         throw "SHA256 mismatch for $Path. Expected=$Expected Actual=$actual"
+    }
+}
+
+function Remove-FileIfExists {
+    param([Parameter(Mandatory)] [string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "cleanup path must not be blank"
+    }
+
+    # Windows PowerShell 5.1 can throw a terminating PSArgumentException when
+    # Remove-Item targets a missing file below an unavailable 8.3 TEMP path.
+    # System.IO treats a missing file as the intended idempotent no-op.
+    if (-not [System.IO.File]::Exists($Path)) {
+        return
+    }
+
+    [System.IO.File]::Delete($Path)
+    if ([System.IO.File]::Exists($Path)) {
+        throw "failed to remove stale bootstrap file: $Path"
     }
 }
 
@@ -258,7 +278,9 @@ $AutoEnrollApiUrl = $resolvedUrls.AutoEnrollApiUrl
 
 Write-Step "preparing work directory: $WorkDir"
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
-Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
+$zipDirectory = Split-Path -Parent $ZipPath
+New-Item -ItemType Directory -Force -Path $zipDirectory | Out-Null
+Remove-FileIfExists -Path $ZipPath
 
 Write-Step "downloading package"
 Invoke-WebRequest -UseBasicParsing -Uri $PackageUrl -OutFile $ZipPath
