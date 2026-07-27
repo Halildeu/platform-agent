@@ -21,18 +21,11 @@ import (
 // runTpmAutoEnroll wires the real Windows deps for the Faz 22.3B / 22.6 #548 TPM
 // device-key enrollment.
 //
-// Transport is mTLS using the device's EXISTING machine-cert from LocalMachine\My
-// (the same cert the regular auto-enroll selects). The live enrollment edge
-// (mtls.*.acik.com) requires a client cert at the TLS layer, so the previous
-// plain "server-TLS + token-in-body, no client cert" bootstrap fails the
-// handshake with `remote error: tls: certificate required` (observed live on the
-// #548 target, both interactive and SYSTEM context). The strong TPM path runs
-// ON TOP of an already machine-cert-enrolled device (runbook §2 order), so the
-// bootstrap cert is always present; a missing or broad-filter cert is
-// **fail-closed** — there is deliberately NO plain fallback (Codex 019f024b: a
-// silent downgrade would mask an edge/cert misconfiguration and could pick a
-// wrong corp/VPN client-auth cert, polluting the #548 evidence). A genuine
-// first-enroll-with-no-cert bootstrap is a separate, explicit, non-default mode.
+// The default transport remains mTLS using the device's EXISTING machine-cert
+// from LocalMachine\My. The explicit serverTLSBootstrap mode is the separate,
+// non-default recovery/first-enrollment path: it uses server-authenticated HTTPS
+// without a client certificate while the one-use enrollment token plus the TPM
+// proof authorize enrollment. There is no automatic downgrade between modes.
 //
 // The machine-cert is loaded BEFORE the TPM device is opened (the TPM device
 // opens EK+AK+device-key transient primaries; loading the cert first avoids
@@ -41,7 +34,12 @@ import (
 // cert produced by /attest is persisted separately as the enrollment artifact;
 // importing it into the certstore + CNG association for the bridge transport is
 // the §3.1 follow-up.
-func runTpmAutoEnroll(ctx context.Context, cfg config.Config, apiURL string) int {
+func runTpmAutoEnroll(
+	ctx context.Context,
+	cfg config.Config,
+	apiURL string,
+	serverTLSBootstrap bool,
+) int {
 	// Resolve the API URL up front (flag → ENDPOINT_AGENT_AUTO_ENROLL_API_URL
 	// fallback) — the wrapper needs the host for the mTLS SNI, so it must apply
 	// the SAME resolution the orchestrator does, else the env-only path breaks
@@ -58,9 +56,23 @@ func runTpmAutoEnroll(ctx context.Context, cfg config.Config, apiURL string) int
 		return 2
 	}
 
-	// Bootstrap transport cert == the existing machine-cert (NOT the TPM-issued
-	// cert this run produces). Reuse the regular auto-enroll cert filter so the
-	// same narrowing (subject suffix / SAN URI prefix) applies.
+	if serverTLSBootstrap {
+		httpClient, err := newTPMBootstrapServerTLSClient(resolvedAPIURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "tpm auto-enroll: build server-TLS bootstrap client: %v\n", err)
+			return 1
+		}
+		defer httpClient.CloseIdleConnections()
+		return runTpmAutoEnrollWith(ctx, cfg, resolvedAPIURL, tpmEnrollDeps{
+			newDevice:  tpmenroll.NewWindowsTPMDevice,
+			httpClient: httpClient,
+			persist:    persistTPMClientCertificate,
+		})
+	}
+
+	// Default bootstrap transport cert == the existing machine-cert (NOT the
+	// TPM-issued cert this run produces). Reuse the regular auto-enroll cert
+	// filter so the same narrowing (subject suffix / SAN URI prefix) applies.
 	filter := autoenroll.DefaultCertFilter()
 	filter.SubjectSuffix = cfg.AutoEnrollCertSubjectSuffix
 	filter.SANURIPrefix = cfg.AutoEnrollCertSANURIPrefix
@@ -102,15 +114,17 @@ func runTpmAutoEnroll(ctx context.Context, cfg config.Config, apiURL string) int
 	return runTpmAutoEnrollWith(ctx, cfg, resolvedAPIURL, tpmEnrollDeps{
 		newDevice:  tpmenroll.NewWindowsTPMDevice,
 		httpClient: httpClient,
-		persist: func(certPEM string) error {
-			// Shared with the remote-bridge #548 device-key session reader
-			// (internal/app/newTPMDeviceKeySessionIdentity) via the same helper so the
-			// write and read locations can never drift.
-			out := tpmenroll.DeviceClientCertPath()
-			if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-				return err
-			}
-			return os.WriteFile(out, []byte(certPEM), 0o600)
-		},
+		persist:    persistTPMClientCertificate,
 	})
+}
+
+func persistTPMClientCertificate(certPEM string) error {
+	// Shared with the remote-bridge #548 device-key session reader
+	// (internal/app/newTPMDeviceKeySessionIdentity) via the same helper so the
+	// write and read locations can never drift.
+	out := tpmenroll.DeviceClientCertPath()
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(out, []byte(certPEM), 0o600)
 }

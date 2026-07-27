@@ -37,6 +37,15 @@ type TPMRenewalResult struct {
 
 var renewTPMCertificateFn = platformRenewTPMCertificate
 
+func tpmRenewalChildArgs(opts TPMRenewalOptions) []string {
+	return []string{
+		"--auto-enroll-tpm",
+		"--tpm-bootstrap-server-tls",
+		"--api-url",
+		opts.APIURL,
+	}
+}
+
 func normalizeTPMRenewalOptions(opts TPMRenewalOptions) (TPMRenewalOptions, error) {
 	opts.APIURL = strings.TrimRight(strings.TrimSpace(opts.APIURL), "/")
 	opts.CertSubjectSuffix = strings.TrimSpace(opts.CertSubjectSuffix)

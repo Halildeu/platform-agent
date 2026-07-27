@@ -77,6 +77,11 @@ func main() {
 	// resolveMode path; requires Windows (TBS). Mutually exclusive with --auto-enroll
 	// and --enrollment-token.
 	autoEnrollTpmFlag := flag.Bool("auto-enroll-tpm", false, "run TPM-attestation + Vault-PKI enrollment (Faz 22.3B); requires Windows; uses --api-url + the enrollment token")
+	tpmBootstrapServerTLSFlag := flag.Bool(
+		"tpm-bootstrap-server-tls",
+		false,
+		"use server-authenticated HTTPS without an existing client certificate for TPM bootstrap; valid only with --auto-enroll-tpm",
+	)
 	flag.Parse()
 
 	cfg := config.LoadFromEnv()
@@ -112,9 +117,12 @@ func main() {
 			log.Fatal("--auto-enroll-tpm is mutually exclusive with --auto-enroll and --enrollment-token")
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		code := runTpmAutoEnroll(ctx, cfg, *autoEnrollAPIURL)
+		code := runTpmAutoEnroll(ctx, cfg, *autoEnrollAPIURL, *tpmBootstrapServerTLSFlag)
 		stop()
 		os.Exit(code)
+	}
+	if *tpmBootstrapServerTLSFlag {
+		log.Fatal("--tpm-bootstrap-server-tls requires --auto-enroll-tpm")
 	}
 
 	runningAsService, err := winservice.IsWindowsService()

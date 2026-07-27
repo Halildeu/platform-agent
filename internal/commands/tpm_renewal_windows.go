@@ -31,7 +31,7 @@ func platformRenewTPMCertificate(
 		return TPMRenewalResult{}, fmt.Errorf("TPM_RENEWAL_EXECUTABLE_UNAVAILABLE")
 	}
 
-	cmd := exec.CommandContext(ctx, executable, "--auto-enroll-tpm", "--api-url", opts.APIURL)
+	cmd := exec.CommandContext(ctx, executable, tpmRenewalChildArgs(opts)...)
 	cmd.Env = sanitizedChildEnvironment(os.Environ(),
 		"ENDPOINT_AGENT_ENROLLMENT_TOKEN",
 		"ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX",

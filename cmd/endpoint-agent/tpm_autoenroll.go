@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"platform-agent/internal/config"
 	"platform-agent/internal/tpmenroll"
@@ -32,6 +35,38 @@ func resolveTpmEnrollAPIURL(apiURL string, cfg config.Config) string {
 		resolved = strings.TrimRight(strings.TrimSpace(cfg.AutoEnrollAPIURL), "/")
 	}
 	return resolved
+}
+
+// newTPMBootstrapServerTLSClient creates the explicit certificate-less bootstrap
+// transport. Authorization still comes from the one-use enrollment token plus
+// the TPM EK/AK/quote/certify proof; this client changes only the TLS transport
+// so a missing or expired pre-existing machine certificate can be repaired.
+//
+// The mode is deliberately opt-in at the CLI boundary. It requires a canonical
+// HTTPS base URL, uses the operating-system trust store, enforces TLS 1.2+, and
+// refuses redirects so enrollment material cannot be forwarded to another
+// origin.
+func newTPMBootstrapServerTLSClient(rawURL string) (*http.Client, error) {
+	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(rawURL), "/"))
+	if err != nil {
+		return nil, fmt.Errorf("TPM bootstrap server-TLS URL parse: %w", err)
+	}
+	if parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("TPM bootstrap server-TLS URL must be canonical HTTPS")
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: parsed.Hostname(),
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}, nil
 }
 
 // runTpmAutoEnrollWith drives the Faz 22.3B 4-leg TPM enrollment (POST /nonce →
