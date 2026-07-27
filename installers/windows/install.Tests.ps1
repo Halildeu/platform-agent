@@ -203,6 +203,34 @@ Import-InstallHelper -Name "Get-SelfUpdateSignerSha256ThumbprintFromBinary"
 Import-InstallHelper -Name "Assert-SelfUpdateInstallConfig"
 Import-InstallHelper -Name "Add-SelfUpdateServiceEnvironment"
 
+Describe "release installer sentinel isolation" {
+    It "keeps each patch sentinel only in its parameter default" {
+        foreach ($sentinel in @(
+            "__INJECTED_BINARY_URL__",
+            "__INJECTED_EXPECTED_SHA256__",
+            "__INJECTED_EXPECTED_THUMBPRINT__",
+            "__INJECTED_SIGNING_TIER__",
+            "__INJECTED_RELEASE_TAG__"
+        )) {
+            ([regex]::Matches($script:installSource, [regex]::Escape($sentinel))).Count |
+                Should Be 1
+        }
+    }
+
+    It "constructs runtime unresolved-sentinel checks outside the release patch target" {
+        $script:installSource |
+            Should Match '\$unpatchedExpectedThumbprint\s*=\s*"__INJECTED_"\s*\+\s*"EXPECTED_THUMBPRINT__"'
+        $script:installSource |
+            Should Match 'Sentinel=\("__INJECTED_"\s*\+\s*"EXPECTED_SHA256__"\)'
+        $script:installSource |
+            Should Match 'Sentinel=\("__INJECTED_"\s*\+\s*"EXPECTED_THUMBPRINT__"\)'
+        $script:installSource |
+            Should Match 'Sentinel=\("__INJECTED_"\s*\+\s*"SIGNING_TIER__"\)'
+        $script:installSource |
+            Should Match 'Sentinel=\("__INJECTED_"\s*\+\s*"RELEASE_TAG__"\)'
+    }
+}
+
 Describe "Assert-EnrollmentTokenLength (#120 truncated-paste guard)" {
     It "throws on a 1-char token (the MKR-A1 live-pilot truncated paste)" {
         { Assert-EnrollmentTokenLength -Token "v" -MinLength 32 } |
