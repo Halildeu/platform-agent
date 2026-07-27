@@ -195,6 +195,7 @@ Import-InstallHelper -Name "Assert-HmacCredentialResetConfirmed"
 Import-InstallHelper -Name "Assert-EnrollmentTokenLength"
 Import-InstallHelper -Name "Assert-ViewOnlyMaskRectBPS"
 Import-InstallHelper -Name "Assert-RemoteBridgeInstallConfig"
+Import-InstallHelper -Name "Add-TPMRenewalServiceEnvironment"
 Import-InstallHelper -Name "Add-RemoteBridgeServiceEnvironment"
 Import-InstallHelper -Name "Resolve-SelfUpdateSignerThumbprints"
 Import-InstallHelper -Name "Normalize-SelfUpdateSignerSha256Thumbprints"
@@ -602,6 +603,80 @@ Describe "Self-update installer env gating" {
 
         $values.ContainsKey("ENDPOINT_AGENT_SELF_UPDATE_ENABLED") | Should Be $false
         $values.ContainsKey("ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS") | Should Be $false
+    }
+}
+
+Describe "TPM renewal installer env policy" {
+    It "writes renewal policy for the running service independently of bootstrap mode" {
+        $values = @{
+            "ENDPOINT_AGENT_API_URL" = "https://testai.acik.com/api/v1/endpoint-agent"
+        }
+
+        Add-TPMRenewalServiceEnvironment `
+            -Values $values `
+            -ApiUrl " https://mtls.testai.acik.com/api/v1/endpoint-agent/ " `
+            -CertSANURIPrefix " adcomputer: "
+
+        $values["ENDPOINT_AGENT_AUTO_ENROLL_API_URL"] |
+            Should Be "https://mtls.testai.acik.com/api/v1/endpoint-agent"
+        $values["ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX"] | Should Be ""
+        $values["ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX"] | Should Be "adcomputer:"
+    }
+
+    It "accepts a subject suffix selector instead of a SAN URI selector" {
+        $values = @{}
+
+        Add-TPMRenewalServiceEnvironment `
+            -Values $values `
+            -ApiUrl "https://mtls.example.test/api/v1/endpoint-agent" `
+            -CertSubjectSuffix ".example.test"
+
+        $values["ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX"] |
+            Should Be ".example.test"
+        $values["ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX"] | Should Be ""
+    }
+
+    It "fails closed without a canonical HTTPS endpoint and certificate selector" {
+        {
+            Add-TPMRenewalServiceEnvironment `
+                -Values @{} `
+                -ApiUrl "http://mtls.example.test/api/v1/endpoint-agent" `
+                -CertSANURIPrefix "adcomputer:"
+        } | Should Throw "canonical HTTPS"
+
+        {
+            Add-TPMRenewalServiceEnvironment `
+                -Values @{} `
+                -ApiUrl "https://user@mtls.example.test/api/v1/endpoint-agent?unsafe=1" `
+                -CertSANURIPrefix "adcomputer:"
+        } | Should Throw "canonical HTTPS"
+
+        {
+            Add-TPMRenewalServiceEnvironment `
+                -Values @{} `
+                -ApiUrl "https://mtls.example.test/api/v1/endpoint-agent" `
+                -CertSubjectSuffix "" `
+                -CertSANURIPrefix ""
+        } | Should Throw "requires AutoEnrollCertSubjectSuffix or AutoEnrollCertSANURIPrefix"
+    }
+
+    It "applies renewal policy once after the HMAC and auto-enroll branch joins" {
+        ([regex]::Matches(
+            $script:installSource,
+            '(?m)^\s*Add-TPMRenewalServiceEnvironment\s*`'
+        )).Count | Should Be 1
+
+        $hmacServiceEnv = $script:installSource.IndexOf(
+            '"ENDPOINT_AGENT_ENROLLMENT_TOKEN" = $EnrollmentToken'
+        )
+        $renewalCall = $script:installSource.LastIndexOf(
+            'Add-TPMRenewalServiceEnvironment `'
+        )
+        $remoteBridgeCall = $script:installSource.LastIndexOf(
+            'Add-RemoteBridgeServiceEnvironment `'
+        )
+        $renewalCall | Should BeGreaterThan $hmacServiceEnv
+        $remoteBridgeCall | Should BeGreaterThan $renewalCall
     }
 }
 

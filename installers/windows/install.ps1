@@ -1168,6 +1168,37 @@ function Add-ServiceEnvironmentBaseVariables {
     }
 }
 
+function Add-TPMRenewalServiceEnvironment {
+    param(
+        [hashtable]$Values,
+        [string]$ApiUrl,
+        [string]$CertSubjectSuffix = "",
+        [string]$CertSANURIPrefix = ""
+    )
+
+    $resolvedApiUrl = $ApiUrl.Trim().TrimEnd("/")
+    $resolvedSubjectSuffix = $CertSubjectSuffix.Trim()
+    $resolvedSANURIPrefix = $CertSANURIPrefix.Trim()
+    $uri = $null
+    if ([string]::IsNullOrWhiteSpace($resolvedApiUrl) -or
+        -not [System.Uri]::TryCreate($resolvedApiUrl, [System.UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne "https" -or
+        [string]::IsNullOrWhiteSpace($uri.Host) -or
+        -not [string]::IsNullOrWhiteSpace($uri.UserInfo) -or
+        -not [string]::IsNullOrWhiteSpace($uri.Query) -or
+        -not [string]::IsNullOrWhiteSpace($uri.Fragment)) {
+        throw "TPM renewal requires a canonical HTTPS -AutoEnrollApiUrl."
+    }
+    if ([string]::IsNullOrWhiteSpace($resolvedSubjectSuffix) -and
+        [string]::IsNullOrWhiteSpace($resolvedSANURIPrefix)) {
+        throw "TPM renewal requires AutoEnrollCertSubjectSuffix or AutoEnrollCertSANURIPrefix."
+    }
+
+    $Values["ENDPOINT_AGENT_AUTO_ENROLL_API_URL"] = $resolvedApiUrl
+    $Values["ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX"] = $resolvedSubjectSuffix
+    $Values["ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX"] = $resolvedSANURIPrefix
+}
+
 function Assert-ViewOnlyMaskRectBPS {
     param([string]$Value)
 
@@ -2258,9 +2289,6 @@ try {
         $serviceEnv = @{
             "ENDPOINT_AGENT_LOG_DIR" = $LogDir
             "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" = $resolvedMaintenanceTokenHash
-            "ENDPOINT_AGENT_AUTO_ENROLL_API_URL" = $AutoEnrollApiUrl
-            "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX" = $AutoEnrollCertSubjectSuffix
-            "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX" = $AutoEnrollCertSANURIPrefix
         }
     } else {
         # #108: an earlier AutoEnroll install may have left
@@ -2283,6 +2311,12 @@ try {
             "ENDPOINT_AGENT_MAINTENANCE_TOKEN_SHA256" = $resolvedMaintenanceTokenHash
         }
     }
+
+    Add-TPMRenewalServiceEnvironment `
+        -Values $serviceEnv `
+        -ApiUrl $AutoEnrollApiUrl `
+        -CertSubjectSuffix $AutoEnrollCertSubjectSuffix `
+        -CertSANURIPrefix $AutoEnrollCertSANURIPrefix
 
     Add-RemoteBridgeServiceEnvironment `
         -Values $serviceEnv `
