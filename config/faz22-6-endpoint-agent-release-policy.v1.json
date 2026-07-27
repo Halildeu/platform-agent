@@ -45,7 +45,7 @@
       "series_label": "v0.3",
       "immutable_releases": true
     },
-    "max_trusted_releases_per_day": 2,
+    "max_trusted_releases_per_day": 3,
     "require_main_ancestor": true,
     "require_tag_protection": true,
     "require_post_publish_verifier": true,
