@@ -346,9 +346,6 @@ if ($RemoteBridgeEnabled) {
 $installArgs = @{}
 if ($AutoEnroll) {
     $installArgs["AutoEnroll"] = $true
-    $installArgs["AutoEnrollApiUrl"] = $AutoEnrollApiUrl
-    $installArgs["AutoEnrollCertSubjectSuffix"] = $AutoEnrollCertSubjectSuffix
-    $installArgs["AutoEnrollCertSANURIPrefix"] = $AutoEnrollCertSANURIPrefix
     $installArgs["AutoEnrollJitterSeconds"] = $AutoEnrollJitterSeconds
 } else {
     $token = Get-EnrollmentToken -Token $EnrollmentToken
@@ -358,6 +355,13 @@ if ($AutoEnroll) {
     $installArgs["ApiUrl"] = $ApiUrl
     $installArgs["EnrollmentToken"] = $token
 }
+# Browser-managed TPM certificate renewal uses the same mTLS endpoint and
+# certificate selector after either bootstrap mode. Forward these non-secret
+# policy values for HMAC installs too, otherwise the running service correctly
+# fails closed and omits RENEW_TPM_CERTIFICATE from its capabilities.
+$installArgs["AutoEnrollApiUrl"] = $AutoEnrollApiUrl
+$installArgs["AutoEnrollCertSubjectSuffix"] = $AutoEnrollCertSubjectSuffix
+$installArgs["AutoEnrollCertSANURIPrefix"] = $AutoEnrollCertSANURIPrefix
 if ($Start) {
     $installArgs["Start"] = $true
 }

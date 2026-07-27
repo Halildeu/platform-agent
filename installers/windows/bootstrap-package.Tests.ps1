@@ -190,11 +190,14 @@ Describe "Get-RemoteBridgeAttestationEvidence" {
 }
 
 Describe "Managed policy passthrough contract" {
-    It "exposes every remote-bridge and self-update installer policy parameter" {
+    It "exposes every TPM renewal, remote-bridge and self-update installer policy parameter" {
         $parameterNames = @($script:bootstrapAst.ParamBlock.Parameters | ForEach-Object {
             $_.Name.VariablePath.UserPath
         })
         $required = @(
+            "AutoEnrollApiUrl",
+            "AutoEnrollCertSubjectSuffix",
+            "AutoEnrollCertSANURIPrefix",
             "RemoteBridgeMTLSCertSubjectSuffix",
             "RemoteBridgeMTLSCertSANURIPrefix",
             "RemoteBridgeOperationsEnabled",
@@ -222,6 +225,26 @@ Describe "Managed policy passthrough contract" {
             $needle = '$installArgs["' + $name + '"]'
             $script:bootstrapSource.Contains($needle) | Should Be $true
         }
+    }
+
+    It "forwards TPM renewal policy for both token and auto-enroll bootstrap modes" {
+        foreach ($name in @(
+            "AutoEnrollApiUrl",
+            "AutoEnrollCertSubjectSuffix",
+            "AutoEnrollCertSANURIPrefix"
+        )) {
+            $needle = '$installArgs["' + $name + '"]'
+            ([regex]::Matches($script:bootstrapSource, [regex]::Escape($needle))).Count |
+                Should Be 1
+        }
+
+        $tokenBranchEnd = $script:bootstrapSource.IndexOf(
+            '$installArgs["EnrollmentToken"] = $token'
+        )
+        $renewalPolicyStart = $script:bootstrapSource.IndexOf(
+            '$installArgs["AutoEnrollApiUrl"] = $AutoEnrollApiUrl'
+        )
+        $renewalPolicyStart | Should BeGreaterThan $tokenBranchEnd
     }
 
     It "forwards managed view-only policy into the install argument map" {
