@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -63,13 +64,84 @@ func TestLoadFromEnv_AutoEnrollOverrides(t *testing.T) {
 }
 
 func TestLoadFromEnv_AutoEnrollDefaultsEmpty(t *testing.T) {
-	// Ensure that without env vars the new fields are empty (the
-	// autoenroll.Defaults bake-in handles the production URL).
+	// An explicit blank is an operator-controlled fail-closed disable and must
+	// not be replaced by the managed self-update migration fallback.
 	t.Setenv("ENDPOINT_AGENT_AUTO_ENROLL_API_URL", "")
 	cfg := LoadFromEnv()
 	if cfg.AutoEnrollAPIURL != "" {
-		t.Fatalf("expected empty AutoEnrollAPIURL when env not set, got %q", cfg.AutoEnrollAPIURL)
+		t.Fatalf("expected explicit blank AutoEnrollAPIURL to remain empty, got %q", cfg.AutoEnrollAPIURL)
 	}
+}
+
+func TestLoadFromEnv_MigratesKnownManagedEndpointTPMRenewalPolicy(t *testing.T) {
+	unsetEnvForTest(t, "ENDPOINT_AGENT_AUTO_ENROLL_API_URL")
+	unsetEnvForTest(t, "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX")
+	unsetEnvForTest(t, "ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX")
+	t.Setenv("ENDPOINT_AGENT_API_URL", "https://testai.acik.com/api/v1/endpoint-agent")
+
+	cfg := LoadFromEnv()
+
+	if cfg.AutoEnrollAPIURL != "https://mtls.testai.acik.com/api/v1/endpoint-agent" {
+		t.Fatalf("AutoEnrollAPIURL = %q", cfg.AutoEnrollAPIURL)
+	}
+	if cfg.AutoEnrollCertSANURIPrefix != "adcomputer:" {
+		t.Fatalf("AutoEnrollCertSANURIPrefix = %q", cfg.AutoEnrollCertSANURIPrefix)
+	}
+}
+
+func TestManagedTPMRenewalFallbackIsBoundedAndFailClosed(t *testing.T) {
+	tests := []struct {
+		name       string
+		apiURL     string
+		wantURL    string
+		wantPrefix string
+		wantOK     bool
+	}{
+		{
+			name:       "test",
+			apiURL:     "https://testai.acik.com/api/v1/endpoint-agent",
+			wantURL:    "https://mtls.testai.acik.com/api/v1/endpoint-agent",
+			wantPrefix: "adcomputer:",
+			wantOK:     true,
+		},
+		{
+			name:       "production",
+			apiURL:     "https://ai.acik.com/api/v1/endpoint-agent",
+			wantURL:    "https://mtls.ai.acik.com/api/v1/endpoint-agent",
+			wantPrefix: "adcomputer:",
+			wantOK:     true,
+		},
+		{name: "unknown tenant", apiURL: "https://customer.example/api/v1/endpoint-agent"},
+		{name: "plaintext", apiURL: "http://testai.acik.com/api/v1/endpoint-agent"},
+		{name: "unexpected path", apiURL: "https://testai.acik.com/api/v2/endpoint-agent"},
+		{name: "userinfo", apiURL: "https://user@testai.acik.com/api/v1/endpoint-agent"},
+		{name: "query", apiURL: "https://testai.acik.com/api/v1/endpoint-agent?unsafe=1"},
+		{name: "custom port", apiURL: "https://testai.acik.com:8443/api/v1/endpoint-agent"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotURL, gotPrefix, gotOK := managedTPMRenewalFallback(tc.apiURL)
+			if gotURL != tc.wantURL || gotPrefix != tc.wantPrefix || gotOK != tc.wantOK {
+				t.Fatalf("managedTPMRenewalFallback(%q) = (%q, %q, %t), want (%q, %q, %t)",
+					tc.apiURL, gotURL, gotPrefix, gotOK, tc.wantURL, tc.wantPrefix, tc.wantOK)
+			}
+		})
+	}
+}
+
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	previous, existed := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv(key, previous)
+			return
+		}
+		_ = os.Unsetenv(key)
+	})
 }
 
 // AG-027 (Codex 019e6c0d iter-2 absorb) — INSTALL_SOFTWARE needs a

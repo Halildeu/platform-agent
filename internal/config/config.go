@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -259,6 +260,7 @@ func LoadFromEnv() Config {
 	cfg.AutoEnrollConfigPath = envString("ENDPOINT_AGENT_AUTO_ENROLL_CONFIG_PATH", cfg.AutoEnrollConfigPath)
 	cfg.AutoEnrollCertSubjectSuffix = envString("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX", cfg.AutoEnrollCertSubjectSuffix)
 	cfg.AutoEnrollCertSANURIPrefix = envString("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX", cfg.AutoEnrollCertSANURIPrefix)
+	applyManagedTPMRenewalFallback(&cfg)
 	cfg.SelfUpdateEnabled = envBool("ENDPOINT_AGENT_SELF_UPDATE_ENABLED", cfg.SelfUpdateEnabled)
 	cfg.SelfUpdateAllowedHosts = envCSV("ENDPOINT_AGENT_SELF_UPDATE_ALLOWED_HOSTS", cfg.SelfUpdateAllowedHosts)
 	cfg.SelfUpdateSignerThumbprints = envCSV("ENDPOINT_AGENT_SELF_UPDATE_SIGNER_THUMBPRINTS", cfg.SelfUpdateSignerThumbprints)
@@ -300,6 +302,49 @@ func LoadFromEnv() Config {
 	cfg.RemoteBridgeDeviceKeySignatureAlgorithm = envString("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_SIGNATURE_ALGORITHM", cfg.RemoteBridgeDeviceKeySignatureAlgorithm)
 	cfg.RemoteBridgeDeviceKeyChainDerB64 = envCSV("ENDPOINT_AGENT_REMOTE_BRIDGE_DEVICE_KEY_CHAIN_DER_B64", cfg.RemoteBridgeDeviceKeyChainDerB64)
 	return cfg
+}
+
+// applyManagedTPMRenewalFallback migrates agents installed before the
+// browser-managed TPM renewal policy was persisted in the Windows service
+// environment. It is deliberately limited to the two canonical managed
+// product endpoints. Explicit service environment values, including explicit
+// blanks used to disable the feature, always win.
+func applyManagedTPMRenewalFallback(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	_, apiConfigured := os.LookupEnv("ENDPOINT_AGENT_AUTO_ENROLL_API_URL")
+	_, subjectConfigured := os.LookupEnv("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX")
+	_, sanConfigured := os.LookupEnv("ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX")
+	if apiConfigured || subjectConfigured || sanConfigured {
+		return
+	}
+	apiURL, sanPrefix, ok := managedTPMRenewalFallback(cfg.APIURL)
+	if !ok {
+		return
+	}
+	cfg.AutoEnrollAPIURL = apiURL
+	cfg.AutoEnrollCertSANURIPrefix = sanPrefix
+}
+
+func managedTPMRenewalFallback(apiURL string) (string, string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(apiURL))
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Port() != "" ||
+		parsed.Path != "/api/v1/endpoint-agent" {
+		return "", "", false
+	}
+	var mtlsHost string
+	switch strings.ToLower(parsed.Hostname()) {
+	case "testai.acik.com":
+		mtlsHost = "mtls.testai.acik.com"
+	case "ai.acik.com":
+		mtlsHost = "mtls.ai.acik.com"
+	default:
+		return "", "", false
+	}
+	parsed.Host = mtlsHost
+	return parsed.String(), "adcomputer:", true
 }
 
 func (cfg Config) SelfUpdateCapabilityEnabled() bool {
