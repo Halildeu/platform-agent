@@ -137,6 +137,22 @@ func TestRenewTPMCertificateRejectsExpiredEnrollment(t *testing.T) {
 	}
 }
 
+func TestTPMRenewalChildArgsUseExplicitCertificateLessBootstrap(t *testing.T) {
+	opts := TPMRenewalOptions{
+		APIURL: "https://test.example/api/v1/endpoint-agent",
+	}
+	args := tpmRenewalChildArgs(opts)
+	want := []string{
+		"--auto-enroll-tpm",
+		"--tpm-bootstrap-server-tls",
+		"--api-url",
+		opts.APIURL,
+	}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
 func containsValue(value interface{}, wanted string) bool {
 	switch node := value.(type) {
 	case map[string]interface{}:

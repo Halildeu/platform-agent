@@ -5,10 +5,12 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"platform-agent/internal/config"
 	"platform-agent/internal/tpmenroll"
@@ -55,6 +57,56 @@ func tpmBackendStub(t *testing.T) http.Handler {
 		})
 	})
 	return mux
+}
+
+func TestNewTPMBootstrapServerTLSClientIsExplicitAndFailClosed(t *testing.T) {
+	client, err := newTPMBootstrapServerTLSClient(
+		"https://test.example/api/v1/endpoint-agent",
+	)
+	if err != nil {
+		t.Fatalf("newTPMBootstrapServerTLSClient: %v", err)
+	}
+	if client.Timeout != 30*time.Second {
+		t.Fatalf("timeout = %s, want 30s", client.Timeout)
+	}
+	if !errors.Is(
+		client.CheckRedirect(
+			&http.Request{},
+			[]*http.Request{{}},
+		),
+		http.ErrUseLastResponse,
+	) {
+		t.Fatal("server-TLS bootstrap client must refuse redirects")
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.TLSClientConfig == nil {
+		t.Fatal("server-TLS bootstrap client must have an explicit TLS transport")
+	}
+	if transport.TLSClientConfig.ServerName != "test.example" {
+		t.Fatalf("server name = %q", transport.TLSClientConfig.ServerName)
+	}
+	if transport.TLSClientConfig.MinVersion == 0 {
+		t.Fatal("minimum TLS version must be pinned")
+	}
+	if len(transport.TLSClientConfig.Certificates) != 0 {
+		t.Fatal("server-TLS bootstrap transport must not carry a client certificate")
+	}
+}
+
+func TestNewTPMBootstrapServerTLSClientRejectsNonCanonicalURLs(t *testing.T) {
+	for _, rawURL := range []string{
+		"http://test.example/api/v1/endpoint-agent",
+		"https://user@test.example/api/v1/endpoint-agent",
+		"https://test.example/api/v1/endpoint-agent?tenant=forged",
+		"https://test.example/api/v1/endpoint-agent#fragment",
+		"test.example/api/v1/endpoint-agent",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			if _, err := newTPMBootstrapServerTLSClient(rawURL); err == nil {
+				t.Fatalf("URL %q must be rejected", rawURL)
+			}
+		})
+	}
 }
 
 func TestRunTpmAutoEnrollWith_Success(t *testing.T) {
