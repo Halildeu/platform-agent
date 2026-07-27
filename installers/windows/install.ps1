@@ -100,11 +100,10 @@ param(
     [string]$BinaryUrl = "__INJECTED_BINARY_URL__",
     [string]$ExpectedSha256 = "__INJECTED_EXPECTED_SHA256__",
     [string]$ExpectedSignerThumbprint = "__INJECTED_EXPECTED_THUMBPRINT__",
-    # ValidateSet intentionally NOT used here: the un-patched sentinel
-    # value (`__INJECTED_SIGNING_TIER__`) must be allowed at param-bind
-    # time so the script parses cleanly when sentinels are still in
-    # place. Tier semantics are enforced in the URL-download branch
-    # below via an explicit allowlist (Codex 019e8284 iter-1 Q1).
+    # ValidateSet intentionally NOT used here: the un-patched signing-tier
+    # sentinel must be allowed at param-bind time so the script parses cleanly
+    # when sentinels are still in place. Tier semantics are enforced in the
+    # URL-download branch below via an explicit allowlist.
     [string]$SigningTier = "__INJECTED_SIGNING_TIER__",
     [string]$ReleaseTag = "__INJECTED_RELEASE_TAG__",
     # Explicit opt-in for lab-only-evidence (self-signed ephemeral
@@ -1405,7 +1404,12 @@ function Get-SelfUpdateSignerSha256ThumbprintFromBinary {
         [string]$ExpectedThumbprint
     )
 
-    if ([string]::IsNullOrWhiteSpace($ExpectedThumbprint) -or $ExpectedThumbprint -eq "__INJECTED_EXPECTED_THUMBPRINT__") {
+    # Keep the validation sentinel split so patch-installer-manifest.ps1 only
+    # replaces the parameter default. A global replacement of the contiguous
+    # token here would make every correctly patched release reject its own
+    # signer thumbprint as an unresolved sentinel.
+    $unpatchedExpectedThumbprint = "__INJECTED_" + "EXPECTED_THUMBPRINT__"
+    if ([string]::IsNullOrWhiteSpace($ExpectedThumbprint) -or $ExpectedThumbprint -eq $unpatchedExpectedThumbprint) {
         throw "-SelfUpdateEnabled requires explicit -SelfUpdateSignerThumbprints or release-patched -ExpectedSignerThumbprint."
     }
 
@@ -1934,7 +1938,7 @@ $resolvedSelfUpdateServiceName = if ([string]::IsNullOrWhiteSpace($SelfUpdateSer
 # mismatch ABORTs before any service or registry mutation.
 # ----------------------------------------------------------------------
 
-$injectedSentinel = "__INJECTED_BINARY_URL__"
+$injectedSentinel = "__INJECTED_" + "BINARY_URL__"
 $useUrlDownload = ($BinaryUrl -and $BinaryUrl -ne $injectedSentinel)
 $downloadTempPath = ""
 
@@ -2035,10 +2039,10 @@ if ($useUrlDownload) {
     # passed. We need the full quartet to be either real values or
     # explicit command-line overrides.
     foreach ($pair in @(
-        @{Name="ExpectedSha256";           Value=$ExpectedSha256;           Sentinel="__INJECTED_EXPECTED_SHA256__"},
-        @{Name="ExpectedSignerThumbprint"; Value=$ExpectedSignerThumbprint; Sentinel="__INJECTED_EXPECTED_THUMBPRINT__"},
-        @{Name="SigningTier";              Value=$SigningTier;              Sentinel="__INJECTED_SIGNING_TIER__"},
-        @{Name="ReleaseTag";               Value=$ReleaseTag;               Sentinel="__INJECTED_RELEASE_TAG__"}
+        @{Name="ExpectedSha256";           Value=$ExpectedSha256;           Sentinel=("__INJECTED_" + "EXPECTED_SHA256__")},
+        @{Name="ExpectedSignerThumbprint"; Value=$ExpectedSignerThumbprint; Sentinel=("__INJECTED_" + "EXPECTED_THUMBPRINT__")},
+        @{Name="SigningTier";              Value=$SigningTier;              Sentinel=("__INJECTED_" + "SIGNING_TIER__")},
+        @{Name="ReleaseTag";               Value=$ReleaseTag;               Sentinel=("__INJECTED_" + "RELEASE_TAG__")}
     )) {
         if (-not $pair.Value -or $pair.Value -eq $pair.Sentinel) {
             throw "-$($pair.Name) is required when -BinaryUrl is set (still at sentinel value)"
