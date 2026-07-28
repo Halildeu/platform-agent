@@ -11,12 +11,18 @@ import (
 
 	"platform-agent/internal/security"
 
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-const stopWaitTimeout = 30 * time.Second
+const (
+	stopWaitTimeout            = 30 * time.Second
+	applicationEventLogKeyPath = `SYSTEM\CurrentControlSet\Services\EventLog\Application`
+	eventCreateMessageFile     = `%SystemRoot%\System32\EventCreate.exe`
+	eventSourceSupportedTypes  = eventlog.Error | eventlog.Warning | eventlog.Info
+)
 
 func IsWindowsService() (bool, error) {
 	return svc.IsWindowsService()
@@ -56,8 +62,49 @@ func Install(options Options) error {
 	}
 	defer service.Close()
 
-	if err := eventlog.InstallAsEventCreate(options.Name, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil {
+	if err := ensureEventLogSource(options.Name); err != nil {
+		if cleanupErr := service.Delete(); cleanupErr != nil {
+			return fmt.Errorf(
+				"install event log source: %w; delete partial service %q: %v",
+				err,
+				options.Name,
+				cleanupErr,
+			)
+		}
 		return fmt.Errorf("install event log source: %w", err)
+	}
+	return nil
+}
+
+func ensureEventLogSource(name string) error {
+	applicationKey, err := registry.OpenKey(
+		registry.LOCAL_MACHINE,
+		applicationEventLogKeyPath,
+		registry.CREATE_SUB_KEY,
+	)
+	if err != nil {
+		return fmt.Errorf("open application event log registry key: %w", err)
+	}
+	defer applicationKey.Close()
+
+	return ensureEventLogSourceUnder(applicationKey, name)
+}
+
+func ensureEventLogSourceUnder(applicationKey registry.Key, name string) error {
+	sourceKey, _, err := registry.CreateKey(applicationKey, name, registry.SET_VALUE)
+	if err != nil {
+		return fmt.Errorf("create event source registry key %q: %w", name, err)
+	}
+	defer sourceKey.Close()
+
+	if err := sourceKey.SetDWordValue("CustomSource", 1); err != nil {
+		return fmt.Errorf("write event source CustomSource: %w", err)
+	}
+	if err := sourceKey.SetExpandStringValue("EventMessageFile", eventCreateMessageFile); err != nil {
+		return fmt.Errorf("write event source EventMessageFile: %w", err)
+	}
+	if err := sourceKey.SetDWordValue("TypesSupported", eventSourceSupportedTypes); err != nil {
+		return fmt.Errorf("write event source TypesSupported: %w", err)
 	}
 	return nil
 }
