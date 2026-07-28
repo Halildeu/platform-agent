@@ -334,17 +334,32 @@ func managedTPMRenewalFallback(apiURL string) (string, string, bool) {
 		parsed.Path != "/api/v1/endpoint-agent" {
 		return "", "", false
 	}
-	var mtlsHost string
 	switch strings.ToLower(parsed.Hostname()) {
 	case "testai.acik.com":
-		mtlsHost = "mtls.testai.acik.com"
 	case "ai.acik.com":
-		mtlsHost = "mtls.ai.acik.com"
 	default:
 		return "", "", false
 	}
-	parsed.Host = mtlsHost
+	// Browser-managed renewal starts without a usable client certificate by
+	// definition. Keep the one-use token + TPM proof bootstrap on the public
+	// product origin; the dedicated mTLS origin would reject the TLS handshake
+	// before the enrollment controller can validate that proof.
 	return parsed.String(), "adcomputer:", true
+}
+
+// TPMRenewalAPIURL returns the server-authenticated bootstrap origin used by
+// browser-dispatched certificate renewal. The regular API URL is preferred
+// because this flow starts without a usable client certificate; AutoEnrollAPIURL
+// remains the mTLS lifecycle origin for the normal auto-enroll runner.
+func (cfg Config) TPMRenewalAPIURL() string {
+	apiURL := strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/")
+	parsed, err := url.Parse(apiURL)
+	if err == nil && parsed.Scheme == "https" && parsed.Hostname() != "" &&
+		parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" &&
+		parsed.Path == "/api/v1/endpoint-agent" {
+		return apiURL
+	}
+	return strings.TrimRight(strings.TrimSpace(cfg.AutoEnrollAPIURL), "/")
 }
 
 func (cfg Config) SelfUpdateCapabilityEnabled() bool {

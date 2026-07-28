@@ -40,16 +40,24 @@ func platformRenewTPMCertificate(
 		"ENDPOINT_AGENT_ENROLLMENT_TOKEN="+req.EnrollmentToken,
 		"ENDPOINT_AGENT_AUTO_ENROLL_CERT_SUBJECT_SUFFIX="+opts.CertSubjectSuffix,
 		"ENDPOINT_AGENT_AUTO_ENROLL_CERT_SAN_URI_PREFIX="+opts.CertSANURIPrefix)
-	// TPM CLI output is deliberately discarded. The command result below is a
-	// bounded projection and never carries the enrollment token or child logs.
+	// Keep a bounded in-memory stderr sample only long enough to classify the
+	// failure. Raw child output is never returned, logged, or persisted.
+	var diagnostic boundedDiagnosticWriter
+	cmd.Stderr = &diagnostic
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return TPMRenewalResult{}, fmt.Errorf("TPM_RENEWAL_TIMEOUT")
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return TPMRenewalResult{}, fmt.Errorf("TPM_RENEWAL_PROCESS_FAILED_%d", exitErr.ExitCode())
+			return TPMRenewalResult{}, fmt.Errorf(
+				"%s",
+				classifyTPMRenewalChildFailure(diagnostic.String(), exitErr.ExitCode()),
+			)
 		}
-		return TPMRenewalResult{}, fmt.Errorf("TPM_RENEWAL_PROCESS_FAILED")
+		return TPMRenewalResult{}, fmt.Errorf(
+			"%s",
+			classifyTPMRenewalChildFailure(diagnostic.String(), -1),
+		)
 	}
 
 	certPEM, err := os.ReadFile(tpmenroll.DeviceClientCertPath())

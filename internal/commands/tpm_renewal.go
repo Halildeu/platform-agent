@@ -9,6 +9,7 @@ import (
 )
 
 const tpmEnrollmentTokenField = "enrollmentToken"
+const tpmRenewalDiagnosticLimit = 8 * 1024
 
 var enrollmentTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{32,512}$`)
 var enrollmentIDPattern = regexp.MustCompile(
@@ -33,6 +34,62 @@ type TPMRenewalResult struct {
 	CertificateSHA256   string    `json:"certificateSha256,omitempty"`
 	CertificateNotAfter time.Time `json:"certificateNotAfter,omitempty"`
 	RenewedAt           time.Time `json:"renewedAt,omitempty"`
+}
+
+type boundedDiagnosticWriter struct {
+	buf []byte
+}
+
+func (w *boundedDiagnosticWriter) Write(p []byte) (int, error) {
+	accepted := len(p)
+	remaining := tpmRenewalDiagnosticLimit - len(w.buf)
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		w.buf = append(w.buf, p...)
+	}
+	return accepted, nil
+}
+
+func (w *boundedDiagnosticWriter) String() string {
+	return string(w.buf)
+}
+
+func classifyTPMRenewalChildFailure(stderr string, exitCode int) string {
+	diagnostic := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(diagnostic, "tls: certificate required"):
+		return "TPM_RENEWAL_TLS_CLIENT_CERT_REQUIRED"
+	case strings.Contains(diagnostic, "x509: certificate signed by unknown authority"):
+		return "TPM_RENEWAL_TLS_TRUST_FAILED"
+	case strings.Contains(diagnostic, "build server-tls bootstrap client"):
+		return "TPM_RENEWAL_TLS_CLIENT_FAILED"
+	case strings.Contains(diagnostic, "open tpm device"),
+		strings.Contains(diagnostic, "tpmenroll: open tbs"):
+		return "TPM_RENEWAL_TPM_OPEN_FAILED"
+	case strings.Contains(diagnostic, "tpmenroll: create ek"):
+		return "TPM_RENEWAL_EK_CREATE_FAILED"
+	case strings.Contains(diagnostic, "tpmenroll: create ak"):
+		return "TPM_RENEWAL_AK_CREATE_FAILED"
+	case strings.Contains(diagnostic, "tpmenroll: create device key"):
+		return "TPM_RENEWAL_DEVICE_KEY_CREATE_FAILED"
+	case strings.Contains(diagnostic, "/enrollments/tpm/nonce returned 403"):
+		return "TPM_RENEWAL_NONCE_DENIED"
+	case strings.Contains(diagnostic, "/enrollments/tpm/nonce returned 429"):
+		return "TPM_RENEWAL_RATE_LIMITED"
+	case strings.Contains(diagnostic, "persist certificate"):
+		return "TPM_RENEWAL_CERT_PERSIST_FAILED"
+	case strings.Contains(diagnostic, "timeout"),
+		strings.Contains(diagnostic, "connection refused"),
+		strings.Contains(diagnostic, "no such host"):
+		return "TPM_RENEWAL_NETWORK_FAILED"
+	default:
+		if exitCode >= 0 {
+			return fmt.Sprintf("TPM_RENEWAL_PROCESS_FAILED_%d", exitCode)
+		}
+		return "TPM_RENEWAL_PROCESS_FAILED"
+	}
 }
 
 var renewTPMCertificateFn = platformRenewTPMCertificate

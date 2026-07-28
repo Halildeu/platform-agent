@@ -81,7 +81,7 @@ func TestLoadFromEnv_MigratesKnownManagedEndpointTPMRenewalPolicy(t *testing.T) 
 
 	cfg := LoadFromEnv()
 
-	if cfg.AutoEnrollAPIURL != "https://mtls.testai.acik.com/api/v1/endpoint-agent" {
+	if cfg.AutoEnrollAPIURL != "https://testai.acik.com/api/v1/endpoint-agent" {
 		t.Fatalf("AutoEnrollAPIURL = %q", cfg.AutoEnrollAPIURL)
 	}
 	if cfg.AutoEnrollCertSANURIPrefix != "adcomputer:" {
@@ -100,14 +100,14 @@ func TestManagedTPMRenewalFallbackIsBoundedAndFailClosed(t *testing.T) {
 		{
 			name:       "test",
 			apiURL:     "https://testai.acik.com/api/v1/endpoint-agent",
-			wantURL:    "https://mtls.testai.acik.com/api/v1/endpoint-agent",
+			wantURL:    "https://testai.acik.com/api/v1/endpoint-agent",
 			wantPrefix: "adcomputer:",
 			wantOK:     true,
 		},
 		{
 			name:       "production",
 			apiURL:     "https://ai.acik.com/api/v1/endpoint-agent",
-			wantURL:    "https://mtls.ai.acik.com/api/v1/endpoint-agent",
+			wantURL:    "https://ai.acik.com/api/v1/endpoint-agent",
 			wantPrefix: "adcomputer:",
 			wantOK:     true,
 		},
@@ -126,6 +126,26 @@ func TestManagedTPMRenewalFallbackIsBoundedAndFailClosed(t *testing.T) {
 					tc.apiURL, gotURL, gotPrefix, gotOK, tc.wantURL, tc.wantPrefix, tc.wantOK)
 			}
 		})
+	}
+}
+
+func TestTPMRenewalAPIURLPrefersCertificateLessProductOrigin(t *testing.T) {
+	cfg := Config{
+		APIURL:           "https://testai.acik.com/api/v1/endpoint-agent",
+		AutoEnrollAPIURL: "https://mtls.testai.acik.com/api/v1/endpoint-agent",
+	}
+	if got := cfg.TPMRenewalAPIURL(); got != cfg.APIURL {
+		t.Fatalf("TPMRenewalAPIURL() = %q, want %q", got, cfg.APIURL)
+	}
+}
+
+func TestTPMRenewalAPIURLFallsBackToAutoEnrollOrigin(t *testing.T) {
+	cfg := Config{
+		APIURL:           "https://localhost:8080/api/v1/agent",
+		AutoEnrollAPIURL: "https://bootstrap.customer.example/api/v1/endpoint-agent/",
+	}
+	if got := cfg.TPMRenewalAPIURL(); got != "https://bootstrap.customer.example/api/v1/endpoint-agent" {
+		t.Fatalf("TPMRenewalAPIURL() = %q", got)
 	}
 }
 

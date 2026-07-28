@@ -153,6 +153,58 @@ func TestTPMRenewalChildArgsUseExplicitCertificateLessBootstrap(t *testing.T) {
 	}
 }
 
+func TestClassifyTPMRenewalChildFailureIsBoundedAndSecretFree(t *testing.T) {
+	token := strings.Repeat("secret-token-", 1024)
+	var diagnostic boundedDiagnosticWriter
+	_, err := diagnostic.Write([]byte(
+		"tpm auto-enroll: enroll: POST /enrollments/tpm/nonce returned 403: " + token,
+	))
+	if err != nil {
+		t.Fatalf("write diagnostic: %v", err)
+	}
+	if len(diagnostic.String()) > tpmRenewalDiagnosticLimit {
+		t.Fatalf("diagnostic length = %d", len(diagnostic.String()))
+	}
+	code := classifyTPMRenewalChildFailure(diagnostic.String(), 1)
+	if code != "TPM_RENEWAL_NONCE_DENIED" {
+		t.Fatalf("code = %q", code)
+	}
+	if strings.Contains(code, token) {
+		t.Fatal("stable error code leaked child diagnostic")
+	}
+}
+
+func TestClassifyTPMRenewalChildFailureStages(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+		want   string
+	}{
+		{
+			name:   "client certificate required",
+			stderr: "remote error: tls: certificate required",
+			want:   "TPM_RENEWAL_TLS_CLIENT_CERT_REQUIRED",
+		},
+		{
+			name:   "tpm open",
+			stderr: "tpm auto-enroll: open TPM device: tpmenroll: open TBS",
+			want:   "TPM_RENEWAL_TPM_OPEN_FAILED",
+		},
+		{
+			name:   "unknown",
+			stderr: "unexpected child failure",
+			want:   "TPM_RENEWAL_PROCESS_FAILED_7",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyTPMRenewalChildFailure(tt.stderr, 7); got != tt.want {
+				t.Fatalf("classifyTPMRenewalChildFailure() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func containsValue(value interface{}, wanted string) bool {
 	switch node := value.(type) {
 	case map[string]interface{}:

@@ -257,7 +257,7 @@ func newExecutor(cfg config.Config) *commands.LocalExecutor {
 		},
 	)
 	executor.ConfigureTPMRenewal(commands.TPMRenewalOptions{
-		APIURL:            cfg.AutoEnrollAPIURL,
+		APIURL:            cfg.TPMRenewalAPIURL(),
 		CertSubjectSuffix: cfg.AutoEnrollCertSubjectSuffix,
 		CertSANURIPrefix:  cfg.AutoEnrollCertSANURIPrefix,
 	})
