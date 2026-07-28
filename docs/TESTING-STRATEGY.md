@@ -182,10 +182,12 @@ ile rapor).
 
 `endpoint-agent diagnose winget-egress` AG-026A read-only WinGet
 source/egress preflight calistirir; `winget source list` (fixed argv),
-`winget show --id 7zip.7zip --exact --disable-interactivity` (sabit
-package id), ve hard-coded `DefaultEgressTargets` listesine karsi
-DNS/TCP/HTTPS reachability probleri uretip JSON olarak stdout'a dump
-eder. Exit code probe outcome'una BAGLI DEGIL — error isolation
+`winget show --id 7zip.7zip --exact --accept-source-agreements
+--disable-interactivity` (sabit package id; LocalSystem WinGet profili
+icin kaynak sozlesmesi non-interactive kabul edilir), ve hard-coded
+`DefaultEgressTargets` listesine karsi DNS/TCP/HTTPS reachability
+probleri uretip JSON olarak stdout'a dump eder. Exit code probe
+outcome'una BAGLI DEGIL — error isolation
 payload icindeki `probeError` / `packageQuery.errorReason` /
 `egress.{dns,tcp,https}[*].errorReason` alanlarinda yasar.
 
@@ -244,7 +246,7 @@ AG-026A hard boundary (Codex 019e6b5d plan-time AGREE kilit sart +
    (`TestSourceEgressOptionsHasNoOverrideFields` reflection ile
    PackageID/Targets alanlarinin geri eklenmesini engeller).
 3. Argv pinning: `source list` icin tam `["source","list"]`, `show` icin
-   `["show","--id",FixedPackageQueryID,"--exact","--disable-interactivity"]`
+   `["show","--id",FixedPackageQueryID,"--exact","--accept-source-agreements","--disable-interactivity"]`
    (`TestRunSourceEgressFixedSourceListArgv` + `TestRunSourceEgressFixedPackageQueryArgv`).
 4. Overall timeout enforcement: root `context.WithTimeout(opts.Timeout)`
    her sub-probe'u clamp eder; per-probe slice 250ms floor ile remaining

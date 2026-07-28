@@ -333,9 +333,10 @@ kullanir. AG-025H lightweight contract bozulmaz.
 
 `includeWinGetEgress=true`: inventory.wingetEgress blogu attach edilir;
 agent `winget source list` (read-only fixed argv) + `winget show --id
-7zip.7zip --exact --disable-interactivity` (sabit package id) +
-hard-coded egress hostname listesine karsi DNS/TCP/HTTPS reachability
-probleri calistirir.
+7zip.7zip --exact --accept-source-agreements --disable-interactivity`
+(sabit package id; LocalSystem WinGet profili icin kaynak sozlesmesi
+non-interactive kabul edilir) + hard-coded egress hostname listesine
+karsi DNS/TCP/HTTPS reachability probleri calistirir.
 
 `inventory.wingetEgress` result detail ornegi:
 
