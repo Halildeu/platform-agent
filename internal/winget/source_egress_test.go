@@ -125,10 +125,16 @@ func TestRunSourceEgressFixedPackageQueryArgv(t *testing.T) {
 		HTTPCheck: stubHTTPChecker(200, nil),
 		Now:       deterministicNow(0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60),
 	})
-	// The argv must contain show, --id, FixedPackageQueryID, --exact,
-	// and --disable-interactivity. Order matters because winget is
-	// position-sensitive for the subcommand.
-	wantPrefix := []string{"show", "--id", FixedPackageQueryID, "--exact", "--disable-interactivity"}
+	// LocalSystem does not share the interactive user's accepted-source state,
+	// so the read-only query must accept source agreements explicitly before
+	// disabling interaction. Order matters because winget is position-sensitive.
+	wantPrefix := []string{
+		"show",
+		"--id", FixedPackageQueryID,
+		"--exact",
+		"--accept-source-agreements",
+		"--disable-interactivity",
+	}
 	if len(capturedShowArgs) != len(wantPrefix) {
 		t.Fatalf("show argv length = %d, want %d (%#v)", len(capturedShowArgs), len(wantPrefix), capturedShowArgs)
 	}

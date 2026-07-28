@@ -187,7 +187,9 @@ type NetworkCheck struct {
 // (endpoint-admin-service) treats `dns` / `tcp` / `https` as required
 // arrays when supported=true — a nil slice that omits to JSON silence
 // trips a 400
-//   "wingetEgress.egress.dns is required (array) when supported=true"
+//
+//	"wingetEgress.egress.dns is required (array) when supported=true"
+//
 // at result-submit, so the whole COLLECT_INVENTORY round-trip fails
 // and hardware ingest (BE-022 V14) is also dropped because the
 // command result never persists. Defensive shape — always emit `[]`
@@ -544,7 +546,9 @@ func splitByColumns(line string, columns []int) []string {
 }
 
 // runPackageQuery executes `winget show --id <FixedPackageQueryID>`
-// with the package id pinned to the hard-coded constant.
+// with the package id pinned to the hard-coded constant. Source agreements
+// are accepted explicitly because the service runs as LocalSystem, whose
+// first-use state is independent from the interactive user's WinGet profile.
 //
 // Codex 019e6b70 iter-1 P2#4 absorb: the success criterion is now
 // "winget exited cleanly AND emitted the pinned package id (case-
@@ -563,7 +567,15 @@ func runPackageQuery(parent context.Context, opts SourceEgressOptions, wingetPat
 	defer cancel()
 	// FIXED ARGV. The package id is the constant — no SourceEgressOptions
 	// field can override it (Codex 019e6b70 iter-1 P1#2 / P2 absorb).
-	stdout, err := opts.Execute(ctx, wingetPath, "show", "--id", FixedPackageQueryID, "--exact", "--disable-interactivity")
+	stdout, err := opts.Execute(
+		ctx,
+		wingetPath,
+		"show",
+		"--id", FixedPackageQueryID,
+		"--exact",
+		"--accept-source-agreements",
+		"--disable-interactivity",
+	)
 	result.DurationMs = int(opts.Now().Sub(startedAt) / time.Millisecond)
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		result.Timeout = true

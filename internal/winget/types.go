@@ -11,10 +11,11 @@
 //     `winget features`, `winget complete`, `winget debug`, or any
 //     `winget source` mutation (`add`, `remove`, `update`, `reset`).
 //   - Read-only surface allowed:
-//       * AG-026 `Detect` → `winget --version` (fixed argv).
-//       * AG-026A `DetectSourceEgress` → `winget source list` (fixed
-//         argv) + `winget show --id 7zip.7zip --exact
-//         --disable-interactivity` (hard-coded package id).
+//   - AG-026 `Detect` → `winget --version` (fixed argv).
+//   - AG-026A `DetectSourceEgress` → `winget source list` (fixed
+//     argv) + `winget show --id 7zip.7zip --exact
+//     --accept-source-agreements --disable-interactivity` (hard-coded
+//     package id; LocalSystem source acceptance is explicit).
 //     Every argv element is constructed inside this package — no
 //     caller path can inject an alternative subcommand or argument.
 //   - `availableInCurrentContext` and `systemContextReady` (AG-026)
