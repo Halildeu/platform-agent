@@ -265,8 +265,9 @@ type VersionDecision struct {
 //   - current/target/maxSeen must parse as SemVer, else POLICY_VERSION_UNPARSEABLE
 //     (an unparseable version is never treated as 0);
 //   - target must be strictly greater than maxSeen (anti-replay of old signed
-//     releases) when maxSeen is non-empty, else POLICY_VERSION_REPLAY;
-//   - target == current => Noop (already current);
+//     releases) when maxSeen is non-empty, except that
+//     target == current >= maxSeen is an idempotent Noop;
+//   - target == current >= maxSeen => Noop (already current);
 //   - target < current => POLICY_VERSION_DOWNGRADE (rollback is a separate,
 //     narrower command, out of AG-029 scope).
 //
@@ -281,18 +282,25 @@ func EvaluateVersionPolicy(current, target, maxSeen string) VersionDecision {
 	if err != nil {
 		return VersionDecision{Code: ErrVersionUnparseable, Reason: "target version is not parseable semver"}
 	}
-	if strings.TrimSpace(maxSeen) != "" {
+	var maxSeenVersion Version
+	hasMaxSeen := strings.TrimSpace(maxSeen) != ""
+	if hasMaxSeen {
 		ms, err := ParseVersion(maxSeen)
 		if err != nil {
 			return VersionDecision{Code: ErrVersionUnparseable, Reason: "maxSeen version is not parseable semver"}
 		}
-		if Compare(tgt, ms) <= 0 {
-			return VersionDecision{Code: ErrVersionReplay, Reason: "target <= maxSeenVersion (anti-replay)"}
+		maxSeenVersion = ms
+	}
+	if Compare(tgt, cur) == 0 {
+		if hasMaxSeen && Compare(tgt, maxSeenVersion) < 0 {
+			return VersionDecision{Code: ErrVersionReplay, Reason: "target < maxSeenVersion (anti-replay)"}
 		}
+		return VersionDecision{Noop: true, Reason: "target == current (already current)"}
+	}
+	if hasMaxSeen && Compare(tgt, maxSeenVersion) <= 0 {
+		return VersionDecision{Code: ErrVersionReplay, Reason: "target <= maxSeenVersion (anti-replay)"}
 	}
 	switch Compare(tgt, cur) {
-	case 0:
-		return VersionDecision{Noop: true, Reason: "target == current (already current)"}
 	case -1:
 		return VersionDecision{Code: ErrVersionDowngrade, Reason: "target < current (downgrade refused)"}
 	default:

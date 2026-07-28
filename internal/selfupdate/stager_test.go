@@ -261,16 +261,15 @@ func TestStage_GateRefusals(t *testing.T) {
 		{"non-windows platform", func(s *Stager, _ *UpdateAgentPayload) { s.GOOS = "linux" }, "1.0.0", StageFailed, ErrUnsupportedPlatform},
 		{"missing url (shape)", func(_ *Stager, p *UpdateAgentPayload) { p.BinaryURL = "" }, "1.0.0", StageFailed, ErrURLRejected},
 		{"lab tier without opt-in", func(_ *Stager, p *UpdateAgentPayload) { p.SigningTier = TierLabOnlyEvidence }, "1.0.0", StageFailed, ErrLabTierRefused},
-		// downgrade/noop isolate the version gate from anti-replay by clearing
-		// the high-water mark (first-install state), since EvaluateVersionPolicy
-		// checks maxSeen BEFORE the downgrade/noop branches — a target below or
-		// equal to a non-empty maxSeen is (correctly) a REPLAY, covered below.
+		// Downgrade isolates the version gate from anti-replay by clearing the
+		// high-water mark. An already-active target equal to both current and
+		// maxSeen is intentionally an idempotent no-op.
 		{"downgrade", func(s *Stager, p *UpdateAgentPayload) {
 			s.HighWater = fakeHighWater{maxSeen: ""}
 			p.TargetVersion = "0.9.0"
 		}, "1.0.0", StageFailed, ErrVersionDowngrade},
 		{"noop already current", func(s *Stager, p *UpdateAgentPayload) {
-			s.HighWater = fakeHighWater{maxSeen: ""}
+			s.HighWater = fakeHighWater{maxSeen: "1.0.0"}
 			p.TargetVersion = "1.0.0"
 		}, "1.0.0", StageNoopCurrent, ""},
 		{"replay (<= maxSeen)", func(s *Stager, p *UpdateAgentPayload) {
