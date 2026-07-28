@@ -58,7 +58,7 @@ jobs:
       proceed: ${{ steps.c.outputs.proceed }}
       release_class: ${{ steps.policy.outputs.release_class }}
       source_commit: ${{ steps.policy.outputs.source_commit }}
-      previous_release: ${{ steps.policy.outputs.previous_release }}
+      previous_release: ${{ steps.recovery.outputs.previous_release }}
       frozen_train_evidence_count: ${{ steps.policy.outputs.frozen_train_evidence_count }}
       daily_trusted_release_count: ${{ steps.policy.outputs.daily_trusted_release_count }}
       historical_recovery: ${{ steps.recovery.outputs.historical_recovery }}
@@ -122,12 +122,15 @@ jobs:
         env:
           TAG: ${{ steps.c.outputs.tag }}
           HISTORICAL_RECOVERY: ${{ github.event.inputs.historical_recovery }}
+          POLICY_PREVIOUS_RELEASE: ${{ steps.policy.outputs.previous_release }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          exec 3>>"$GITHUB_OUTPUT"
           mode="${HISTORICAL_RECOVERY:-false}"
-          echo "historical_recovery=$mode" >> "$GITHUB_OUTPUT"
-          echo "recovery_policy_commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "historical_recovery=$mode" >&3
+          echo "recovery_policy_commit=$GITHUB_SHA" >&3
+          echo "previous_release=$POLICY_PREVIOUS_RELEASE" >&3
 
           releases="$(
             gh release list --repo "${{ github.repository }}" --limit 100 \
@@ -137,7 +140,7 @@ jobs:
             printf '%s' "$releases" \
               | jq -er '.[] | select(.isLatest == true and .isDraft == false and .isPrerelease == false and .isImmutable == true) | .tagName'
           )"
-          echo "latest_release_before=$latest" >> "$GITHUB_OUTPUT"
+          echo "latest_release_before=$latest" >&3
 
           [ "$mode" = "true" ] || exit 0
           [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] \
@@ -159,6 +162,20 @@ jobs:
           [ -n "$successor" ] \
             || { echo "::error::no published same-series successor exists for historical recovery of $TAG"; exit 1; }
 
+          predecessor_patch="$((target_patch - 1))"
+          [ "$predecessor_patch" -ge 0 ] \
+            || { echo "::error::historical recovery target $TAG has no valid predecessor patch"; exit 1; }
+          predecessor="${series}.${predecessor_patch}"
+          printf '%s' "$releases" | jq -e --arg predecessor "$predecessor" '
+            any(.[];
+              .tagName == $predecessor and
+              .isDraft == false and
+              .isPrerelease == false and
+              .isImmutable == true
+            )
+          ' >/dev/null \
+            || { echo "::error::historical recovery predecessor $predecessor is not an immutable published release"; exit 1; }
+
           manifest="$RUNNER_TEMP/${successor}-release-manifest.json"
           gh release download "$successor" --repo "${{ github.repository }}" \
             --pattern release-manifest.json --output "$manifest"
@@ -168,7 +185,8 @@ jobs:
             (.source_commit | type == "string" and test("^[0-9a-f]{40}$"))
           ' "$manifest" >/dev/null \
             || { echo "::error::$successor immutable manifest does not bind previous_release=$TAG"; exit 1; }
-          echo "::notice::historical recovery authorized: $successor immutably references missing predecessor $TAG; Latest remains $latest"
+          echo "previous_release=$predecessor" >&3
+          echo "::notice::historical recovery authorized: $successor immutably references missing predecessor $TAG; recovered manifest predecessor is $predecessor; Latest remains $latest"
 
   build-unsigned-exe:
     name: Build UNSIGNED agent exe (windows-hosted)
@@ -604,19 +622,26 @@ jobs:
             echo "::error::GitHub release $TAG already exists; refusing to delete/recreate an immutable trusted release"
             exit 1
           fi
+          current_run_draft_id() {
+            gh api --paginate "repos/${{ github.repository }}/releases?per_page=100" \
+              | jq -sr --arg tag "$TAG" --arg marker "$RUN_MARKER" '
+                  [map(.[])[] |
+                    select(
+                      .draft == true and
+                      .tag_name == $tag and
+                      ((.body // "") | contains($marker))
+                    )
+                  ] |
+                  if length == 1 then .[0].id
+                  elif length == 0 then empty
+                  else error("multiple current-run drafts matched")
+                  end
+                '
+          }
           delete_current_run_draft() {
-            release_json="$(gh release view "$TAG" --json body,isDraft 2>/dev/null || true)"
-            if [ -z "$release_json" ]; then
-              return 0
-            fi
-            is_draft="$(printf '%s\n' "$release_json" | jq -r '.isDraft // false')"
-            body="$(printf '%s\n' "$release_json" | jq -r '.body // ""')"
-            if [ "$is_draft" = "true" ] && printf '%s\n' "$body" | grep -Fq "$RUN_MARKER"; then
-              gh release delete "$TAG" --yes --cleanup-tag=false >/dev/null 2>&1 || true
-              return 0
-            fi
-            echo "::error::refusing to delete GitHub release $TAG; it is not a current-run draft"
-            exit 1
+            release_id="$(current_run_draft_id)"
+            [ -n "$release_id" ] || return 0
+            gh api --method DELETE "repos/${{ github.repository }}/releases/$release_id"
           }
           publish_once() {
             gh release create "$TAG" --verify-tag \
@@ -625,7 +650,9 @@ jobs:
               --notes-file dist/RELEASE_NOTES.publish.md
             gh release upload "$TAG" "${ASSETS[@]}"
             if [ "$HISTORICAL_RECOVERY" = "true" ]; then
-              release_id="$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq '.id')"
+              release_id="$(current_run_draft_id)"
+              [ -n "$release_id" ] \
+                || { echo "::error::current-run historical draft release id not found"; return 1; }
               gh api --method PATCH "repos/${{ github.repository }}/releases/$release_id" \
                 -F draft=false -f make_latest=false >/dev/null
             else
@@ -636,7 +663,7 @@ jobs:
           for attempt in 1 2 3 4 5 6; do
             if publish_once; then ok=1; break; fi
             echo "::warning::release attempt $attempt failed — retrying in $((attempt*15))s"
-            gh release view "$TAG" >/dev/null 2>&1 && delete_current_run_draft || true
+            delete_current_run_draft
             sleep $((attempt*15))
           done
           [ "$ok" = "1" ] || { echo "::error::GitHub release failed after 6 attempts (artifact-host image already pushed; release is the secondary archive)"; exit 1; }
