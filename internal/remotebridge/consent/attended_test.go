@@ -47,6 +47,46 @@ func TestViewOnlyAttendedResponderGrantsOnlyAfterUserDecision(t *testing.T) {
 	}
 }
 
+func TestViewOnlyAttendedResponderKeepsPromptForProtectedCollectorWindow(t *testing.T) {
+	now := time.Unix(1000, 0)
+	var promptTimeout time.Duration
+	responder := NewViewOnlyAttendedResponderWithPrompt(func(_ context.Context, req PromptRequest) (PromptDecision, error) {
+		promptTimeout = req.Timeout
+		return PromptDecision{Granted: true, InteractiveSession: "wts-session-2"}, nil
+	}, func() time.Time { return now })
+
+	result, err := responder(context.Background(), viewOnlyPrompt("sess-collector-window", now.Add(5*time.Minute)))
+	if err != nil {
+		t.Fatalf("responder: %v", err)
+	}
+	if !result.GetGranted() {
+		t.Fatalf("result = %+v, want granted", result)
+	}
+	if promptTimeout != 4*time.Minute {
+		t.Fatalf("prompt timeout = %s, want 4m", promptTimeout)
+	}
+}
+
+func TestViewOnlyAttendedResponderUsesSoonerSignedExpiry(t *testing.T) {
+	now := time.Unix(1000, 0)
+	var promptTimeout time.Duration
+	responder := NewViewOnlyAttendedResponderWithPrompt(func(_ context.Context, req PromptRequest) (PromptDecision, error) {
+		promptTimeout = req.Timeout
+		return PromptDecision{Granted: true, InteractiveSession: "wts-session-2"}, nil
+	}, func() time.Time { return now })
+
+	result, err := responder(context.Background(), viewOnlyPrompt("sess-short-expiry", now.Add(90*time.Second)))
+	if err != nil {
+		t.Fatalf("responder: %v", err)
+	}
+	if !result.GetGranted() {
+		t.Fatalf("result = %+v, want granted", result)
+	}
+	if promptTimeout != 90*time.Second {
+		t.Fatalf("prompt timeout = %s, want 90s", promptTimeout)
+	}
+}
+
 func TestViewOnlyAttendedResponderDeniesUnsupportedCapabilitiesWithoutPrompt(t *testing.T) {
 	now := time.Unix(1000, 0)
 	called := false

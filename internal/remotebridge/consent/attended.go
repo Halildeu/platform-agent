@@ -11,7 +11,11 @@ import (
 )
 
 const (
-	defaultPromptTimeout = 2 * time.Minute
+	// The protected collector waits four minutes for attended consent. Keep
+	// the endpoint prompt available for that same bounded window so a locked
+	// Windows session cannot fail early while the signed request is still
+	// valid. The request expiry remains the tighter bound when it is sooner.
+	defaultPromptTimeout = 4 * time.Minute
 	defaultLeaseDuration = 5 * time.Minute
 )
 
