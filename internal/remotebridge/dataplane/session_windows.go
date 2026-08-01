@@ -74,7 +74,7 @@ func activeInteractiveSessionState() (uint32, bool, error) {
 // session via WTSSessionInfoEx. The supported endpoint baseline is Windows 10+
 // (the Windows 7/Server 2008 R2 reversed-flag defect is outside that baseline).
 func sessionLocked(session uint32) (bool, error) {
-	var buffer uintptr
+	var buffer *byte
 	var bytes uint32
 	r1, _, callErr := procWTSQuerySessionInformationW.Call(
 		0,
@@ -86,10 +86,10 @@ func sessionLocked(session uint32) (bool, error) {
 	if r1 == 0 {
 		return false, fmt.Errorf("%w: WTSQuerySessionInformationW: %v", ErrSessionDesktopStateUnknown, callErr)
 	}
-	if buffer == 0 {
+	if buffer == nil {
 		return false, fmt.Errorf("%w: empty WTSSessionInfoEx buffer", ErrSessionDesktopStateUnknown)
 	}
-	defer windows.WTSFreeMemory(buffer)
+	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(buffer)))
 	if bytes < uint32(unsafe.Sizeof(wtsInfoExW{})) {
 		return false, fmt.Errorf("%w: short WTSSessionInfoEx buffer: %d", ErrSessionDesktopStateUnknown, bytes)
 	}
