@@ -19,6 +19,8 @@ import (
 const tokenLaunchAccess = windows.TOKEN_DUPLICATE | windows.TOKEN_ASSIGN_PRIMARY |
 	windows.TOKEN_QUERY | windows.TOKEN_ADJUST_DEFAULT | windows.TOKEN_ADJUST_SESSIONID
 
+const localSystemSID = "S-1-5-18"
+
 // Faz 22.6 T-4 slice-3a-i — the service → interactive-session launcher. The
 // agent runs as a SYSTEM service in Session 0, which cannot GDI-capture the
 // logged-in user's interactive desktop (session 1). This launches a helper
@@ -102,6 +104,63 @@ func LaunchInActiveSession(exePath string, args ...string) (*LaunchedHelper, err
 	}
 	defer primaryTok.Close()
 
+	return launchWithToken(session, primaryTok, `winsta0\default`, exePath, args...)
+}
+
+// LaunchScreenViewHelper launches a VIEW_ONLY helper on the desktop currently
+// visible to the operator. Unlocked sessions retain the existing user-token /
+// default-desktop path. Locked sessions use a duplicated LocalSystem token
+// moved only to the target session and attach to winsta0\Winlogon, where the
+// lock screen and its mandatory warning are actually visible.
+func LaunchScreenViewHelper(session uint32, locked bool, exePath string, args ...string) (*LaunchedHelper, error) {
+	if err := VerifySessionDesktopState(session, locked); err != nil {
+		return nil, err
+	}
+	if !locked {
+		active, ok := activeInteractiveSessionId()
+		if !ok || active != session {
+			return nil, ErrNoInteractiveSession
+		}
+		var userTok windows.Token
+		if err := windows.WTSQueryUserToken(session, &userTok); err != nil {
+			if errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) {
+				return nil, fmt.Errorf("%w: %v", ErrPrivilegeMissing, err)
+			}
+			return nil, fmt.Errorf("%w: %v", ErrUserTokenUnavailable, err)
+		}
+		defer userTok.Close()
+		var primaryTok windows.Token
+		if err := windows.DuplicateTokenEx(userTok, tokenLaunchAccess, nil,
+			windows.SecurityImpersonation, windows.TokenPrimary, &primaryTok); err != nil {
+			return nil, fmt.Errorf("dataplane: DuplicateTokenEx: %w", err)
+		}
+		defer primaryTok.Close()
+		return launchWithToken(session, primaryTok, `winsta0\default`, exePath, args...)
+	}
+
+	var processTok windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), tokenLaunchAccess, &processTok); err != nil {
+		return nil, fmt.Errorf("%w: OpenProcessToken: %v", ErrPrivilegeMissing, err)
+	}
+	defer processTok.Close()
+	processUser, err := processTok.GetTokenUser()
+	if err != nil || processUser.User.Sid.String() != localSystemSID {
+		return nil, fmt.Errorf("%w: locked-desktop helper requires LocalSystem", ErrPrivilegeMissing)
+	}
+	var primaryTok windows.Token
+	if err := windows.DuplicateTokenEx(processTok, tokenLaunchAccess, nil,
+		windows.SecurityImpersonation, windows.TokenPrimary, &primaryTok); err != nil {
+		return nil, fmt.Errorf("dataplane: duplicate LocalSystem token: %w", err)
+	}
+	defer primaryTok.Close()
+	if err := windows.SetTokenInformation(primaryTok, windows.TokenSessionId,
+		(*byte)(unsafe.Pointer(&session)), uint32(unsafe.Sizeof(session))); err != nil {
+		return nil, fmt.Errorf("dataplane: bind LocalSystem token to session %d: %w", session, err)
+	}
+	return launchWithToken(session, primaryTok, `winsta0\Winlogon`, exePath, args...)
+}
+
+func launchWithToken(session uint32, primaryTok windows.Token, desktop, exePath string, args ...string) (*LaunchedHelper, error) {
 	var envBlock *uint16
 	if err := windows.CreateEnvironmentBlock(&envBlock, primaryTok, false); err != nil {
 		return nil, fmt.Errorf("dataplane: CreateEnvironmentBlock: %w", err)
@@ -118,7 +177,7 @@ func LaunchInActiveSession(exePath string, args ...string) (*LaunchedHelper, err
 	}
 	// Attach to the interactive window-station/desktop so a GDI capture (3a-iii)
 	// can read it; a bad/missing desktop would otherwise blank the capture.
-	deskPtr, err := windows.UTF16PtrFromString(`winsta0\default`)
+	deskPtr, err := windows.UTF16PtrFromString(desktop)
 	if err != nil {
 		return nil, fmt.Errorf("dataplane: desktop: %w", err)
 	}
