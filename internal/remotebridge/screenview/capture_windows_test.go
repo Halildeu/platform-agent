@@ -91,6 +91,34 @@ func TestMaybeRunScreenViewHelperFlagParsing(t *testing.T) {
 	}); !handled || code != 2 {
 		t.Fatalf("duplicate session binding must fail closed (true,2): handled=%v code=%d", handled, code)
 	}
+	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{
+		helperPipeFlag + "somepipe", helperNonceFlag + "abcd", helperSessionBindingFlag + validBinding,
+	}); !handled || code != 2 {
+		t.Fatalf("missing desktop binding must fail closed (true,2): handled=%v code=%d", handled, code)
+	}
+	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{
+		helperPipeFlag + "somepipe", helperNonceFlag + "abcd", helperSessionBindingFlag + validBinding,
+		helperDesktopFlag + "other",
+	}); !handled || code != 2 {
+		t.Fatalf("unknown desktop binding must fail closed (true,2): handled=%v code=%d", handled, code)
+	}
+	if handled, code := MaybeRunActiveSessionScreenViewHelper([]string{
+		helperPipeFlag + "somepipe", helperNonceFlag + "abcd", helperSessionBindingFlag + validBinding,
+		helperDesktopFlag + desktopDefault, helperDesktopFlag + desktopWinlogon,
+	}); !handled || code != 2 {
+		t.Fatalf("duplicate desktop binding must fail closed (true,2): handled=%v code=%d", handled, code)
+	}
+}
+
+func TestValidHelperDesktop(t *testing.T) {
+	if !validHelperDesktop(desktopDefault) || !validHelperDesktop(desktopWinlogon) {
+		t.Fatal("default and winlogon desktop bindings must be accepted")
+	}
+	for _, invalid := range []string{"", "other", `winsta0\\default`, `winsta0\\Winlogon`} {
+		if validHelperDesktop(invalid) {
+			t.Fatalf("desktop binding %q must be rejected", invalid)
+		}
+	}
 }
 
 // ipcFrameProducer replays the prefetched first frame, then reads framed frames off

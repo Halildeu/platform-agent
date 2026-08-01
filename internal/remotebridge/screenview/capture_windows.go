@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/windows"
+
 	"platform-agent/internal/remotebridge/dataplane"
 )
 
@@ -30,6 +32,9 @@ const (
 	helperNonceFlag          = "--rb-screenview-nonce="
 	helperMaskFlag           = "--rb-screenview-mask-bps="
 	helperSessionBindingFlag = "--rb-screenview-session-binding="
+	helperDesktopFlag        = "--rb-screenview-desktop="
+	desktopDefault           = "default"
+	desktopWinlogon          = "winlogon"
 
 	acceptTimeout      = 15 * time.Second       // bound the launch->dial handshake (Accept is ctx+timeout bounded)
 	firstFrameDeadline = 12 * time.Second       // the helper must banner-verify + capture a first frame within this
@@ -40,14 +45,18 @@ const (
 	indicatorBand      = 28                     // px: the in-frame "remote active" red band height (awareness)
 )
 
+func validHelperDesktop(desktop string) bool {
+	return desktop == desktopDefault || desktop == desktopWinlogon
+}
+
 // MaybeRunActiveSessionScreenViewHelper turns endpoint-agent into a short-lived
 // VIEW_ONLY screen-capture helper when launched with the helper flags (the service
 // passes a pipe name + launch nonce on argv). It returns (handled, exitCode);
 // (false, 0) when the process was NOT invoked as the helper (normal startup).
 // main() must call this before starting the service.
 func MaybeRunActiveSessionScreenViewHelper(args []string) (bool, int) {
-	var pipeName, nonceHex, maskRaw, sessionBinding string
-	pipeCount, nonceCount, maskCount, bindingCount := 0, 0, 0, 0
+	var pipeName, nonceHex, maskRaw, sessionBinding, desktop string
+	pipeCount, nonceCount, maskCount, bindingCount, desktopCount := 0, 0, 0, 0, 0
 	for _, a := range args {
 		switch {
 		case strings.HasPrefix(a, helperPipeFlag):
@@ -62,13 +71,16 @@ func MaybeRunActiveSessionScreenViewHelper(args []string) (bool, int) {
 		case strings.HasPrefix(a, helperSessionBindingFlag):
 			sessionBinding = strings.TrimPrefix(a, helperSessionBindingFlag)
 			bindingCount++
+		case strings.HasPrefix(a, helperDesktopFlag):
+			desktop = strings.TrimPrefix(a, helperDesktopFlag)
+			desktopCount++
 		}
 	}
-	if pipeCount == 0 && nonceCount == 0 && maskCount == 0 && bindingCount == 0 {
+	if pipeCount == 0 && nonceCount == 0 && maskCount == 0 && bindingCount == 0 && desktopCount == 0 {
 		return false, 0 // not a helper invocation
 	}
-	if pipeCount != 1 || nonceCount != 1 || maskCount > 1 || bindingCount != 1 ||
-		pipeName == "" || nonceHex == "" || !validAcceptanceWindowBinding(sessionBinding) {
+	if pipeCount != 1 || nonceCount != 1 || maskCount > 1 || bindingCount != 1 || desktopCount != 1 ||
+		pipeName == "" || nonceHex == "" || !validAcceptanceWindowBinding(sessionBinding) || !validHelperDesktop(desktop) {
 		return true, 2 // partial flags = malformed launch
 	}
 	maskPolicy := MaskPolicy{}
@@ -79,7 +91,7 @@ func MaybeRunActiveSessionScreenViewHelper(args []string) (bool, int) {
 			return true, 2
 		}
 	}
-	if err := runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding, maskPolicy); err != nil {
+	if err := runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding, desktop, maskPolicy); err != nil {
 		return true, 1
 	}
 	return true, 0
@@ -99,7 +111,7 @@ func writeBannerTermination(w io.Writer, bannerErr error) error {
 // runActiveSessionScreenViewHelper runs in the ACTIVE user session: dial+handshake,
 // show+self-verify the banner (fail-closed), then stream indicator-stamped
 // primary-monitor frames until the service closes the pipe, then a graceful EOF.
-func runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding string, maskPolicy MaskPolicy) error {
+func runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding, desktop string, maskPolicy MaskPolicy) error {
 	nonce, err := hex.DecodeString(nonceHex)
 	if err != nil {
 		return err
@@ -111,6 +123,17 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding string,
 		return err
 	}
 	defer func() { _ = conn.Close() }()
+	var helperSession uint32
+	if err := windows.ProcessIdToSessionId(uint32(os.Getpid()), &helperSession); err != nil {
+		return fmt.Errorf("screenview helper: resolve process session: %w", err)
+	}
+	wantLocked := desktop == desktopWinlogon
+	verifyDesktop := func() error {
+		return dataplane.VerifySessionDesktopState(helperSession, wantLocked)
+	}
+	if err := verifyDesktop(); err != nil {
+		return fmt.Errorf("screenview helper: desktop binding mismatch: %w", err)
+	}
 
 	// Endpoint awareness FIRST, fail-closed: show the "remote active" banner in the
 	// active desktop and SELF-VERIFY it is present + visible before ANY frame
@@ -178,6 +201,9 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding string,
 	}
 	var framesWritten int64
 	for {
+		if err := verifyDesktop(); err != nil {
+			return writeBannerTermination(conn, dataplane.ErrIndicatorLost)
+		}
 		if err := checkBannerAlive(); err != nil {
 			return writeBannerTermination(conn, err)
 		}
@@ -187,6 +213,9 @@ func runActiveSessionScreenViewHelper(pipeName, nonceHex, sessionBinding string,
 		}
 		if err := checkBannerAlive(); err != nil {
 			return writeBannerTermination(conn, err) // do NOT egress this frame
+		}
+		if err := verifyDesktop(); err != nil {
+			return writeBannerTermination(conn, dataplane.ErrIndicatorLost)
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if err := dataplane.WriteFrame(conn, f.Payload); err != nil {
@@ -296,7 +325,11 @@ func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
 		if err != nil {
 			return nil, newStartupError(failureHelperResolution, err)
 		}
-		sid, err := dataplane.ActiveSessionUserSID()
+		targetSession, locked, err := dataplane.ActiveInteractiveSessionState()
+		if err != nil {
+			return nil, newStartupError(failureActiveSession, err)
+		}
+		sid, err := dataplane.SessionUserSID(targetSession)
 		if err != nil {
 			return nil, newStartupError(failureActiveSession, err)
 		}
@@ -322,11 +355,12 @@ func NewWindowsProducerFactory(maskPolicy MaskPolicy) ProducerFactory {
 			helperPipeFlag + name,
 			helperNonceFlag + hex.EncodeToString(nonce),
 			helperSessionBindingFlag + sessionBinding,
+			helperDesktopFlag + map[bool]string{false: desktopDefault, true: desktopWinlogon}[locked],
 		}
 		if maskPolicy.Enabled() {
 			helperArgs = append(helperArgs, helperMaskFlag+maskPolicy.String())
 		}
-		helper, err := dataplane.LaunchInActiveSession(self, helperArgs...)
+		helper, err := dataplane.LaunchScreenViewHelper(targetSession, locked, self, helperArgs...)
 		if err != nil {
 			return nil, newStartupError(failureHelperLaunch, err)
 		}

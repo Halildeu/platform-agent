@@ -27,6 +27,13 @@ func ActiveSessionUserSID() (string, error) {
 	if !ok {
 		return "", ErrNoInteractiveSession
 	}
+	return SessionUserSID(session)
+}
+
+// SessionUserSID returns the logged-on user's SID for one already-selected
+// session. This prevents a lock-state check and pipe DACL from accidentally
+// referring to different sessions if active-session state changes between calls.
+func SessionUserSID(session uint32) (string, error) {
 	var tok windows.Token
 	if err := windows.WTSQueryUserToken(session, &tok); err != nil {
 		return "", fmt.Errorf("dataplane: WTSQueryUserToken: %w", err)
@@ -37,6 +44,12 @@ func ActiveSessionUserSID() (string, error) {
 		return "", fmt.Errorf("dataplane: GetTokenUser: %w", err)
 	}
 	return tu.User.Sid.String(), nil
+}
+
+// ActiveInteractiveSessionState is the screen-view-specific public projection
+// of the active session and its authoritative lock state.
+func ActiveInteractiveSessionState() (uint32, bool, error) {
+	return activeInteractiveSessionState()
 }
 
 // ListenSecurePipe creates a message-mode named pipe whose DACL is restricted to
