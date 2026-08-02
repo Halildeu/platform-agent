@@ -325,6 +325,19 @@ func TestHelloFirstSeqContiguousAndDefectClose(t *testing.T) {
 		t.Errorf("idle harness advertised %v, want none", ah.GetAdvertisedCapabilities())
 	}
 
+	var heartbeatAck *pb.Envelope
+	select {
+	case heartbeatAck = <-agentFrames:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no heartbeat acknowledgement within 3s")
+	}
+	if heartbeatAck.GetHeartbeat() == nil {
+		t.Fatalf("agent frame is %T, want Heartbeat", heartbeatAck.GetPayload())
+	}
+	if heartbeatAck.GetFrameSeq() != 1 {
+		t.Errorf("heartbeat frameSeq %d, want 1 (contiguous after hello)", heartbeatAck.GetFrameSeq())
+	}
+
 	var errFrame *pb.Envelope
 	select {
 	case errFrame = <-agentFrames:
@@ -337,8 +350,8 @@ func TestHelloFirstSeqContiguousAndDefectClose(t *testing.T) {
 	if got := errFrame.GetError().GetCode(); got != "unsupported-payload-in-idle" {
 		t.Errorf("defect code %q", got)
 	}
-	if errFrame.GetFrameSeq() != 1 {
-		t.Errorf("error frameSeq %d, want 1 (contiguous after hello)", errFrame.GetFrameSeq())
+	if errFrame.GetFrameSeq() != 2 {
+		t.Errorf("error frameSeq %d, want 2 (contiguous after heartbeat ACK)", errFrame.GetFrameSeq())
 	}
 	if errFrame.GetChannelType() != pb.ChannelType_CONTROL {
 		t.Errorf("error channel %v, want CONTROL", errFrame.GetChannelType())
@@ -377,6 +390,9 @@ func TestConfiguredConsentResponderSendsConsentResult(t *testing.T) {
 				ExpiryEpochMillis:   time.Now().Add(time.Minute).UnixMilli(),
 			}},
 		})
+		if _, err := s.Recv(); err != nil { // heartbeat acknowledgement
+			return err
+		}
 		frame, err := s.Recv()
 		if err != nil {
 			return err
@@ -411,8 +427,8 @@ func TestConfiguredConsentResponderSendsConsentResult(t *testing.T) {
 	if !result.GetConsentResult().GetGranted() {
 		t.Fatal("ConsentResult granted=false, want true")
 	}
-	if result.GetFrameSeq() != 1 {
-		t.Fatalf("ConsentResult frameSeq = %d, want 1", result.GetFrameSeq())
+	if result.GetFrameSeq() != 2 {
+		t.Fatalf("ConsentResult frameSeq = %d, want 2", result.GetFrameSeq())
 	}
 }
 
@@ -439,6 +455,9 @@ func TestConfiguredDeviceKeyResponderSendsAttestationResponse(t *testing.T) {
 				ProtocolVersion:      "device-key-session-v1",
 			}},
 		})
+		if _, err := s.Recv(); err != nil { // heartbeat acknowledgement
+			return err
+		}
 		frame, err := s.Recv()
 		if err != nil {
 			return err
@@ -506,6 +525,14 @@ func TestDeviceKeyChallengeWithoutResponderIsAProtocolDefect(t *testing.T) {
 	}
 	start(t, script, nil) // nil DeviceKeyResponder = default-off
 
+	select {
+	case heartbeatAck := <-agentFrames:
+		if heartbeatAck.GetHeartbeat() == nil {
+			t.Fatalf("first agent frame is %T, want Heartbeat", heartbeatAck.GetPayload())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no heartbeat acknowledgement within 3s")
+	}
 	select {
 	case frame := <-agentFrames:
 		if frame.GetDeviceKeyAttestationResponse() != nil {

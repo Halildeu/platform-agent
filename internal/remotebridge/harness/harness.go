@@ -442,6 +442,9 @@ func (h *Harness) connectOnce(ctx context.Context, deviceID string) (healthy boo
 			case actionHeartbeat:
 				interval := clampInterval(time.Duration(r.env.GetHeartbeat().GetHeartbeatIntervalMillis()) * time.Millisecond)
 				resetTimer(watchdog, interval*time.Duration(h.cfg.HeartbeatMissFactor))
+				if err := sender.sendHeartbeat(r.env.GetHeartbeat()); err != nil {
+					return healthy, fmt.Errorf("acknowledge broker heartbeat: %w", err)
+				}
 				if !healthy {
 					healthy = true
 					h.mu.Lock()
