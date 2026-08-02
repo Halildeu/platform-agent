@@ -56,6 +56,23 @@ func (s *controlSender) sendConsentResult(result *pb.ConsentResult) error {
 	})
 }
 
+// sendHeartbeat acknowledges a broker heartbeat on the same serialized CONTROL
+// stream. This gives the broker an inbound liveness signal; a server-side
+// StreamObserver accepting writes does not prove that the agent still receives
+// them after a half-open transport failure.
+func (s *controlSender) sendHeartbeat(heartbeat *pb.Heartbeat) error {
+	if heartbeat == nil {
+		return fmt.Errorf("heartbeat is required")
+	}
+	return s.send(&pb.Envelope{
+		Payload: &pb.Envelope_Heartbeat{Heartbeat: &pb.Heartbeat{
+			HeartbeatIntervalMillis:   heartbeat.GetHeartbeatIntervalMillis(),
+			LeaseExpiresAtEpochMillis: heartbeat.GetLeaseExpiresAtEpochMillis(),
+			ProtocolVersion:           heartbeat.GetProtocolVersion(),
+		}},
+	})
+}
+
 func (s *controlSender) sendAuditEvent(sessionID, eventType string) error {
 	eventAt := time.Now().UnixMilli()
 	canonical := sessionID + "\n" + eventType + "\n" + strconv.FormatInt(eventAt, 10)

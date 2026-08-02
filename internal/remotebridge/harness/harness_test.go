@@ -272,18 +272,22 @@ func TestNewRejectsMalformedConfiguredAttestationEvidence(t *testing.T) {
 // FIRST outbound frame is AgentHello at frameSeq 0 on CONTROL with the
 // advisory fields populated and capabilities empty; a broker-authoritative
 // payload (consent_prompt) while idle triggers an ErrorFrame at the NEXT
-// contiguous seq (1) and a stream close (Codex T-3 revision #3).
+// contiguous seq (1) and closes the stream.
 func TestHelloFirstSeqContiguousAndDefectClose(t *testing.T) {
 	hellos := make(chan *pb.Envelope, 16)
 	agentFrames := make(chan *pb.Envelope, 16)
 	closes := make(chan error, 16)
+	var connections atomic.Int64
 	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if connections.Add(1) > 1 {
+			<-s.Context().Done()
+			return nil
+		}
 		env, err := s.Recv()
 		if err != nil {
 			return err
 		}
 		hellos <- env
-		_ = s.Send(heartbeatEnv(60_000, 0))
 		_ = s.Send(consentPromptEnv())
 		for {
 			frame, err := s.Recv()
@@ -361,6 +365,45 @@ func TestHelloFirstSeqContiguousAndDefectClose(t *testing.T) {
 	})
 }
 
+func TestHeartbeatIsAcknowledgedWithContiguousSequence(t *testing.T) {
+	acknowledgements := make(chan *pb.Envelope, 1)
+	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if _, err := s.Recv(); err != nil {
+			return err
+		}
+		heartbeat := heartbeatEnv(60_000, 0)
+		heartbeat.GetHeartbeat().LeaseExpiresAtEpochMillis = 123_456
+		if err := s.Send(heartbeat); err != nil {
+			return err
+		}
+		ack, err := s.Recv()
+		if err != nil {
+			return err
+		}
+		acknowledgements <- ack
+		<-s.Context().Done()
+		return nil
+	}
+	start(t, script, nil)
+
+	select {
+	case ack := <-acknowledgements:
+		if ack.GetHeartbeat() == nil {
+			t.Fatalf("agent frame is %T, want Heartbeat", ack.GetPayload())
+		}
+		if ack.GetFrameSeq() != 1 {
+			t.Fatalf("heartbeat frameSeq = %d, want 1", ack.GetFrameSeq())
+		}
+		if ack.GetHeartbeat().GetHeartbeatIntervalMillis() != 60_000 ||
+			ack.GetHeartbeat().GetLeaseExpiresAtEpochMillis() != 123_456 ||
+			ack.GetHeartbeat().GetProtocolVersion() != ProtocolVersion {
+			t.Fatalf("heartbeat acknowledgement did not preserve broker liveness fields: %+v", ack.GetHeartbeat())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no heartbeat acknowledgement within 3s")
+	}
+}
+
 func TestConfiguredConsentResponderSendsConsentResult(t *testing.T) {
 	agentFrames := make(chan *pb.Envelope, 16)
 	script := func(s pb.RemoteBridge_ConnectServer) error {
@@ -377,6 +420,9 @@ func TestConfiguredConsentResponderSendsConsentResult(t *testing.T) {
 				ExpiryEpochMillis:   time.Now().Add(time.Minute).UnixMilli(),
 			}},
 		})
+		if _, err := s.Recv(); err != nil { // heartbeat acknowledgement
+			return err
+		}
 		frame, err := s.Recv()
 		if err != nil {
 			return err
@@ -411,8 +457,8 @@ func TestConfiguredConsentResponderSendsConsentResult(t *testing.T) {
 	if !result.GetConsentResult().GetGranted() {
 		t.Fatal("ConsentResult granted=false, want true")
 	}
-	if result.GetFrameSeq() != 1 {
-		t.Fatalf("ConsentResult frameSeq = %d, want 1", result.GetFrameSeq())
+	if result.GetFrameSeq() != 2 {
+		t.Fatalf("ConsentResult frameSeq = %d, want 2", result.GetFrameSeq())
 	}
 }
 
@@ -439,6 +485,9 @@ func TestConfiguredDeviceKeyResponderSendsAttestationResponse(t *testing.T) {
 				ProtocolVersion:      "device-key-session-v1",
 			}},
 		})
+		if _, err := s.Recv(); err != nil { // heartbeat acknowledgement
+			return err
+		}
 		frame, err := s.Recv()
 		if err != nil {
 			return err
@@ -484,11 +533,15 @@ func TestConfiguredDeviceKeyResponderSendsAttestationResponse(t *testing.T) {
 // defect — the agent sends an error frame (never a forged attestation) and closes the stream.
 func TestDeviceKeyChallengeWithoutResponderIsAProtocolDefect(t *testing.T) {
 	agentFrames := make(chan *pb.Envelope, 16)
+	var connections atomic.Int64
 	script := func(s pb.RemoteBridge_ConnectServer) error {
+		if connections.Add(1) > 1 {
+			<-s.Context().Done()
+			return nil
+		}
 		if _, err := s.Recv(); err != nil {
 			return err
 		}
-		_ = s.Send(heartbeatEnv(60_000, 0))
 		_ = s.Send(&pb.Envelope{
 			ChannelType: pb.ChannelType_CONTROL,
 			SessionId:   "sess-dk",
