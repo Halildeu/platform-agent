@@ -52,6 +52,11 @@ type Runner struct {
 	// app runner path for tokenless mTLS / auto-enroll endpoints.
 	SelfUpdateActivationHook func(ctx context.Context, stage selfupdate.StageResult) error
 
+	// SelfUpdatePendingSweep re-drives the activation hook for a staged plan
+	// whose helper never ran (gitops#3483) — same recovery lane as the HMAC
+	// app runner. Called every iteration; the sweep itself throttles.
+	SelfUpdatePendingSweep func(ctx context.Context)
+
 	// httpClient and wireClient are built lazily on first use, because
 	// constructing them requires loading the cert (which may fail on the
 	// retry loop).
@@ -199,6 +204,9 @@ func NewRunner(cfg Config, cert CertProvider, reg RegistryReader, store ConfigSt
 // heartbeat, then one cert-auth command poll/result cycle. First-run jitter is
 // applied only when the persisted store is empty.
 func (r *Runner) RunOnce(ctx context.Context) error {
+	if r.SelfUpdatePendingSweep != nil {
+		r.SelfUpdatePendingSweep(ctx)
+	}
 	persisted, err := r.ConfigStore.Read(ctx)
 	if err != nil && !IsEmptyStore(err) {
 		return fmt.Errorf("read persisted config: %w", err)

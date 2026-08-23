@@ -99,6 +99,7 @@ func configureSelfUpdateActivationHook(runner *app.Runner, cfg config.Config, lo
 		return
 	}
 	runner.SelfUpdateActivationHook = makeSelfUpdateActivationHook(cfg, logger)
+	runner.SelfUpdatePendingSweep = makeSelfUpdatePendingSweep(cfg, logger)
 }
 
 func configureAutoEnrollSelfUpdateActivationHook(runner *autoenroll.Runner, cfg config.Config, logger *log.Logger) {
@@ -106,6 +107,48 @@ func configureAutoEnrollSelfUpdateActivationHook(runner *autoenroll.Runner, cfg 
 		return
 	}
 	runner.SelfUpdateActivationHook = makeSelfUpdateActivationHook(cfg, logger)
+	runner.SelfUpdatePendingSweep = makeSelfUpdatePendingSweep(cfg, logger)
+}
+
+// makeSelfUpdatePendingSweep builds the per-iteration recovery pass for
+// gitops#3483: a staged update whose activation helper never ran (measured
+// live: Windows App Control refused the staged exe, the hook fired once, and
+// the device sat three versions behind for 21 days while heartbeating
+// healthily). The sweep re-finds such plans and re-drives the SAME activation
+// hook, throttled, forever — a blocking policy can be lifted weeks later.
+//
+// The downgrade guard rests on cfg.AgentVersion rather than the high-water
+// file because the deployed hook launches the helper without
+// --high-water-path, so no watermark exists on the fleet's disks.
+func makeSelfUpdatePendingSweep(cfg config.Config, logger *log.Logger) func(context.Context) {
+	hook := makeSelfUpdateActivationHook(cfg, logger)
+	if hook == nil {
+		return nil // auto-activate disabled: staging stays operator-driven
+	}
+	stagingRoot := defaultSelfUpdateStagingRoot()
+	maxBytes := cfg.SelfUpdateHardMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = selfupdate.DefaultMaxUpdateBytes
+	}
+	currentVersion := cfg.AgentVersion
+	return func(ctx context.Context) {
+		stage, ok := selfupdate.FindPendingActivation(ctx, stagingRoot, maxBytes, currentVersion, nil)
+		if !ok {
+			return
+		}
+		if !selfupdate.ShouldAttemptActivationRetry(stagingRoot, stage.ActivationPlanID, time.Now(), selfupdate.DefaultActivationRetryInterval) {
+			return
+		}
+		selfupdate.RecordActivationAttempt(stagingRoot, stage.ActivationPlanID, time.Now())
+		if logger != nil {
+			logger.Printf("self-update pending activation retry activationPlanId=%s targetVersion=%s", stage.ActivationPlanID, stage.TargetVersion)
+		}
+		if err := hook(ctx, stage); err != nil {
+			if logger != nil {
+				logger.Printf("self-update pending activation retry failed activationPlanId=%s: %v", stage.ActivationPlanID, err)
+			}
+		}
+	}
 }
 
 func makeSelfUpdateActivationHook(cfg config.Config, logger *log.Logger) func(context.Context, selfupdate.StageResult) error {
