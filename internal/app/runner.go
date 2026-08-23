@@ -44,6 +44,11 @@ type Runner struct {
 	// UPDATE_AGENT staging result has been submitted to the backend. Production
 	// wiring launches a separate helper process; tests inject a recorder.
 	SelfUpdateActivationHook func(ctx context.Context, stage selfupdate.StageResult) error
+	// SelfUpdatePendingSweep re-drives the activation hook for a staged plan
+	// whose helper never ran (gitops#3483: the hook fires once at staging
+	// time; a helper the OS refuses to start left updates rotting for weeks
+	// with no retry). Called every iteration; the sweep itself throttles.
+	SelfUpdatePendingSweep func(ctx context.Context)
 	// credentialPersisted records whether the credential currently
 	// held by Client was successfully written to the on-disk store
 	// during the most recent enroll() call in THIS process lifetime.
@@ -73,6 +78,9 @@ func NewRunner(cfg config.Config, client *protocol.Client, logger *log.Logger) *
 }
 
 func (r *Runner) RunOnce(ctx context.Context) error {
+	if r.SelfUpdatePendingSweep != nil {
+		r.SelfUpdatePendingSweep(ctx)
+	}
 	if r.Client == nil {
 		return fmt.Errorf("protocol client is required")
 	}
