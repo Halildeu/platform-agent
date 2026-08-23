@@ -56,9 +56,11 @@ func writePendingPlan(t *testing.T, root, id, targetVersion string, mod time.Tim
 	if code != "" {
 		t.Fatalf("BuildActivationPlan: %s %s", code, reason)
 	}
-	if err := WriteActivationPlan(context.Background(), plan); err != nil {
-		t.Fatalf("WriteActivationPlan: %v", err)
-	}
+	// Same platform guard as the package's other activation-plan tests: the
+	// atomic plan write hardens ACLs on Windows and needs elevated/SYSTEM
+	// context, which the CI runner does not have (activation_plan_test.go
+	// skips identically). The logic under test is platform-neutral.
+	writeActivationPlanOrSkip(t, plan)
 	if err := os.Chtimes(plan.ActivationPlanPath, mod, mod); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
