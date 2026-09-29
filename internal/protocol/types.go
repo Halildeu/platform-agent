@@ -65,6 +65,14 @@ const (
 	// Windows (RuntimeCapabilitiesWithOptions). The agent applies the policy to
 	// every loaded interactive user hive (internal/displaypolicy).
 	CommandSetDisplayPolicy CommandType = "SET_DISPLAY_POLICY"
+	// CapabilitySetDisplayPolicyManagedAsset (platform-backend#1203) is a
+	// capability flag, not a dispatchable command. It is advertised next to
+	// SET_DISPLAY_POLICY only by an agent that can download, verify and store
+	// an uploaded wallpaper (assetRef "asset:sha256:<hex>"); the backend
+	// refuses a managed-asset proposal (422) for a device whose last heartbeat
+	// lacks it, so an agent that would treat the ref as a missing local path
+	// never receives one.
+	CapabilitySetDisplayPolicyManagedAsset CommandType = "SET_DISPLAY_POLICY_MANAGED_ASSET"
 	// CommandCollectBackupDryRun (Faz 22.8A, #117): endpoint backup DRY-RUN
 	// manifest. METADATA-ONLY — the agent lists what WOULD be eligible for
 	// backup (path-class / size / mtime-bucket / count) WITHOUT reading any

@@ -9,6 +9,7 @@ import (
 
 	"platform-agent/internal/commands"
 	"platform-agent/internal/config"
+	"platform-agent/internal/displaypolicy"
 	"platform-agent/internal/hmacstore"
 	"platform-agent/internal/inventory"
 	"platform-agent/internal/protocol"
@@ -62,7 +63,7 @@ type Runner struct {
 }
 
 func NewRunner(cfg config.Config, client *protocol.Client, logger *log.Logger) *Runner {
-	executor := newExecutor(cfg)
+	executor := newRunnerExecutor(cfg, client)
 	// AG-038: register the live agent config so the self-diagnostics probe
 	// reports the REAL AgentVersion + a hash of the REAL APIURL (not the
 	// "unknown" placeholder). CredentialID is recorded for credential-presence
@@ -85,7 +86,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("protocol client is required")
 	}
 	if r.Executor == nil {
-		r.Executor = newExecutor(r.Config)
+		r.Executor = newRunnerExecutor(r.Config, r.Client)
 	}
 	if r.StateTracker == nil {
 		r.StateTracker = state.NewTracker(state.StateStarting)
@@ -250,6 +251,16 @@ func boundedSubmitError(err *protocol.HTTPError) string {
 		return msg
 	}
 	return msg[:max]
+}
+
+// newRunnerExecutor is the HMAC runner's executor: the signed protocol client
+// is what downloads a managed wallpaper, so only this path can advertise it.
+func newRunnerExecutor(cfg config.Config, client *protocol.Client) *commands.LocalExecutor {
+	executor := newExecutor(cfg)
+	if client != nil {
+		executor.ConfigureManagedWallpaper(client, displaypolicy.DefaultAssetStore())
+	}
+	return executor
 }
 
 func newExecutor(cfg config.Config) *commands.LocalExecutor {

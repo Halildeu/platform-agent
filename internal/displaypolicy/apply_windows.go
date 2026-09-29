@@ -37,7 +37,7 @@ func Apply(_ context.Context, cmd Command) Result {
 		EffectiveState: effectiveNote,
 		Limitations: []string{
 			"v1 targets currently loaded user hives only; unloaded profiles are not applied",
-			"no wallpaper asset download in v1 (assetRef must be an existing local path)",
+			"a managed wallpaper is downloaded and hash-verified before any registry write; a local-path wallpaper must already exist on the endpoint",
 			"a registry write does not prove the interactive desktop visibly changed",
 		},
 	}

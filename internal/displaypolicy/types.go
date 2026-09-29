@@ -37,6 +37,10 @@ const (
 	StatusFailedNoTargetHive  FinalStatus = "FAILED_NO_TARGET_USER_HIVE"
 	StatusFailedRegistry      FinalStatus = "FAILED_REGISTRY"
 	StatusFailedUnsupportedOS FinalStatus = "FAILED_UNSUPPORTED_PLATFORM"
+	// StatusFailedAsset: a managed wallpaper could not be downloaded, did not
+	// verify against its hash/type, or could not be stored. No registry value
+	// is written in that case.
+	StatusFailedAsset FinalStatus = "FAILED_ASSET"
 )
 
 // Command is the SET_DISPLAY_POLICY payload the backend dispatches. The backend
@@ -60,14 +64,18 @@ type Screensaver struct {
 	ScrPath        string `json:"scrPath"`
 }
 
-// Wallpaper mirrors the backend wallpaper block. AssetRef in v1 is interpreted
-// as an existing absolute LOCAL path the agent can read (no asset download);
-// a UNC path is unsupported in v1.
+// Wallpaper mirrors the backend wallpaper block. AssetRef is either an existing
+// absolute LOCAL path the agent can read (UNC unsupported), or a managed ref
+// "asset:sha256:<hex>" naming an image uploaded to the backend
+// (platform-backend#1203), which the agent downloads and verifies against
+// AssetSha256 before any registry write.
 type Wallpaper struct {
 	Enabled          bool   `json:"enabled"`
 	Style            string `json:"style"`
 	UserCannotChange bool   `json:"userCannotChange"`
 	AssetRef         string `json:"assetRef"`
+	AssetSha256      string `json:"assetSha256,omitempty"`
+	ContentType      string `json:"contentType,omitempty"`
 }
 
 // Skipped records a scope the v1 writer deliberately did not target.
@@ -91,6 +99,9 @@ type Result struct {
 	Limitations    []string    `json:"limitations,omitempty"`
 	Errors         []string    `json:"errors,omitempty"`
 	Summary        string      `json:"summary"`
+	// Asset is set when the wallpaper was a managed (uploaded) image: which
+	// verified file the policy points at and whether it was downloaded now.
+	Asset *AssetOutcome `json:"asset,omitempty"`
 }
 
 const targetModel = "loaded-user-hives"
@@ -165,12 +176,58 @@ func Validate(cmd Command) error {
 		if _, ok := StyleToRegistryValue(w.Style); !ok {
 			return fmt.Errorf("SET_DISPLAY_POLICY: unknown wallpaper style %q", w.Style)
 		}
+		if IsManagedAssetRef(w.AssetRef) {
+			return validateManagedRef(w)
+		}
 		if !IsUsableLocalWallpaperPath(w.AssetRef) {
 			return fmt.Errorf("SET_DISPLAY_POLICY: wallpaper enabled but assetRef %q is not a usable local path "+
 				"(need a drive-rooted path like C:\\…; no UNC, relative or parent-traversal)", w.AssetRef)
 		}
 	}
 	return nil
+}
+
+// ManagedAssetRefPrefix marks an assetRef that names an uploaded image rather
+// than a path on the endpoint (mirrors the backend EndpointDisplayPolicyAsset).
+const ManagedAssetRefPrefix = "asset:sha256:"
+
+// IsManagedAssetRef reports whether ref names an uploaded (managed) image.
+func IsManagedAssetRef(ref string) bool {
+	return strings.HasPrefix(ref, ManagedAssetRefPrefix)
+}
+
+// validateManagedRef pins the managed ref to exactly one image: the hash in
+// the ref must be 64 lowercase hex characters and equal AssetSha256 (the value
+// the downloaded bytes are verified against), and the type must be one the
+// wallpaper policy renders. A disagreement would leave the agent unsure which
+// image it was told to show, so it is refused before anything is fetched.
+func validateManagedRef(w *Wallpaper) error {
+	hash := strings.TrimPrefix(w.AssetRef, ManagedAssetRefPrefix)
+	if !isLowerHexSha256(hash) {
+		return fmt.Errorf("SET_DISPLAY_POLICY: wallpaper assetRef %q is not %s<64 lowercase hex>",
+			w.AssetRef, ManagedAssetRefPrefix)
+	}
+	if w.AssetSha256 != hash {
+		return fmt.Errorf("SET_DISPLAY_POLICY: wallpaper assetSha256 does not match the hash in assetRef")
+	}
+	if _, ok := imageExtensions[w.ContentType]; !ok {
+		return fmt.Errorf("SET_DISPLAY_POLICY: wallpaper contentType %q is not image/png, image/jpeg or image/bmp",
+			w.ContentType)
+	}
+	return nil
+}
+
+func isLowerHexSha256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // IsAllowedScrPath reports whether p is one of the 6 built-in System32 .scr

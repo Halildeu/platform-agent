@@ -188,6 +188,60 @@ func (c *Client) SubmitResult(ctx context.Context, result CommandResult) error {
 	return c.do(ctx, reqCommandResult(result.CommandID), "", result.ToWire(), nil)
 }
 
+// assetDownloadTimeout bounds one wallpaper download. It is longer than the
+// default 30s client timeout because an image can be up to 10 MiB and some
+// endpoints sit on slow VPN links.
+const assetDownloadTimeout = 2 * time.Minute
+
+// FetchDisplayPolicyAsset downloads the managed wallpaper image named by
+// sha256 (platform-backend#1203), reading at most maxBytes. The backend serves
+// it only to a device whose approved policy names that hash; the caller must
+// still verify the bytes against the hash — the transport is not the proof.
+func (c *Client) FetchDisplayPolicyAsset(ctx context.Context, sha256 string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("asset size limit must be positive")
+	}
+	spec := reqDisplayPolicyAsset(sha256)
+	request, err := http.NewRequestWithContext(ctx, spec.method, c.baseURL.String()+spec.suffix, nil)
+	if err != nil {
+		return nil, err
+	}
+	// The backend answers with the image's own type; an application/json-only
+	// Accept would be refused with 406.
+	request.Header.Set("Accept", "image/png, image/jpeg, image/bmp")
+	if err := c.sign(request, spec.suffix, "", nil); err != nil {
+		return nil, err
+	}
+
+	httpClient := *c.httpClient
+	if httpClient.Timeout < assetDownloadTimeout {
+		httpClient.Timeout = assetDownloadTimeout
+	}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return nil, &HTTPError{
+			StatusCode: response.StatusCode,
+			Method:     spec.method,
+			Path:       spec.suffix,
+			Body:       strings.TrimSpace(string(data)),
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read asset body: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("asset is larger than the %d-byte limit", maxBytes)
+	}
+	return data, nil
+}
+
 // do executes one agent request. It dials the external path and, when the
 // request is signed, covers the backend-visible canonical path with an HMAC
 // signature.
