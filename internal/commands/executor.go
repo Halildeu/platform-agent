@@ -37,6 +37,10 @@ var uninstallWinGetFn = winget.UninstallWinGet
 // the seam to exercise the executor path without touching the registry.
 var applyDisplayPolicyFn = displaypolicy.Apply
 
+// resolveManagedWallpaperFn is the managed-wallpaper download seam
+// (platform-backend#1203); tests replace it to observe ordering.
+var resolveManagedWallpaperFn = displaypolicy.ResolveManagedWallpaper
+
 // updateAgentStageFn is the AG-029 executor seam. Production passes a
 // selfupdate.Stager configured from local trust policy; tests override this
 // function so the command wire can be exercised without network, Authenticode
@@ -141,6 +145,34 @@ type LocalExecutor struct {
 	Now               func() time.Time
 	UpdateAgentStager *selfupdate.Stager
 	TPMRenewal        *TPMRenewalOptions
+	// DisplayPolicyAssets and DisplayPolicyAssetStore download and keep managed
+	// wallpapers (platform-backend#1203). Set only by ConfigureManagedWallpaper.
+	DisplayPolicyAssets     displaypolicy.AssetFetcher
+	DisplayPolicyAssetStore displaypolicy.AssetStore
+}
+
+// ConfigureManagedWallpaper wires managed-wallpaper download and advertises
+// SET_DISPLAY_POLICY_MANAGED_ASSET, but only on a build that can apply a
+// display policy at all and only with both a fetcher and a store: the backend
+// sends a managed wallpaper exactly to agents that advertise it.
+func (e *LocalExecutor) ConfigureManagedWallpaper(fetch displaypolicy.AssetFetcher, store displaypolicy.AssetStore) {
+	if fetch == nil || store == nil || !containsCommandType(e.Capabilities, protocol.CommandSetDisplayPolicy) {
+		return
+	}
+	e.DisplayPolicyAssets = fetch
+	e.DisplayPolicyAssetStore = store
+	if !containsCommandType(e.Capabilities, protocol.CapabilitySetDisplayPolicyManagedAsset) {
+		e.Capabilities = append(e.Capabilities, protocol.CapabilitySetDisplayPolicyManagedAsset)
+	}
+}
+
+func containsCommandType(list []protocol.CommandType, want protocol.CommandType) bool {
+	for _, c := range list {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *LocalExecutor) ConfigureTPMRenewal(opts TPMRenewalOptions) {
@@ -486,10 +518,29 @@ func (e *LocalExecutor) Execute(ctx context.Context, command protocol.AgentComma
 			result.Summary = vErr.Error()
 			break
 		}
+		// A managed wallpaper is downloaded, verified and stored first; the
+		// registry writer then only ever sees that verified local file.
+		var asset *displaypolicy.AssetOutcome
+		if w := dpCmd.Wallpaper; w != nil && w.Enabled && displaypolicy.IsManagedAssetRef(w.AssetRef) {
+			outcome, err := resolveManagedWallpaperFn(ctx, w, e.DisplayPolicyAssets, e.DisplayPolicyAssetStore)
+			if err != nil {
+				failed := managedWallpaperFailure(dpCmd.Operation, err)
+				result.Status = protocol.CommandStatusFailed
+				result.Summary = failed.Summary
+				result.Details = map[string]interface{}{"displayPolicy": failed}
+				break
+			}
+			asset = &outcome
+		}
 		dpResult := applyDisplayPolicyFn(ctx, dpCmd)
+		dpResult.Asset = asset
 		result.Status = mapDisplayPolicyStatusToCommandStatus(dpResult.FinalStatus)
 		result.Summary = dpResult.Summary
 		result.Details = map[string]interface{}{"displayPolicy": dpResult}
+	case protocol.CapabilitySetDisplayPolicyManagedAsset:
+		// Advertised as a capability flag only; it is never a command.
+		result.Status = protocol.CommandStatusUnsupported
+		result.Summary = "SET_DISPLAY_POLICY_MANAGED_ASSET is a capability flag, not a command"
 	default:
 		result.Status = protocol.CommandStatusUnsupported
 		result.Summary = "Command is not implemented by this agent build"
@@ -514,6 +565,29 @@ func (e *LocalExecutor) now() time.Time {
 		return time.Now()
 	}
 	return e.Now()
+}
+
+// managedWallpaperErrorMax keeps the error text well inside the backend's
+// 1024-character result summary (AgentCommandResultRequest @Size): a download
+// error can carry up to 4 KiB of response body.
+const managedWallpaperErrorMax = 400
+
+// managedWallpaperFailure is the result for a managed wallpaper that could not
+// be downloaded, verified or stored. Nothing was written to the registry.
+func managedWallpaperFailure(operation string, err error) displaypolicy.Result {
+	msg := err.Error()
+	if len(msg) > managedWallpaperErrorMax {
+		msg = strings.ToValidUTF8(msg[:managedWallpaperErrorMax], "") + "…"
+	}
+	return displaypolicy.Result{
+		FinalStatus:   displaypolicy.StatusFailedAsset,
+		Operation:     operation,
+		TargetedSIDs:  []string{},
+		WrittenValues: []string{},
+		DeletedValues: []string{},
+		Errors:        []string{msg},
+		Summary:       "SET_DISPLAY_POLICY ENFORCE: managed wallpaper not applied (no registry change): " + msg,
+	}
 }
 
 // unmarshalDisplayPolicy converts the wire-side payload map into a

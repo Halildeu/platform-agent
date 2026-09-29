@@ -62,6 +62,17 @@ var (
 	reqNextCommand = agentRequest{method: http.MethodGet, suffix: "/commands/next", signed: true}
 )
 
+// reqDisplayPolicyAsset builds the signed GET /display-policy-assets/{sha256}
+// spec (platform-backend#1203). The backend serves the image only to a device
+// whose currently approved display policy names that hash.
+func reqDisplayPolicyAsset(sha256 string) agentRequest {
+	return agentRequest{
+		method: http.MethodGet,
+		suffix: "/display-policy-assets/" + url.PathEscape(sha256),
+		signed: true,
+	}
+}
+
 // reqCommandResult builds the signed POST /commands/{commandId}/result spec.
 func reqCommandResult(commandID string) agentRequest {
 	return agentRequest{
